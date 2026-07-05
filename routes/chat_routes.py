@@ -1,4 +1,4 @@
-"""Chat routes â€” /api/chat, /api/chat_stream, /api/inject_context, /api/search."""
+﻿"""Chat routes Ã¢â‚¬â€ /api/chat, /api/chat_stream, /api/inject_context, /api/search."""
 
 import asyncio
 import json
@@ -318,7 +318,7 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
 
     Covers the window between endpoint setup and the first chat send: the
     picker showed a model in the dropdown but the session record never got
-    written (Issue #587 â€” UI uses the cached endpoint list, not s.model).
+    written (Issue #587 Ã¢â‚¬â€ UI uses the cached endpoint list, not s.model).
     For ChatGPT Subscription, also repairs stale OpenAI API model names such as
     ``gpt-5`` that are not accepted by the Codex-backed ChatGPT account route.
     """
@@ -335,7 +335,7 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
             return False
     db = SessionLocal()
     try:
-        # Prefer the endpoint whose base URL matches the session â€” we know the
+        # Prefer the endpoint whose base URL matches the session Ã¢â‚¬â€ we know the
         # user already pointed this session at that endpoint, so its first
         # cached model is the most defensible default.
         ep = None
@@ -416,7 +416,7 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
             db.commit()
         sess.model = model
         logger.info(
-            "Recovered session model for %s â€” picked %r from endpoint %s",
+            "Recovered session model for %s Ã¢â‚¬â€ picked %r from endpoint %s",
             session_id, model, ep.id,
         )
         return True
@@ -615,12 +615,12 @@ def setup_chat_routes(
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace")
         )
-        # Plan mode is a modifier on agent mode â€” it only makes sense with tools.
+        # Plan mode is a modifier on agent mode Ã¢â‚¬â€ it only makes sense with tools.
         if plan_mode:
             chat_mode = "agent"
         # An approved plan being EXECUTED: the frontend sends the checklist back
         # on each turn so we can pin it in context. This way a long plan on a
-        # weak model survives history truncation â€” the agent can always re-read
+        # weak model survives history truncation Ã¢â‚¬â€ the agent can always re-read
         # the plan. Ignored while still proposing (plan_mode on). Capped so a
         # huge plan can't blow the prompt.
         approved_plan = ""
@@ -693,9 +693,9 @@ def setup_chat_routes(
         # DAILY_DRIVER_INVERTED_TOOL_GATE_V016F3_END
 
         # Intent auto-escalation: if the user is clearly asking the assistant
-        # to create a todo, reminder, or calendar event, promote chat â†’ agent
+        # to create a todo, reminder, or calendar event, promote chat Ã¢â€ â€™ agent
         # for this turn so the LLM has access to manage_notes / manage_calendar.
-        # This is a LIGHT promotion â€” see the disabled_tools block below, which
+        # This is a LIGHT promotion Ã¢â‚¬â€ see the disabled_tools block below, which
         # withholds shell/code/file tools so the model doesn't try to `bash`
         # its way through a plain chat request (and fail, especially with the
         # shell disabled).
@@ -705,14 +705,14 @@ def setup_chat_routes(
             chat_mode = "agent"
             auto_escalated = True
             logger.info(
-                "chatâ†’agent auto-escalation: category=%s reason=%s",
+                "chatÃ¢â€ â€™agent auto-escalation: category=%s reason=%s",
                 _tool_intent.category,
                 _tool_intent.reason,
             )
         active_doc_id = form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 
-        # Active email reader â€” when the user has an email open in the UI, the
+        # Active email reader Ã¢â‚¬â€ when the user has an email open in the UI, the
         # frontend passes its uid/folder/account so "reply", "summarize this",
         # etc. resolve to the real email instead of the agent inventing a
         # fake markdown draft.
@@ -808,9 +808,9 @@ def setup_chat_routes(
 
         # ------------------------------------------------------------------ #
         # Privilege gates that must fire BEFORE any LLM work / token spend.
-        #   1. allowed_models â€” reject if session.model isn't in the user's
+        #   1. allowed_models Ã¢â‚¬â€ reject if session.model isn't in the user's
         #      configured allowlist (empty list = "no restriction").
-        #   2. max_messages_per_day â€” count user-role ChatMessage rows owned
+        #   2. max_messages_per_day Ã¢â‚¬â€ count user-role ChatMessage rows owned
         #      by this user in the last UTC day; 429 if at/over the cap.
         # Admins always have full privileges via get_privileges (returns
         # ADMIN_PRIVILEGES wholesale) so this is a no-op for them.
@@ -824,7 +824,7 @@ def setup_chat_routes(
         if not do_research:
             if get_session_mode(session) == 'research_pending':
                 do_research = True
-                logger.info(f"Session {session} in research_pending â€” auto-triggering research")
+                logger.info(f"Session {session} in research_pending Ã¢â‚¬â€ auto-triggering research")
 
         att_ids = []
         if body and isinstance(body.get("attachments"), list):
@@ -866,7 +866,7 @@ def setup_chat_routes(
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 
-        # Query active document â€” prefer explicit ID from frontend, fall back to session lookup
+        # Query active document Ã¢â‚¬â€ prefer explicit ID from frontend, fall back to session lookup
         active_doc = None
         _doc_db = SessionLocal()
         try:
@@ -889,7 +889,7 @@ def setup_chat_routes(
                         active_doc = None
                     else:
                         # NOTE: previously dropped the doc when doc.session_id
-                        # != current chat session â€” but that broke the common
+                        # != current chat session Ã¢â‚¬â€ but that broke the common
                         # case of "open an email draft from one chat, ask a
                         # different chat to write into it". The frontend only
                         # sends active_doc_id for docs currently visible in
@@ -899,7 +899,7 @@ def setup_chat_routes(
                         # turns find it via the session-fallback path too.
                         if doc_session and doc_session != session:
                             logger.info(
-                                "[doc-inject] cross-session active_doc_id %s (was session %s, now %s) â€” accepting and rebinding",
+                                "[doc-inject] cross-session active_doc_id %s (was session %s, now %s) Ã¢â‚¬â€ accepting and rebinding",
                                 active_doc_id, doc_session, session,
                             )
                             try:
@@ -912,6 +912,15 @@ def setup_chat_routes(
                 else:
                     logger.warning(f"[doc-inject] NOT FOUND by ID {active_doc_id}")
             if not active_doc:
+                _email_doc_q = _doc_db.query(DBDocument).filter(
+                    DBDocument.session_id == session,
+                    DBDocument.is_active == True,
+                    DBDocument.language == "email",
+                )
+                active_doc = _owner_session_filter(_email_doc_q, ctx.user).order_by(DBDocument.updated_at.desc()).first()
+                if active_doc:
+                    logger.info(f"[doc-inject] found email draft by session fallback: title={active_doc.title!r}")
+            if not active_doc:
                 _session_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True
@@ -921,7 +930,7 @@ def setup_chat_routes(
                     logger.info(f"[doc-inject] found by session fallback: title={active_doc.title!r}")
             # Last resort: the document the agent itself just created/edited
             # (tracked in-memory by the tool layer). This rescues docs that
-            # got orphaned from their session (session_id NULL) â€” otherwise
+            # got orphaned from their session (session_id NULL) Ã¢â‚¬â€ otherwise
             # neither lookup above can associate them with this conversation,
             # so the agent never sees what it just wrote. Guarded so we never
             # leak a doc that belongs to a DIFFERENT session.
@@ -950,15 +959,13 @@ def setup_chat_routes(
         disabled_tools = set()
         # Only disable bash/web_search when the caller *explicitly* set them
         # to a falsy value.  When unset (None), defer to per-user privilege
-        # checks below â€” this lets admins with can_use_bash=True use bash
+        # checks below Ã¢â‚¬â€ this lets admins with can_use_bash=True use bash
         # by default without having to send allow_bash in every request.
         if allow_bash is not None and str(allow_bash).lower() != "true":
             disabled_tools.add("bash")
-        _explicit_web_intent = bool(_tool_intent and _tool_intent.category == "web")
         if (
             allow_web_search is not None
             and str(allow_web_search).lower() != "true"
-            and not _explicit_web_intent
         ):
             disabled_tools.add("web_search")
             disabled_tools.add("web_fetch")
@@ -972,19 +979,17 @@ def setup_chat_routes(
                 "manage_skills",      # skill presets tied to user
             })
 
-        # Active email reader open â†’ strip the tools that let the agent
-        # "drift" to a new compose: create_document (writes a fake email-
-        # shaped .md file) and send_email (sends fresh to a recipient the
-        # agent invented). With those gone, the only paths left for "write
-        # email saying X" are ui_control open_email_reply (draft) and
-        # reply_to_email (immediate send) â€” both of which use the open
-        # email's UID. Code-level enforcement instead of relying on a
-        # prompt rule the model can ignore.
+        # Active email reader open -> strip tools that let the agent drift
+        # away from the visible email, create fake email-shaped documents, or
+        # send/reply directly through SMTP-style paths. The allowed reviewed
+        # compose path should stay tied to the currently open email draft UI.
         if active_email_ctx and active_email_ctx.get("uid"):
             disabled_tools.update({
                 "create_document",
                 "send_email",
+                "reply_to_email",
                 "mcp__email__send_email",
+                "mcp__email__reply_to_email",
             })
 
         # Enforce per-user privileges
@@ -1020,7 +1025,7 @@ def setup_chat_routes(
 
         # Light auto-escalation: the user is in chat mode and just expressed a
         # notes/calendar/email intent. Grant the relevant managers but withhold
-        # the heavy "do things on the computer" tools â€” otherwise the model
+        # the heavy "do things on the computer" tools Ã¢â‚¬â€ otherwise the model
         # tries to shell out for a request that never needed it, then fails
         # (and looks broken when the shell is disabled).
         if auto_escalated:
@@ -1028,7 +1033,7 @@ def setup_chat_routes(
                 "bash", "python", "read_file", "write_file", "builtin_browser",
             })
 
-        # Disable document tools in compare sessions â€” they break the pane UI
+        # Disable document tools in compare sessions Ã¢â‚¬â€ they break the pane UI
         if sess.name and sess.name.startswith("[CMP]"):
             disabled_tools.update({"create_document", "edit_document", "update_document"})
 
@@ -1092,7 +1097,7 @@ def setup_chat_routes(
                 yield f"data: {json.dumps({'type': 'attachments', 'data': ctx.preprocessed.attachment_meta})}\n\n"
 
             # Announce any docs auto-created during preprocess (e.g. fillable
-            # PDF â†’ editable markdown) so the editor pane switches to them
+            # PDF Ã¢â€ â€™ editable markdown) so the editor pane switches to them
             # before the model starts streaming.
             for _opened in ctx.auto_opened_docs:
                 yield (
@@ -1116,7 +1121,7 @@ def setup_chat_routes(
                 logger.info(f"Research endpoint resolved: model={_r_model}, endpoint={redact_url(_r_ep)}, auth_keys={_auth_keys}, sess_headers_keys={list(sess.headers.keys()) if isinstance(sess.headers, dict) else type(sess.headers)}")
 
                 # Clarification round: only for very short/vague queries on first research message.
-                # Skip in compare mode â€” each pane is a fresh session, so every one would
+                # Skip in compare mode Ã¢â‚¬â€ each pane is a fresh session, so every one would
                 # ask clarifying questions and the user would have to answer each pane
                 # separately, breaking the parallel comparison.
                 _prior_json = research_handler._get_session_json(session)
@@ -1124,7 +1129,7 @@ def setup_chat_routes(
                 _is_first_research = not _prior_json and _history_len <= 2 and not compare_mode
 
                 if _is_first_research:
-                    logger.info(f"First research message â€” asking clarifying questions for: {message[:60]}")
+                    logger.info(f"First research message Ã¢â‚¬â€ asking clarifying questions for: {message[:60]}")
                     yield f'data: {json.dumps({"type": "model_info", "model": sess.model, "suffix": "Research"})}\n\n'
                     # Set DB mode to research_pending so the NEXT message auto-triggers research
                     set_session_mode(session, "research_pending")
@@ -1301,7 +1306,7 @@ def setup_chat_routes(
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
-                # â”€â”€ Chat mode: call stream_llm directly, NO tools, NO document access â”€â”€
+                # Ã¢â€â‚¬Ã¢â€â‚¬ Chat mode: call stream_llm directly, NO tools, NO document access Ã¢â€â‚¬Ã¢â€â‚¬
                 try:
                     _chat_candidates = [(sess.endpoint_url, sess.model, sess.headers)] + _fallback_candidates
                     async for chunk in stream_llm_with_fallback(
@@ -1310,7 +1315,7 @@ def setup_chat_routes(
                         temperature=ctx.preset.temperature,
                         # Respect the preset; 0/unset = let the server decide (no
                         # cap), matching agent mode. The old hard 4096 fallback
-                        # truncated reasoning models mid-<think> â€” they'd burn the
+                        # truncated reasoning models mid-<think> Ã¢â‚¬â€ they'd burn the
                         # whole budget thinking and never emit the answer (seen in
                         # Compare on heavy generation prompts).
                         max_tokens=ctx.preset.max_tokens,
@@ -1353,7 +1358,7 @@ def setup_chat_routes(
                                     # The frontend reads `tokens_per_second`; the raw usage event
                                     # carries the backend's true gen speed as `gen_tps` (llama.cpp
                                     # timings). Map it through so this direct-chat path shows real
-                                    # t/s instead of "n/a" â†’ falling back to a bare token count.
+                                    # t/s instead of "n/a" Ã¢â€ â€™ falling back to a bare token count.
                                     if last_metrics.get("gen_tps") and not last_metrics.get("tokens_per_second"):
                                         last_metrics["tokens_per_second"] = last_metrics["gen_tps"]
                                         last_metrics["tps_source"] = "backend"
@@ -1428,7 +1433,7 @@ def setup_chat_routes(
                 finally:
                     _active_streams.pop(session, None)
             else:
-                # â”€â”€ Agent mode: full agent loop with tools â”€â”€
+                # Ã¢â€â‚¬Ã¢â€â‚¬ Agent mode: full agent loop with tools Ã¢â€â‚¬Ã¢â€â‚¬
                 _agent_rounds = 0
                 _agent_tool_calls = 0
                 _answered_by = None  # set if the selected model failed and a fallback answered
@@ -1776,9 +1781,11 @@ def setup_chat_routes(
                         elif chunk.startswith("event: "):
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
-                            if full_response:
+                            _has_tool_events = bool((last_metrics or {}).get("tool_events"))
+                            if full_response or _has_tool_events:
+                                _response_to_save = full_response or "Done."
                                 _saved_id = save_assistant_response(
-                                    sess, session_manager, session, full_response, last_metrics,
+                                    sess, session_manager, session, _response_to_save, last_metrics,
                                     character_name=ctx.preset.character_name,
                                     web_sources=web_sources,
                                     rag_sources=ctx.rag_sources,
@@ -1788,7 +1795,7 @@ def setup_chat_routes(
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
                                 run_post_response_tasks(
-                                    sess, session_manager, session, message, full_response,
+                                    sess, session_manager, session, message, _response_to_save,
                                     last_metrics, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
                                     incognito=incognito, compare_mode=compare_mode,
                                     character_name=ctx.preset.character_name,
@@ -1802,7 +1809,7 @@ def setup_chat_routes(
                             _stream_set(session, status="done")
                             yield chunk
                 except (asyncio.CancelledError, GeneratorExit):
-                    # Client disconnected â€” save partial response. Wrap
+                    # Client disconnected Ã¢â‚¬â€ save partial response. Wrap
                     # the save in its own try so an exception inside
                     # add_message / save_sessions doesn't mask the
                     # original CancelledError (which prevented the
@@ -1838,7 +1845,7 @@ def setup_chat_routes(
                 _active_streams.pop(session, None)
 
         # Compare panes are short-lived, single-shot generations whose sessions
-        # exist only to drive that one pane â€” there's nothing to "resume" and
+        # exist only to drive that one pane Ã¢â‚¬â€ there's nothing to "resume" and
         # the user expects the pane's Stop button (which aborts the fetch,
         # closing this SSE) to promptly cancel the upstream LLM call. Detaching
         # them would keep burning upstream tokens/compute after the pane is
@@ -1847,14 +1854,14 @@ def setup_chat_routes(
         #
         # So: stream them directly (no agent_runs wrapping). Starlette cancels
         # the underlying async generator (raising CancelledError/GeneratorExit
-        # inside it) as soon as it notices the client disconnected â€” which the
+        # inside it) as soon as it notices the client disconnected Ã¢â‚¬â€ which the
         # mode-specific except blocks above already handle by saving the
         # partial response exactly once. This stops the upstream call promptly
         # without waiting on the next streamed chunk.
         #
         # Normal chat/agent streams keep the DETACHED behavior below: they
         # survive the client closing the tab / navigating away. The SSE response just subscribes (replay
-        # buffered output + live); dropping the SSE only removes a subscriber â€”
+        # buffered output + live); dropping the SSE only removes a subscriber Ã¢â‚¬â€
         # the run keeps going and saves the assistant message on completion
         # regardless. Reconnect via /api/chat/resume.
         if compare_mode:
@@ -1864,7 +1871,7 @@ def setup_chat_routes(
         return StreamingResponse(agent_runs.subscribe(session), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ #
-    # GET /api/chat/resume â€” reconnect to a detached run that's still going
+    # GET /api/chat/resume Ã¢â‚¬â€ reconnect to a detached run that's still going
     # (e.g. after reopening a session whose agent kept running in the background)
     # ------------------------------------------------------------------ #
     @router.get("/api/chat/resume/{session_id}")
@@ -1875,7 +1882,7 @@ def setup_chat_routes(
         return StreamingResponse(agent_runs.subscribe(session_id), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ #
-    # POST /api/chat/stop â€” cancel a detached run (Stop button). Closing the SSE
+    # POST /api/chat/stop Ã¢â‚¬â€ cancel a detached run (Stop button). Closing the SSE
     # no longer stops it (it's detached), so the Stop button must call this.
     # ------------------------------------------------------------------ #
     @router.post("/api/chat/stop/{session_id}")
@@ -1885,7 +1892,7 @@ def setup_chat_routes(
         return {"stopped": stopped}
 
     # ------------------------------------------------------------------ #
-    # GET /api/chat/stream_status â€” check if a stream is active for a session
+    # GET /api/chat/stream_status Ã¢â‚¬â€ check if a stream is active for a session
     # ------------------------------------------------------------------ #
     @router.get("/api/chat/stream_status/{session_id}")
     async def chat_stream_status(request: Request, session_id: str) -> Dict[str, Any]:
@@ -1918,7 +1925,7 @@ def setup_chat_routes(
             raise HTTPException(404, "Session not found")
 
     # ------------------------------------------------------------------ #
-    # GET /api/search â€” search across chat messages
+    # GET /api/search Ã¢â‚¬â€ search across chat messages
     # ------------------------------------------------------------------ #
     @router.get("/api/search")
     async def search_messages(
@@ -1942,7 +1949,7 @@ def setup_chat_routes(
         ]
 
     # ------------------------------------------------------------------ #
-    # POST /api/rewrite â€” lightweight rewrite of last AI message (no tools)
+    # POST /api/rewrite Ã¢â‚¬â€ lightweight rewrite of last AI message (no tools)
     # ------------------------------------------------------------------ #
     @router.post("/api/rewrite")
     async def rewrite_message(request: Request) -> StreamingResponse:
@@ -1973,7 +1980,7 @@ def setup_chat_routes(
         messages = [
             {"role": "system", "content": (
                 "You are rewriting a previous response. Follow the instruction exactly. "
-                "Output ONLY the rewritten text â€” no preamble, no explanation, no meta-commentary. "
+                "Output ONLY the rewritten text Ã¢â‚¬â€ no preamble, no explanation, no meta-commentary. "
                 "Preserve any formatting (markdown, code blocks, lists) from the original."
             )},
             {"role": "user", "content": (
@@ -1993,7 +2000,7 @@ def setup_chat_routes(
                     temperature=0.7,
                     # 0 = let the server decide (no cap). A hardcoded 4096 made
                     # local reasoning models (Qwen3 / R1) burn the whole budget
-                    # inside <think> and emit no rewrite â€” the bubble just hung
+                    # inside <think> and emit no rewrite Ã¢â‚¬â€ the bubble just hung
                     # on "Rewriting...". Same fix as the chat max_tokens cap.
                     max_tokens=0,
                     tools=None,
@@ -2004,7 +2011,7 @@ def setup_chat_routes(
                             if "delta" in data:
                                 # Forward the chunk (so the client can show a
                                 # thinking indicator) but DON'T fold reasoning
-                                # tokens into the saved rewrite â€” only real
+                                # tokens into the saved rewrite Ã¢â‚¬â€ only real
                                 # content. reasoning_content arrives flagged
                                 # with thinking:true.
                                 if not data.get("thinking"):
@@ -2055,4 +2062,5 @@ def setup_chat_routes(
         return StreamingResponse(stream_rewrite(), media_type="text/event-stream")
 
     return router
+
 
