@@ -2408,6 +2408,9 @@ async def stream_agent_loop(
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
     if _endpoint_supports is True:
         _is_api_model = True
+        # _LOCAL_NATIVE_TOOLS_PATCH_20260630
+        if _is_local_openai_compat_url(endpoint_url) or _is_ollama_openai_compat_url(endpoint_url):
+            _is_api_model = True
     elif (
         _endpoint_supports is False
         or _model_no_tools
@@ -2417,6 +2420,14 @@ async def stream_agent_loop(
         _is_api_model = False
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
+
+    # _FORCE_LOCAL_NATIVE_TOOLS_AFTER_DECISION_20260630
+    # For local OpenAI-compatible /v1 endpoints, force native schema delivery.
+    # Without this, Ollama /v1 gets classified as text-only and tools_sent=0,
+    # causing the model to emit fake fenced pseudo-tool calls.
+    if _is_local_openai_compat_url(endpoint_url or "") or _is_ollama_openai_compat_url(endpoint_url or ""):
+        _is_api_model = True
+
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
     messages, mcp_schemas = _build_system_prompt(
         messages, model, active_document, mcp_mgr, disabled_tools,

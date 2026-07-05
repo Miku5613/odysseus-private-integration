@@ -1,0 +1,135 @@
+[
+  {
+    "id": "frontend_tool_output_exact",
+    "query": "Find where the frontend handles tool_output events. Use tools as needed. Do not guess.",
+    "expect_intent": "exact_lookup",
+    "expect_runtime": "contract",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "chat_stream_route_exact",
+    "query": "Where is /api/chat_stream defined?",
+    "expect_intent": "exact_lookup",
+    "expect_runtime": "contract",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "backend_message_saved_exact",
+    "query": "Find where backend emits message_saved.",
+    "expect_intent": "exact_lookup",
+    "expect_runtime": "contract",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "stream_agent_loop_callsite",
+    "query": "Find the callsite for stream_agent_loop.",
+    "expect_intent": "exact_lookup",
+    "expect_runtime": "contract",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "chat_streaming_files",
+    "query": "Find files related to chat streaming.",
+    "expect_intent": "file_lookup",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "memory_modules",
+    "query": "List modules related to memory.",
+    "expect_intent": "file_lookup",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "streaming_ui_files",
+    "query": "Show files involved in streaming UI.",
+    "expect_intent": "file_lookup",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "chat_streaming_structure",
+    "query": "Inspect the structure of chat streaming.",
+    "expect_intent": "file_lookup",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "broad_backend_inspection",
+    "query": "Inspect backend route code related to chat sessions.",
+    "expect_intent": "general_readonly",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "patch_block",
+    "query": "Patch chat_routes.py to change the stream.",
+    "expect_intent": "write_mutation",
+    "expect_runtime": "legacy",
+    "expect_safe_readonly": false
+  },
+  {
+    "id": "create_block",
+    "query": "Create a new handler for message_saved.",
+    "expect_intent": "write_mutation",
+    "expect_runtime": "legacy",
+    "expect_safe_readonly": false
+  },
+  {
+    "id": "edit_block",
+    "query": "Edit static/js/chat.js so tool_output renders differently.",
+    "expect_intent": "write_mutation",
+    "expect_runtime": "legacy",
+    "expect_safe_readonly": false
+  },
+  {
+    "id": "research_legacy",
+    "query": "Research the latest Ollama release notes.",
+    "expect_intent": "legacy_exploratory",
+    "expect_runtime": "legacy",
+    "expect_safe_readonly": false
+  },
+  {
+    "id": "browser_legacy",
+    "query": "Use browser to check the docs.",
+    "expect_intent": "legacy_exploratory",
+    "expect_runtime": "legacy",
+    "expect_safe_readonly": false
+  },
+  {
+    "id": "ambiguous_legacy",
+    "query": "Explain what this project does.",
+    "expect_intent": "legacy_exploratory",
+    "expect_runtime": "legacy",
+    "expect_safe_readonly": false
+  },
+  {
+    "id": "memory_architecture_summary",
+    "query": "Summarize how memory is wired in Odysseus.",
+    "expect_intent": "architecture_summary",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "rag_architecture_summary",
+    "query": "Summarize how RAG is wired in Odysseus.",
+    "expect_intent": "architecture_summary",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "mcp_architecture_summary",
+    "query": "Summarize how MCP tools are wired in Odysseus.",
+    "expect_intent": "architecture_summary",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  },
+  {
+    "id": "email_polling_architecture_summary",
+    "query": "Summarize how email polling is wired in Odysseus.",
+    "expect_intent": "architecture_summary",
+    "expect_runtime": "general",
+    "expect_safe_readonly": true
+  }
+]

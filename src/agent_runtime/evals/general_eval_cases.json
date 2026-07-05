@@ -1,0 +1,183 @@
+[
+  {
+    "id": "frontend_tool_output",
+    "query": "Find where the frontend handles tool_output events. Use tools as needed. Do not guess.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "static/js/chat.js",
+      "tool_output"
+    ]
+  },
+  {
+    "id": "chat_stream_route",
+    "query": "Where is /api/chat_stream defined?",
+    "expect_fallback": false,
+    "expect_contains": [
+      "chat_routes.py",
+      "chat_stream"
+    ]
+  },
+  {
+    "id": "message_saved_emit",
+    "query": "Find where the backend emits message_saved.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "message_saved"
+    ]
+  },
+  {
+    "id": "write_block",
+    "query": "Patch chat_routes.py to change the stream.",
+    "expect_fallback": true,
+    "expect_contains": [
+      "deterministic general runtime",
+      "write/edit/execute",
+      "No files were read and no changes were made"
+    ]
+  },
+  {
+    "id": "chat_streaming_file_lookup",
+    "query": "Find files related to chat streaming.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "routes/chat_routes.py",
+      "static/js/chat.js",
+      "static/js/chatStream.js"
+    ]
+  },
+  {
+    "id": "memory_file_lookup",
+    "query": "Find files related to memory.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "services/memory",
+      "src/memory",
+      "static/js/memory.js"
+    ]
+  },
+  {
+    "id": "rag_file_lookup",
+    "query": "Find files related to RAG.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "src/rag",
+      "mcp_servers/rag_server.py",
+      "static/js/rag.js"
+    ]
+  },
+  {
+    "id": "mcp_file_lookup",
+    "query": "Find files related to MCP tools.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "src/mcp_manager.py",
+      "src/builtin_mcp.py",
+      "routes/mcp_routes.py"
+    ]
+  },
+  {
+    "id": "email_polling_file_lookup",
+    "query": "Find files related to email polling.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "routes/email_pollers.py",
+      "routes/email_helpers.py",
+      "mcp_servers/email_server.py"
+    ]
+  },
+  {
+    "id": "calendar_file_lookup",
+    "query": "Find files related to calendar.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "routes/calendar_routes.py",
+      "src/tools/calendar.py",
+      "static/js/calendar.js"
+    ]
+  },
+  {
+    "id": "image_generation_file_lookup",
+    "query": "Find files related to image generation.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "mcp_servers/image_gen_server.py",
+      "src/generated_images.py",
+      "src/tools/image.py"
+    ]
+  },
+  {
+    "id": "voice_file_lookup",
+    "query": "Find files related to voice.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "routes/stt_routes.py",
+      "routes/tts_routes.py",
+      "static/js/voiceRecorder.js"
+    ]
+  },
+  {
+    "id": "memory_architecture_summary",
+    "query": "Summarize how memory is wired in Odysseus.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "Read-only architecture map for memory",
+      "routes/memory_routes.py",
+      "services/memory",
+      "Files read for evidence"
+    ]
+  },
+  {
+    "id": "rag_architecture_summary",
+    "query": "Summarize how RAG is wired in Odysseus.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "Read-only architecture map for rag",
+      "src/rag_manager.py",
+      "src/rag_vector.py",
+      "Files read for evidence"
+    ]
+  },
+  {
+    "id": "mcp_architecture_summary",
+    "query": "Summarize how MCP tools are wired in Odysseus.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "Read-only architecture map for mcp",
+      "src/mcp_manager.py",
+      "routes/mcp_routes.py",
+      "Files read for evidence"
+    ]
+  },
+  {
+    "id": "email_polling_architecture_summary",
+    "query": "Summarize how email polling is wired in Odysseus.",
+    "expect_fallback": false,
+    "expect_contains": [
+      "Read-only architecture map for email polling",
+      "routes/email_pollers.py",
+      "routes/email_helpers.py",
+      "Files read for evidence"
+    ]
+  },
+  {
+    "id": "unsupported_weather_quality",
+    "query": "Explain the current weather in Kolkata using the web.",
+    "expect_fallback": true,
+    "expect_contains": [
+      "deterministic general runtime",
+      "current-world",
+      "legacy/research/browser path",
+      "No files were read and no changes were made"
+    ]
+  },
+  {
+    "id": "ambiguous_help_quality",
+    "query": "Help me with Odysseus.",
+    "expect_fallback": true,
+    "expect_contains": [
+      "too broad or ambiguous",
+      "Find files related to memory",
+      "No files were read and no changes were made"
+    ]
+  }
+]

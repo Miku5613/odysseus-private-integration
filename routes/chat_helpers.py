@@ -1047,6 +1047,13 @@ def save_assistant_response(
         _content = _think_info["reply"]
     else:
         _content = full_response
+
+    # Saved agent/tool-thread reconstruction needs both:
+    # - metadata.tool_events for the tool bubbles
+    # - metadata.round_texts for the assistant text bubble(s)
+    if tool_events and not md.get("round_texts"):
+        md["round_texts"] = ["", _content]
+
     sess.add_message(ChatMessage("assistant", _content, metadata=md))
 
     if not incognito:

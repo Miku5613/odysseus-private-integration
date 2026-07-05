@@ -1,0 +1,102 @@
+﻿[
+  {
+    "name": "frontend_tool_output_handler",
+    "query": "Find where the frontend handles tool_output events. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "handler_lookup",
+    "expected_target": "tool_output",
+    "expected_scope_contains": "static\\js",
+    "expected_file_contains": "static\\js\\chat.js",
+    "expected_text_contains": "json.type === 'tool_output'"
+  },
+  {
+    "name": "frontend_agent_step_handler",
+    "query": "Find where the frontend handles agent_step events. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "handler_lookup",
+    "expected_target": "agent_step",
+    "expected_scope_contains": "static\\js",
+    "expected_file_contains": "static\\js\\chat.js",
+    "expected_text_contains": "json.type === 'agent_step'"
+  },
+  {
+    "name": "chat_routes_done_handling",
+    "query": "Find where chat_routes handles data: [DONE] during agent streaming. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "control_flow_lookup",
+    "expected_target": "data: [DONE]",
+    "expected_scope_contains": "routes\\chat_routes.py",
+    "expected_file_contains": "routes\\chat_routes.py",
+    "expected_text_contains": "data: [DONE]"
+  },
+  {
+    "name": "agent_loop_executes_tool_calls",
+    "query": "Find where the agent loop executes tool calls. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "callsite_lookup",
+    "expected_target": "execute_tool_block",
+    "expected_scope_contains": "src\\agent_loop.py",
+    "expected_file_contains": "src\\agent_loop.py",
+    "expected_text_contains": "execute_tool_block"
+  },
+  {
+    "name": "chat_routes_save_assistant_response",
+    "query": "Find where chat_routes saves the assistant response after streaming. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "save_callsite_lookup",
+    "expected_target": "save_assistant_response",
+    "expected_scope_contains": "routes\\chat_routes.py",
+    "expected_file_contains": "routes\\chat_routes.py",
+    "expected_text_contains": "save_assistant_response"
+  },
+  {
+    "name": "frontend_doc_stream_open",
+    "query": "Find where the frontend opens document stream events. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "handler_lookup",
+    "expected_target": "doc_stream_open",
+    "expected_scope_contains": "static\\js",
+    "expected_file_contains": "static\\js\\chat.js",
+    "expected_text_contains": "json.type === 'doc_stream_open'"
+  },
+  {
+    "name": "frontend_doc_stream_delta",
+    "query": "Find where the frontend handles doc_stream_delta events. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "handler_lookup",
+    "expected_target": "doc_stream_delta",
+    "expected_scope_contains": "static\\js",
+    "expected_file_contains": "static\\js\\chat.js",
+    "expected_text_contains": "json.type === 'doc_stream_delta'"
+  },
+  {
+    "name": "backend_message_saved_emit",
+    "query": "Find where the backend emits message_saved events. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "backend_event_emit_lookup",
+    "expected_target": "message_saved",
+    "expected_scope_contains": "routes\\chat_routes.py",
+    "expected_file_contains": "routes\\chat_routes.py",
+    "expected_text_contains": "message_saved"
+  },
+  {
+    "name": "backend_tool_output_emit",
+    "query": "Find where the backend emits tool_output events during streaming. Use tools as needed. Do not guess.",
+    "expected_status": "completed",
+    "expected_kind": "streaming_event_emit_lookup",
+    "expected_target": "tool_output",
+    "expected_scope_contains": "src\\agent_loop.py",
+    "expected_file_contains": "src\\agent_loop.py",
+    "expected_text_contains": "tool_output"
+  },
+  {
+    "name": "frontend_fake_event_negative",
+    "query": "Find where the frontend handles definitely_fake_runtime_event_abc123 events. Use tools as needed. Do not guess.",
+    "expected_status": "unresolved",
+    "expected_kind": "handler_lookup",
+    "expected_target": "definitely_fake_runtime_event_abc123",
+    "expected_scope_contains": "static\\js",
+    "expected_file_contains": "",
+    "expected_text_contains": "No matching code location was found"
+  }
+]
