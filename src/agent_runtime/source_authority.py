@@ -53,6 +53,22 @@ def classify_source(path: str | None) -> str:
 
     name = Path(p).name
     lower = p.lower().replace("/", "\\")
+    parts = {part for part in lower.split("\\") if part}
+
+    # Local scaffolding/history can contain real-looking source references,
+    # but it is not active implementation evidence.
+    if parts & {
+        "exclusions",
+        "backups",
+        "patches",
+        "reports",
+        "inspection_reports",
+        "looserootartifacts",
+        "patchscripts",
+        "inspectscripts",
+    }:
+        return "generated_artifact"
+
 
     for pattern in GENERATED_PATTERNS:
         if fnmatch.fnmatch(name, pattern):
@@ -90,3 +106,4 @@ def authority_score(authority: str) -> int:
 def should_skip_source(path: str | None) -> bool:
     authority = classify_source(path)
     return authority == "generated_artifact"
+
