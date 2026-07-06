@@ -18,7 +18,7 @@ import { showToast, showError, styledPrompt } from './ui.js';
 import { makeWindowDraggable } from './windowDrag.js';
 
 // Width (px) the graph panel adds to the dialog when docked open.
-const GRAPH_PANEL_W = 460;
+const GRAPH_PANEL_W = 340;
 
 // Notes under this folder act as reusable templates (Obsidian convention).
 const TEMPLATE_DIR = 'templates/';
@@ -65,25 +65,31 @@ function _buildModal() {
   _modal.style.display = 'none';
   _modal.innerHTML = `
     <style>
-      #atlas-modal .modal-content { width: min(1200px, 96vw); height: 88vh; display:flex; flex-direction:column; }
-      #atlas-modal .atlas-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--bubble-border,#333); }
+      #atlas-modal { --atlas-left-w:260px; --atlas-right-w:260px; --atlas-graph-w:340px; }
+      #atlas-modal .modal-content { width: min(1200px, 96vw); height: 88vh; display:flex; flex-direction:column; border-radius:16px 10px 10px 10px; overflow:hidden; clip-path:inset(0 round 16px 10px 10px 10px); position:relative; }
+      #atlas-modal .modal-content::after { content:""; position:absolute; inset:0; pointer-events:none; border:1px solid rgba(220,150,210,.28); border-radius:16px 10px 10px 10px; box-shadow:inset 0 1px 0 rgba(255,255,255,.025); z-index:5; }
+      #atlas-modal .atlas-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--bubble-border,#333); border-top-left-radius:16px; }
       #atlas-modal .atlas-title-wrap { display:flex; flex-direction:column; gap:1px; min-width:0; }
-      #atlas-modal .atlas-title { background:none; border:0; color:inherit; padding:0; margin:0; font:inherit; font-size:14px; font-weight:700; cursor:pointer; text-align:left; }
-      #atlas-modal .atlas-title:hover { text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:3px; }
+      #atlas-modal .atlas-title { background:none; border:0; color:inherit; padding:0; margin:0; font-family:var(--ui-font,Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif); font-size:16px; font-weight:800; letter-spacing:.16px; cursor:pointer; text-align:left; }
+      #atlas-modal .atlas-title:hover { text-decoration:none; filter:none; }
       #atlas-modal .atlas-subtitle { font-size:11px; opacity:.58; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       #atlas-modal .atlas-head .grow { flex:1; }
       #atlas-modal .atlas-tabs { display:flex; align-items:center; gap:4px; padding:6px 10px; border-bottom:1px solid var(--bubble-border,#333); }
-      #atlas-modal .atlas-tab { background:none; border:0; color:inherit; opacity:.62; border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px; }
-      #atlas-modal .atlas-tab:hover { background:rgba(127,127,127,.12); opacity:.9; }
-      #atlas-modal .atlas-tab.active { background:var(--section-accent,rgba(120,140,255,.18)); opacity:1; }
+      #atlas-modal .atlas-tab { background:transparent; border:0; border-bottom:2px solid transparent; color:inherit; opacity:.62; border-radius:0; padding:6px 10px 7px; cursor:pointer; font-size:12px; }
+      #atlas-modal .atlas-tab:hover { background:transparent; opacity:.9; }
+      #atlas-modal .atlas-tab.active { background:transparent; border-bottom-color:var(--brand-color,#f19ad7); opacity:1; }
       #atlas-modal .atlas-body { flex:1; display:flex; min-height:0; overflow:hidden; }
+      #atlas-modal .atlas-splitter { flex:0 0 5px; width:5px; cursor:col-resize; background:transparent; border-left:1px solid transparent; border-right:1px solid transparent; }
+      #atlas-modal .atlas-splitter:hover, #atlas-modal .atlas-splitter.dragging { background:rgba(241,154,215,.14); border-color:rgba(241,154,215,.35); }
+      #atlas-modal[data-files="closed"] .atlas-splitter-left { display:none; }
+      #atlas-modal:not([data-side="backlinks"]):not([data-side="graph"]) .atlas-splitter-side { display:none; }
       #atlas-modal[data-files="closed"] .atlas-left { display:none; }
       #atlas-modal[data-view="edit"] .atlas-preview { display:none; }
       #atlas-modal[data-view="preview"] .atlas-editor { display:none; }
       #atlas-modal[data-view="preview"] .atlas-preview { border-left:0; }
       #atlas-modal[data-side="backlinks"] .atlas-right { display:block; }
       #atlas-modal[data-side="graph"] .atlas-graph-wrap { display:flex !important; }
-      #atlas-modal .atlas-left { width:240px; border-right:1px solid var(--bubble-border,#333); display:flex; flex-direction:column; min-height:0; }
+      #atlas-modal .atlas-left { width:var(--atlas-left-w,260px); flex:0 0 var(--atlas-left-w,260px); border-right:1px solid var(--bubble-border,#333); display:flex; flex-direction:column; min-height:0; }
       #atlas-modal .atlas-list { overflow:auto; flex:1; padding:2px 0; }
       #atlas-modal .atlas-row { display:flex; align-items:center; gap:4px; padding:4px 8px; cursor:pointer; font-size:13px; white-space:nowrap; overflow:hidden; border-radius:5px; }
       #atlas-modal .atlas-row:hover { background:rgba(127,127,127,.12); }
@@ -104,11 +110,11 @@ function _buildModal() {
       #atlas-modal .atlas-editor textarea { flex:1; width:100%; resize:none; border:0; background:transparent; color:inherit; font-family:var(--code-font,monospace); font-size:13px; line-height:1.55; outline:none; }
       #atlas-modal .atlas-preview a.atlas-wikilink { color:var(--brand-color,#6cf); text-decoration:none; border-bottom:1px dashed currentColor; cursor:pointer; }
       #atlas-modal .atlas-preview a.atlas-wikilink.missing { color:var(--accent-error,#e66); opacity:.8; }
-      #atlas-modal .atlas-right { display:none; width:220px; border-left:1px solid var(--bubble-border,#333); overflow:auto; padding:10px; font-size:12px; }
+      #atlas-modal .atlas-right { display:none; width:var(--atlas-right-w,260px); flex:0 0 var(--atlas-right-w,260px); border-left:1px solid var(--bubble-border,#333); overflow:auto; padding:10px; font-size:12px; }
       #atlas-modal .atlas-right h4 { margin:6px 0; font-size:11px; text-transform:uppercase; opacity:.6; }
       #atlas-modal .atlas-bl { padding:4px 6px; cursor:pointer; border-radius:5px; }
       #atlas-modal .atlas-bl:hover { background:rgba(127,127,127,.15); }
-      #atlas-modal .atlas-graph-wrap { width:460px; flex:0 0 460px; border-left:1px solid var(--bubble-border,#333); position:relative; display:flex; flex-direction:column; overflow:hidden; }
+      #atlas-modal .atlas-graph-wrap { width:var(--atlas-graph-w,340px); flex:0 0 var(--atlas-graph-w,340px); border-left:1px solid var(--bubble-border,#333); position:relative; display:flex; flex-direction:column; overflow:hidden; }
       #atlas-modal .atlas-graph-bar { display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid var(--bubble-border,#333); font-size:11px; text-transform:uppercase; opacity:.7; }
       #atlas-modal canvas.atlas-graph { flex:1; width:100%; display:block; cursor:grab; }
       #atlas-modal .atlas-ed-bar { display:flex; align-items:center; gap:8px; padding:6px 12px 8px; }
@@ -121,7 +127,7 @@ function _buildModal() {
       .atlas-pick-item:hover { background:rgba(127,127,127,.15); }
       #atlas-modal .atlas-btn { background:var(--input-bg,#222); border:1px solid var(--input-border,#444); color:inherit; border-radius:6px; padding:4px 9px; cursor:pointer; font-size:12px; }
       #atlas-modal .atlas-btn:hover { background:rgba(127,127,127,.2); }
-      #atlas-modal .atlas-btn.active { background:var(--brand-color,#48f); color:#fff; border-color:transparent; }
+      #atlas-modal .atlas-btn.active { background:transparent; color:inherit; border-color:var(--input-border,#444); box-shadow:inset 0 -2px 0 var(--brand-color,#f19ad7); }
       #atlas-modal input.atlas-search { width:100%; box-sizing:border-box; background:var(--input-bg,#222); border:1px solid var(--input-border,#444); color:inherit; border-radius:6px; padding:5px 8px; font-size:12px; }
       #atlas-modal .atlas-status { font-size:11px; opacity:.6; padding:0 12px 6px; }
     </style>
@@ -152,6 +158,7 @@ function _buildModal() {
           </div>
           <div class="atlas-list"></div>
         </div>
+        <div class="atlas-splitter atlas-splitter-left" data-split="left" title="Resize file explorer"></div>
         <div class="atlas-center">
           <div class="atlas-editor">
             <div class="atlas-ed-bar">
@@ -161,6 +168,7 @@ function _buildModal() {
           </div>
           <div class="atlas-preview"></div>
         </div>
+        <div class="atlas-splitter atlas-splitter-side" data-split="side" title="Resize side panel"></div>
         <div class="atlas-right">
           <h4>Backlinks</h4>
           <div data-el="backlinks"><div style="opacity:.5;">—</div></div>
@@ -193,6 +201,7 @@ function _buildModal() {
   });
   _setAtlasPane('edit', { initial: true });
   _setSidePanel(null);
+  _wireAtlasSplitters();
 
   // search
   const search = _modal.querySelector('.atlas-search');
@@ -253,6 +262,63 @@ async function openAtlas() {
   await _reloadNotes();
   // Restart the graph sim if the panel was left open from a previous session.
   if (_graphOpen) _openGraph();
+}
+
+function _clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function _wireAtlasSplitters() {
+  if (!_modal || _modal._atlasSplittersWired) return;
+  _modal._atlasSplittersWired = true;
+
+  const body = _modal.querySelector('.atlas-body');
+  if (!body) return;
+
+  const startDrag = (kind, e) => {
+    e.preventDefault();
+    const splitter = e.currentTarget;
+    splitter.classList.add('dragging');
+
+    const onMove = (ev) => {
+      const rect = body.getBoundingClientRect();
+      if (!rect.width) return;
+
+      if (kind === 'left') {
+        const width = _clamp(ev.clientX - rect.left, 180, 420);
+        _modal.style.setProperty('--atlas-left-w', width + 'px');
+        return;
+      }
+
+      const side = _modal.dataset.side;
+      if (side !== 'graph' && side !== 'backlinks') return;
+
+      const max = side === 'graph' ? 520 : 420;
+      const min = side === 'graph' ? 280 : 220;
+      const width = _clamp(rect.right - ev.clientX, min, max);
+
+      if (side === 'graph') {
+        _modal.style.setProperty('--atlas-graph-w', width + 'px');
+        if (_graph) requestAnimationFrame(() => _graph._resize());
+      } else {
+        _modal.style.setProperty('--atlas-right-w', width + 'px');
+      }
+    };
+
+    const stop = () => {
+      splitter.classList.remove('dragging');
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', stop);
+      document.removeEventListener('pointercancel', stop);
+    };
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', stop, { once: true });
+    document.addEventListener('pointercancel', stop, { once: true });
+  };
+
+  _modal.querySelector('[data-split="left"]')?.addEventListener('pointerdown', (e) => startDrag('left', e));
+  _modal.querySelector('[data-split="side"]')?.addEventListener('pointerdown', (e) => startDrag('side', e));
 }
 
 function _setAtlasPane(pane, opts = {}) {
@@ -622,22 +688,19 @@ function _renderBacklinks(list) {
 function _toggleGraph(force) {
   _graphOpen = (typeof force === 'boolean') ? force : !_graphOpen;
   const wrap = _modal.querySelector('.atlas-graph-wrap');
-  const content = _modal.querySelector('.modal-content');
-  const w = content.getBoundingClientRect().width;
+
   if (_graphOpen) {
     _setSidePanel('graph');
-    content.style.width = Math.min(window.innerWidth * 0.98, w + GRAPH_PANEL_W) + 'px';
     wrap.style.display = '';
     _openGraph();
   } else {
     if (_modal?.dataset.side === 'graph') _setSidePanel(null);
     wrap.style.display = 'none';
-    content.style.width = Math.max(720, w - GRAPH_PANEL_W) + 'px';
     if (_graph) _graph.stop();
   }
+
   _modal.querySelector('[data-act="graph-toggle"]').classList.toggle('active', _graphOpen);
 }
-
 async function _openGraph() {
   const canvas = _modal.querySelector('canvas.atlas-graph');
   let data;
