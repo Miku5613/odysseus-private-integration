@@ -67,6 +67,10 @@ function _buildModal() {
     <style>
       #atlas-modal .modal-content { width: min(1200px, 96vw); height: 88vh; display:flex; flex-direction:column; }
       #atlas-modal .atlas-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--bubble-border,#333); }
+      #atlas-modal .atlas-title-wrap { display:flex; flex-direction:column; gap:1px; min-width:0; }
+      #atlas-modal .atlas-title { background:none; border:0; color:inherit; padding:0; margin:0; font:inherit; font-size:14px; font-weight:700; cursor:pointer; text-align:left; }
+      #atlas-modal .atlas-title:hover { text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:3px; }
+      #atlas-modal .atlas-subtitle { font-size:11px; opacity:.58; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       #atlas-modal .atlas-head .grow { flex:1; }
       #atlas-modal .atlas-body { flex:1; display:flex; min-height:0; overflow:hidden; }
       #atlas-modal .atlas-left { width:240px; border-right:1px solid var(--bubble-border,#333); display:flex; flex-direction:column; min-height:0; }
@@ -113,8 +117,12 @@ function _buildModal() {
     </style>
     <div class="modal-content">
       <div class="atlas-head">
-        <strong style="font-size:14px;">Atlas</strong>
+        <div class="atlas-title-wrap">
+          <button class="atlas-title" data-act="home" title="Clear the open note view">Ideaverse</button>
+          <span class="atlas-subtitle" data-el="workspace-title">Atlas workspace</span>
+        </div>
         <span class="grow"></span>
+        <button class="atlas-btn" data-act="refresh" title="Refresh Ideaverse UI">↻</button>
         <button class="atlas-btn" data-act="graph-toggle" title="Show the link graph alongside your note">Graph</button>
         <button class="atlas-btn" data-act="import">Import</button>
         <button class="atlas-btn" data-act="export">Export</button>
@@ -152,7 +160,9 @@ function _buildModal() {
 
   // header actions
   _modal.querySelector('#atlas-close').onclick = closeAtlas;
+  _modal.querySelector('[data-act="home"]').onclick = () => _clearOpenNoteView();
   _modal.querySelector('[data-act="new"]').onclick = (e) => _openPlusMenu(e.currentTarget);
+  _modal.querySelector('[data-act="refresh"]').onclick = () => _refreshAtlasUi();
   _modal.querySelector('[data-act="graph-toggle"]').onclick = () => _toggleGraph();
   _modal.querySelector('[data-act="graph-close"]').onclick = () => _toggleGraph(false);
   _modal.querySelector('[data-act="export"]').onclick = () => {
@@ -218,6 +228,31 @@ async function openAtlas() {
   document.addEventListener('keydown', _escHandler);
   await _reloadNotes();
   // Restart the graph sim if the panel was left open from a previous session.
+  if (_graphOpen) _openGraph();
+}
+
+function _clearOpenNoteView() {
+  // UI-only reset: clear the currently displayed note/editor state.
+  // This does not change the selected workspace/vault and does not touch chat context.
+  if (!_modal) return;
+  if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+  _current = null;
+  _dirty = false;
+  const ta = _modal.querySelector('textarea');
+  if (ta) ta.value = '';
+  const path = _modal.querySelector('[data-el="path"]');
+  if (path) path.textContent = 'No note open';
+  const preview = _modal.querySelector('.atlas-preview');
+  if (preview) preview.innerHTML = '';
+  _renderBacklinks([]);
+  _renderList(_notes);
+}
+
+async function _refreshAtlasUi() {
+  // UI hygiene refresh only. Re-read the note list and graph, then clear the
+  // open board view. Workspace selection and chat context are intentionally untouched.
+  await _reloadNotes();
+  _clearOpenNoteView();
   if (_graphOpen) _openGraph();
 }
 
