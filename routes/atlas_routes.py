@@ -19,6 +19,7 @@ import io
 import os
 import re
 import logging
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -306,6 +307,24 @@ def setup_atlas_routes() -> APIRouter:
             raise HTTPException(400, str(e))
         abs_path.mkdir(parents=True, exist_ok=True)
         return {"ok": True, "path": _rel_str(owner, abs_path)}
+
+    @router.post("/folder/delete")
+    async def delete_folder(req: PathBody, request: Request):
+        owner = require_user(request)
+        rel = str(req.path or "").strip().replace("\\", "/").strip("/")
+        if not rel:
+            raise HTTPException(400, "Refusing to delete vault root")
+        try:
+            abs_path = safe_atlas_path(owner, rel)
+        except AtlasPathError as e:
+            raise HTTPException(400, str(e))
+        if not abs_path.exists():
+            raise HTTPException(404, "Folder not found")
+        if not abs_path.is_dir():
+            raise HTTPException(400, "Use note delete for files")
+        shutil.rmtree(abs_path)
+        invalidate_cache(owner)
+        return {"ok": True, "path": rel}
 
     @router.get("/graph")
     async def graph(request: Request):

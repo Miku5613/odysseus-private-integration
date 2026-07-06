@@ -102,6 +102,9 @@ function _buildModal() {
       #atlas-modal .atlas-menu { position:absolute; z-index:30; background:var(--input-bg,#222); border:1px solid var(--input-border,#444); border-radius:8px; padding:4px; min-width:170px; box-shadow:0 6px 20px rgba(0,0,0,.4); }
       #atlas-modal .atlas-menu div { padding:7px 10px; border-radius:6px; cursor:pointer; font-size:13px; }
       #atlas-modal .atlas-menu div:hover { background:rgba(127,127,127,.18); }
+      .atlas-floating-menu { position:fixed; z-index:10000; background:var(--input-bg,#222); border:1px solid var(--input-border,#444); border-radius:8px; padding:4px; min-width:170px; box-shadow:0 6px 20px rgba(0,0,0,.4); }
+      .atlas-floating-menu div { padding:7px 10px; border-radius:6px; cursor:pointer; font-size:13px; }
+      .atlas-floating-menu div:hover { background:rgba(127,127,127,.18); }
       #atlas-modal .atlas-preview a.atlas-tag { color:var(--brand-color,#6cf); background:rgba(110,140,255,.14); border-radius:10px; padding:0 7px; font-size:.9em; text-decoration:none; white-space:nowrap; }
       #atlas-modal .atlas-preview a.atlas-tag:hover { background:rgba(110,140,255,.28); }
       #atlas-modal .atlas-center { flex:1; display:flex; min-height:0; }
@@ -143,6 +146,7 @@ function _buildModal() {
         <button class="atlas-btn" data-act="backlinks-toggle" title="Show backlinks alongside your note">Backlinks</button>
         <button class="atlas-btn" data-act="import">Import</button>
         <button class="atlas-btn" data-act="export">Export</button>
+        <button class="atlas-btn" data-act="delete" title="Delete the open note">Delete</button>
         <button class="atlas-btn" id="atlas-close" title="Close">&#x2715;</button>
       </div>
       <div class="atlas-tabs">
@@ -191,9 +195,12 @@ function _buildModal() {
   _modal.querySelector('[data-act="backlinks-toggle"]').onclick = () => _toggleBacklinks();
   _modal.querySelector('[data-act="graph-close"]').onclick = () => _toggleGraph(false);
   _modal.querySelector('[data-act="export"]').onclick = () => {
+    const ok = window.confirm('Export the current Atlas vault as a zip file?');
+    if (!ok) return;
     window.open(API + '/export', '_blank');
   };
   _modal.querySelector('[data-act="import"]').onclick = _openImportDialog;
+  _modal.querySelector('[data-act="delete"]').onclick = () => _deleteCurrentNote();
 
   // pane tabs
   _modal.querySelectorAll('.atlas-tab').forEach((tab) => {
@@ -453,10 +460,20 @@ function _renderTreeLevel(container, node, depth) {
     row.className = 'atlas-row folder' + (_selectedFolder === child.path ? ' active' : '');
     row.style.paddingLeft = (8 + depth * 12) + 'px';
     row.innerHTML = `<span class="twisty">${collapsed ? '▸' : '▾'}</span><span class="label"></span>`;
-    row.querySelector('.label').textContent = name;
+    const twisty = row.querySelector('.twisty');
+    const label = row.querySelector('.label');
+    label.textContent = name;
+    if (twisty) {
+      twisty.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (collapsed) _collapsed.delete(child.path); else _collapsed.add(child.path);
+        _renderList(_notes);
+      };
+    }
     row.onclick = () => {
-      _selectedFolder = (_selectedFolder === child.path && !collapsed) ? child.path : child.path;
-      if (collapsed) _collapsed.delete(child.path); else _collapsed.add(child.path);
+      _selectedFolder = child.path;
+      if (collapsed) _collapsed.delete(child.path);
       _renderList(_notes);
     };
     _wireDropTarget(row, child.path);
@@ -524,25 +541,100 @@ async function openNote(path) {
   } catch (e) { console.error('openNote', e); }
 }
 
+async function _deleteCurrentNote() {
+  if (_current) {
+    const path = _current;
+    const name = path.split('/').pop();
+    const dirtyNote = _dirty ? '\n\nUnsaved edits in this note will be discarded.' : '';
+    const ok = window.confirm(`Delete note "${name}"?\n\nThis removes the note from the Atlas vault.${dirtyNote}`);
+    if (!ok) return;
+
+    try {
+      if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+      await apiSend('/delete', 'POST', { path });
+      _current = null;
+      _dirty = false;
+
+      const ta = _modal.querySelector('textarea');
+      if (ta) ta.value = '';
+
+      const status = _modal.querySelector('[data-el="path"]');
+      if (status) status.textContent = 'No note open';
+
+      const preview = _modal.querySelector('.atlas-preview');
+      if (preview) preview.innerHTML = '';
+
+      _renderBacklinks([]);
+      await _reloadNotes();
+      if (_graphOpen) _openGraph();
+      showToast(`Deleted ${name}`);
+    } catch (e) {
+      showError('Delete failed: ' + e.message);
+    }
+    return;
+  }
+
+  if (_selectedFolder) {
+    const folder = _selectedFolder;
+    const ok = window.confirm(`Delete folder "${folder}" and everything inside it?\n\nThis removes all notes/files in that folder from the Atlas vault.`);
+    if (!ok) return;
+
+    try {
+      await apiSend('/folder/delete', 'POST', { path: folder });
+      _selectedFolder = '';
+      _collapsed.clear();
+      _emptyFolders.delete(folder);
+      await _reloadNotes();
+      if (_graphOpen) _openGraph();
+      showToast(`Deleted folder ${folder}`);
+    } catch (e) {
+      showError('Folder delete failed: ' + e.message);
+    }
+    return;
+  }
+
+  showToast('Open a note or select a folder first.');
+}
+
 // The "+" button: a small menu so creating a note no longer demands you
 // decide its folder up front, and template insertion lives here too.
 function _openPlusMenu(anchor) {
-  const existing = _modal.querySelector('.atlas-menu');
+  const existing = document.querySelector('.atlas-floating-menu[data-owner="atlas"]');
   if (existing) { existing.remove(); return; }
+
   const menu = document.createElement('div');
-  menu.className = 'atlas-menu';
+  menu.className = 'atlas-floating-menu';
+  menu.dataset.owner = 'atlas';
+
   const here = _selectedFolder ? ` (in ${_selectedFolder}/)` : '';
   menu.innerHTML = `
     <div data-m="note">New note${here}</div>
     <div data-m="folder">New folder${here}</div>
     <div data-m="template">Insert template…</div>`;
+
   const r = anchor.getBoundingClientRect();
-  menu.style.top = (r.bottom + 4) + 'px';
-  menu.style.left = Math.max(8, r.right - 175) + 'px';
-  _modal.appendChild(menu);
-  const close = () => { menu.remove(); document.removeEventListener('click', onDoc, true); };
-  const onDoc = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
-  setTimeout(() => document.addEventListener('click', onDoc, true), 0);
+  menu.style.top = Math.min(window.innerHeight - 12, r.bottom + 4) + 'px';
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - 190, r.right - 175)) + 'px';
+
+  document.body.appendChild(menu);
+
+  const close = () => {
+    menu.remove();
+    document.removeEventListener('click', onDoc, true);
+    document.removeEventListener('keydown', onKey, true);
+  };
+  const onDoc = (e) => {
+    if (!menu.contains(e.target) && e.target !== anchor) close();
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+  };
+
+  setTimeout(() => {
+    document.addEventListener('click', onDoc, true);
+    document.addEventListener('keydown', onKey, true);
+  }, 0);
+
   menu.querySelector('[data-m="note"]').onclick = () => { close(); _newNote(); };
   menu.querySelector('[data-m="folder"]').onclick = () => { close(); _newFolder(); };
   menu.querySelector('[data-m="template"]').onclick = () => { close(); _insertTemplate(); };
