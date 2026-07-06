@@ -72,7 +72,17 @@ function _buildModal() {
       #atlas-modal .atlas-title:hover { text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:3px; }
       #atlas-modal .atlas-subtitle { font-size:11px; opacity:.58; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       #atlas-modal .atlas-head .grow { flex:1; }
+      #atlas-modal .atlas-tabs { display:flex; align-items:center; gap:4px; padding:6px 10px; border-bottom:1px solid var(--bubble-border,#333); }
+      #atlas-modal .atlas-tab { background:none; border:0; color:inherit; opacity:.62; border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px; }
+      #atlas-modal .atlas-tab:hover { background:rgba(127,127,127,.12); opacity:.9; }
+      #atlas-modal .atlas-tab.active { background:var(--section-accent,rgba(120,140,255,.18)); opacity:1; }
       #atlas-modal .atlas-body { flex:1; display:flex; min-height:0; overflow:hidden; }
+      #atlas-modal[data-files="closed"] .atlas-left { display:none; }
+      #atlas-modal[data-view="edit"] .atlas-preview { display:none; }
+      #atlas-modal[data-view="preview"] .atlas-editor { display:none; }
+      #atlas-modal[data-view="preview"] .atlas-preview { border-left:0; }
+      #atlas-modal[data-side="backlinks"] .atlas-right { display:block; }
+      #atlas-modal[data-side="graph"] .atlas-graph-wrap { display:flex !important; }
       #atlas-modal .atlas-left { width:240px; border-right:1px solid var(--bubble-border,#333); display:flex; flex-direction:column; min-height:0; }
       #atlas-modal .atlas-list { overflow:auto; flex:1; padding:2px 0; }
       #atlas-modal .atlas-row { display:flex; align-items:center; gap:4px; padding:4px 8px; cursor:pointer; font-size:13px; white-space:nowrap; overflow:hidden; border-radius:5px; }
@@ -94,7 +104,7 @@ function _buildModal() {
       #atlas-modal .atlas-editor textarea { flex:1; width:100%; resize:none; border:0; background:transparent; color:inherit; font-family:var(--code-font,monospace); font-size:13px; line-height:1.55; outline:none; }
       #atlas-modal .atlas-preview a.atlas-wikilink { color:var(--brand-color,#6cf); text-decoration:none; border-bottom:1px dashed currentColor; cursor:pointer; }
       #atlas-modal .atlas-preview a.atlas-wikilink.missing { color:var(--accent-error,#e66); opacity:.8; }
-      #atlas-modal .atlas-right { width:220px; border-left:1px solid var(--bubble-border,#333); overflow:auto; padding:10px; font-size:12px; }
+      #atlas-modal .atlas-right { display:none; width:220px; border-left:1px solid var(--bubble-border,#333); overflow:auto; padding:10px; font-size:12px; }
       #atlas-modal .atlas-right h4 { margin:6px 0; font-size:11px; text-transform:uppercase; opacity:.6; }
       #atlas-modal .atlas-bl { padding:4px 6px; cursor:pointer; border-radius:5px; }
       #atlas-modal .atlas-bl:hover { background:rgba(127,127,127,.15); }
@@ -124,9 +134,15 @@ function _buildModal() {
         <span class="grow"></span>
         <button class="atlas-btn" data-act="refresh" title="Refresh Ideaverse UI">↻</button>
         <button class="atlas-btn" data-act="graph-toggle" title="Show the link graph alongside your note">Graph</button>
+        <button class="atlas-btn" data-act="backlinks-toggle" title="Show backlinks alongside your note">Backlinks</button>
         <button class="atlas-btn" data-act="import">Import</button>
         <button class="atlas-btn" data-act="export">Export</button>
         <button class="atlas-btn" id="atlas-close" title="Close">&#x2715;</button>
+      </div>
+      <div class="atlas-tabs">
+        <button class="atlas-tab active" data-pane="files">Files</button>
+        <button class="atlas-tab active" data-pane="edit">Edit</button>
+        <button class="atlas-tab" data-pane="preview">Preview</button>
       </div>
       <div class="atlas-body">
         <div class="atlas-left">
@@ -164,11 +180,19 @@ function _buildModal() {
   _modal.querySelector('[data-act="new"]').onclick = (e) => _openPlusMenu(e.currentTarget);
   _modal.querySelector('[data-act="refresh"]').onclick = () => _refreshAtlasUi();
   _modal.querySelector('[data-act="graph-toggle"]').onclick = () => _toggleGraph();
+  _modal.querySelector('[data-act="backlinks-toggle"]').onclick = () => _toggleBacklinks();
   _modal.querySelector('[data-act="graph-close"]').onclick = () => _toggleGraph(false);
   _modal.querySelector('[data-act="export"]').onclick = () => {
     window.open(API + '/export', '_blank');
   };
   _modal.querySelector('[data-act="import"]').onclick = _openImportDialog;
+
+  // pane tabs
+  _modal.querySelectorAll('.atlas-tab').forEach((tab) => {
+    tab.onclick = () => _setAtlasPane(tab.dataset.pane);
+  });
+  _setAtlasPane('edit', { initial: true });
+  _setSidePanel(null);
 
   // search
   const search = _modal.querySelector('.atlas-search');
@@ -229,6 +253,39 @@ async function openAtlas() {
   await _reloadNotes();
   // Restart the graph sim if the panel was left open from a previous session.
   if (_graphOpen) _openGraph();
+}
+
+function _setAtlasPane(pane, opts = {}) {
+  if (!_modal) return;
+  if (pane === 'files') {
+    const closed = _modal.dataset.files === 'closed';
+    _modal.dataset.files = closed ? 'open' : 'closed';
+  } else if (pane === 'edit' || pane === 'preview') {
+    _modal.dataset.view = pane;
+  }
+  const filesOpen = _modal.dataset.files !== 'closed';
+  const view = _modal.dataset.view || 'edit';
+  _modal.querySelectorAll('.atlas-tab').forEach((tab) => {
+    const p = tab.dataset.pane;
+    tab.classList.toggle('active', p === 'files' ? filesOpen : p === view);
+  });
+}
+
+function _setSidePanel(side) {
+  if (!_modal) return;
+  _modal.dataset.side = side || '';
+  _modal.querySelector('[data-act="graph-toggle"]')?.classList.toggle('active', side === 'graph');
+  _modal.querySelector('[data-act="backlinks-toggle"]')?.classList.toggle('active', side === 'backlinks');
+}
+
+function _toggleBacklinks(force) {
+  const next = (typeof force === 'boolean') ? force : _modal.dataset.side !== 'backlinks';
+  if (next) {
+    if (_graphOpen) _toggleGraph(false);
+    _setSidePanel('backlinks');
+  } else {
+    _setSidePanel(null);
+  }
 }
 
 function _clearOpenNoteView() {
@@ -392,6 +449,7 @@ async function openNote(path) {
     _current = data.path;
     _selectedFolder = data.path.includes('/') ? data.path.slice(0, data.path.lastIndexOf('/')) : '';
     _dirty = false;
+    _setAtlasPane('edit');
     _modal.querySelector('textarea').value = data.content || '';
     _modal.querySelector('[data-el="path"]').textContent = data.path;
     _renderPreview(data.content || '', data.outlinks);
@@ -567,10 +625,12 @@ function _toggleGraph(force) {
   const content = _modal.querySelector('.modal-content');
   const w = content.getBoundingClientRect().width;
   if (_graphOpen) {
+    _setSidePanel('graph');
     content.style.width = Math.min(window.innerWidth * 0.98, w + GRAPH_PANEL_W) + 'px';
     wrap.style.display = '';
     _openGraph();
   } else {
+    if (_modal?.dataset.side === 'graph') _setSidePanel(null);
     wrap.style.display = 'none';
     content.style.width = Math.max(720, w - GRAPH_PANEL_W) + 'px';
     if (_graph) _graph.stop();
