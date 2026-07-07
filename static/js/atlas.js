@@ -850,6 +850,15 @@ function _expandTemplate(text) {
 // ── import (drop-in dialog) / export ─────────────────────────────────────────
 let _importOverlay = null;
 
+function _refreshDockHandlesSoon() {
+  // Atlas Import is a transient overlay. The shared dock seam can hide while
+  // another modal is visible, so nudge layout after Import opens/closes.
+  requestAnimationFrame(() => {
+    window.dispatchEvent(new Event('resize'));
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+  });
+}
+
 function _buildImportOverlay() {
   if (_importOverlay) return _importOverlay;
   const ov = document.createElement('div');
@@ -877,7 +886,11 @@ function _buildImportOverlay() {
   document.body.appendChild(ov);
   _importOverlay = ov;
 
-  const close = () => { ov.style.display = 'none'; ov.classList.add('hidden'); };
+  const close = () => {
+    ov.style.display = 'none';
+    ov.classList.add('hidden');
+    _refreshDockHandlesSoon();
+  };
   ov.querySelector('[data-act="cancel"]').onclick = close;
   ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
 
@@ -906,6 +919,7 @@ function _openImportDialog() {
   const ov = _buildImportOverlay();
   ov.classList.remove('hidden');
   ov.style.display = 'flex';
+  _refreshDockHandlesSoon();
 }
 
 async function _doImport(files) {
