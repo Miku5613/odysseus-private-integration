@@ -26,6 +26,12 @@ const TEMPLATE_DIR = 'templates/';
 
 const API = '/api/atlas';
 
+function _atlasEsc(v) {
+  const div = document.createElement('div');
+  div.textContent = String(v ?? '');
+  return div.innerHTML;
+}
+
 function _pathBaseName(p) {
   const s = String(p || '').replace(/[\\/]+$/, '');
   if (!s) return '';
@@ -36,6 +42,107 @@ function _pathBaseName(p) {
 function _activeWorkspaceRoot() {
   try { return getWorkspace ? (getWorkspace() || '') : ''; }
   catch (_) { return ''; }
+}
+
+
+function _renderRootSection(container) {
+  const root = _activeWorkspaceRoot();
+  if (!root || !container) return;
+
+  const section = document.createElement('section');
+  section.className = 'atlas-files-section atlas-root-section';
+  section.innerHTML = `
+    <div class="atlas-files-section-head">
+      <span>Root</span>
+    </div>
+    <div class="atlas-root-placeholder">
+      <div class="atlas-root-card" title="${_atlasEsc(root)}">
+        <div class="atlas-root-name">${_atlasEsc(_pathBaseName(root))}</div>
+        <div class="atlas-root-path">${_atlasEsc(root)}</div>
+        <div class="atlas-root-note">Workspace root is active. File view and indexing come later.</div>
+      </div>
+    </div>`;
+  container.appendChild(section);
+}
+
+function _wireFilesPanelActions() {
+  if (!_modal) return;
+
+  const list = _modal.querySelector('.atlas-list');
+  if (list && !list._atlasResetDelegate) {
+    list._atlasResetDelegate = true;
+    list.addEventListener('click', (e) => {
+      const rootBtn = e.target.closest('[data-act="session-root"]');
+      if (rootBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        _clearSelectedFolder();
+        return;
+      }
+      const btn = e.target.closest('[data-act="reset-session"]');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      _resetSessionNotes();
+    });
+  }
+
+  const btn = _modal.querySelector('[data-act="reset-session"]');
+  if (!btn || btn._atlasResetWired) return;
+  btn._atlasResetWired = true;
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    _resetSessionNotes();
+  });
+}
+
+async function _resetSessionNotes() {
+  const notes = Array.isArray(_notes) ? [..._notes].filter(n => n && n.path) : [];
+  const folders = _sessionFolderList();
+  const noteCount = notes.length;
+  const folderCount = folders.length;
+
+  if (!noteCount && !folderCount) {
+    showToast('Nothing to reset.');
+    return;
+  }
+
+  const ok = window.confirm(
+    `Reset Atlas session notes and folders?\n\nThis will remove ${noteCount} note${noteCount === 1 ? '' : 's'} and ${folderCount} folder${folderCount === 1 ? '' : 's'}.\nIt will not touch the active Workspace root.`
+  );
+  if (!ok) return;
+
+  try {
+    await apiSend('/session/reset', 'POST', {});
+  } catch (e) {
+    showError('Reset failed: ' + e.message);
+    return;
+  }
+
+  _current = null;
+  _dirty = false;
+  _selectedFolder = '';
+  _emptyFolders.clear();
+  _notes = [];
+
+  const ta = _modal?.querySelector('textarea');
+  if (ta) ta.value = '';
+
+  const pathEl = _modal?.querySelector('[data-el="path"]');
+  if (pathEl) pathEl.textContent = 'No note open';
+
+  const preview = _modal?.querySelector('.atlas-preview');
+  if (preview) preview.innerHTML = '';
+
+  _renderBacklinks([]);
+
+  await _reloadNotes();
+  _renderList(_notes);
+  _refreshAtlasLayoutAfterFileChange();
+  if (_graphOpen) _openGraph();
+
+  showToast('Reset session notes and folders.');
 }
 
 function _syncAtlasWorkspaceTitle() {
@@ -51,6 +158,8 @@ function _syncAtlasWorkspaceTitle() {
     subtitle.textContent = 'Session Notes';
     subtitle.title = 'Atlas session notes';
   }
+
+  if (Array.isArray(_notes)) _renderList(_notes);
 
   const importBtn = _modal.querySelector('[data-act="import"]');
   if (importBtn) {
@@ -89,6 +198,30 @@ async function apiGet(path, params) {
   if (!r.ok) throw new Error(`${path} ${r.status}`);
   return r.json();
 }
+async function _refreshFilesTree() {
+  try {
+    await _loadFolders();
+  } catch (_) {}
+  try {
+    _renderList(Array.isArray(_notes) ? _notes : []);
+  } catch (_) {}
+  try {
+    _refreshAtlasLayoutAfterFileChange();
+  } catch (_) {}
+}
+
+async function _loadFolders() {
+  try {
+    const data = await apiGet('/folders');
+    const folders = Array.isArray(data.folders) ? data.folders : [];
+    _emptyFolders.clear();
+    folders.filter(Boolean).forEach((folder) => _emptyFolders.add(folder));
+  } catch (_) {
+    // Keep the last known folders if the folder endpoint is temporarily unavailable.
+    if (_emptyFolders && typeof _emptyFolders.clear === 'function') _emptyFolders.clear();
+  }
+}
+
 async function apiSend(path, method, body) {
   const r = await fetch(API + path, {
     method,
@@ -137,6 +270,20 @@ function _buildModal() {
       #atlas-modal[data-side="graph"] .atlas-graph-wrap { display:flex !important; }
       #atlas-modal .atlas-left { width:var(--atlas-left-w,260px); flex:0 0 var(--atlas-left-w,260px); border-right:1px solid var(--bubble-border,#333); display:flex; flex-direction:column; min-height:0; }
       #atlas-modal .atlas-list { overflow:auto; flex:1; padding:2px 0; }
+      #atlas-modal .atlas-files-section { border-bottom:1px solid color-mix(in srgb,var(--bubble-border,#333) 72%,transparent); }
+      #atlas-modal .atlas-files-section-head { display:flex; align-items:center; gap:8px; padding:8px 8px 6px; font-size:11px; text-transform:uppercase; letter-spacing:.055em; opacity:.68; }
+      #atlas-modal .atlas-files-section-head .grow { flex:1; }
+      #atlas-modal .atlas-reset-btn { border:1px solid var(--input-border,#444); background:transparent; color:inherit; border-radius:6px; padding:3px 7px; font-size:11px; cursor:pointer; text-transform:none; letter-spacing:0; opacity:.78; }
+      #atlas-modal .atlas-reset-btn:hover { opacity:1; background:rgba(127,127,127,.14); }
+      #atlas-modal .atlas-section-root-btn { border:0; background:transparent; color:inherit; padding:0; margin:0; font:inherit; text-transform:inherit; letter-spacing:inherit; cursor:pointer; opacity:1; }
+
+      #atlas-modal .atlas-session-list { min-height:20px; }
+      #atlas-modal .atlas-root-placeholder { padding:2px 8px 10px; }
+      #atlas-modal .atlas-root-card { border:1px solid color-mix(in srgb,var(--bubble-border,#333) 72%,transparent); border-radius:8px; padding:8px 9px; background:rgba(127,127,127,.06); }
+      #atlas-modal .atlas-root-name { font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      #atlas-modal .atlas-root-path { font-size:10px; opacity:.56; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; }
+      #atlas-modal .atlas-root-note { font-size:11px; opacity:.52; margin-top:6px; line-height:1.35; }
+
       #atlas-modal .atlas-row { display:flex; align-items:center; gap:4px; padding:4px 8px; cursor:pointer; font-size:13px; white-space:nowrap; overflow:hidden; border-radius:5px; }
       #atlas-modal .atlas-row:hover { background:rgba(127,127,127,.12); }
       #atlas-modal .atlas-row.active { background:var(--section-accent,rgba(120,140,255,.18)); }
@@ -148,7 +295,7 @@ function _buildModal() {
       #atlas-modal .atlas-menu { position:absolute; z-index:30; background:var(--input-bg,#222); border:1px solid var(--input-border,#444); border-radius:8px; padding:4px; min-width:170px; box-shadow:0 6px 20px rgba(0,0,0,.4); }
       #atlas-modal .atlas-menu div { padding:7px 10px; border-radius:6px; cursor:pointer; font-size:13px; }
       #atlas-modal .atlas-menu div:hover { background:rgba(127,127,127,.18); }
-      .atlas-floating-menu { position:fixed; z-index:10000; background:var(--input-bg,#222); border:1px solid var(--input-border,#444); border-radius:8px; padding:4px; min-width:170px; box-shadow:0 6px 20px rgba(0,0,0,.4); }
+      .atlas-floating-menu { z-index:2147483647 !important; position:fixed; z-index:10000; background:var(--input-bg,#222); border:1px solid var(--input-border,#444); border-radius:8px; padding:4px; min-width:170px; box-shadow:0 6px 20px rgba(0,0,0,.4); }
       .atlas-floating-menu div { padding:7px 10px; border-radius:6px; cursor:pointer; font-size:13px; }
       .atlas-floating-menu div:hover { background:rgba(127,127,127,.18); }
       #atlas-modal .atlas-preview a.atlas-tag { color:var(--brand-color,#6cf); background:rgba(110,140,255,.14); border-radius:10px; padding:0 7px; font-size:.9em; text-decoration:none; white-space:nowrap; }
@@ -433,6 +580,8 @@ async function _refreshAtlasUi() {
   // UI hygiene refresh only. Re-read the note list and graph, then clear the
   // open board view. Workspace selection and chat context are intentionally untouched.
   await _reloadNotes();
+  await _loadFolders();
+  _renderList(_notes);
   _clearOpenNoteView();
   if (_graphOpen) _openGraph();
 }
@@ -454,6 +603,7 @@ async function _reloadNotes() {
   try {
     const data = await apiGet('/notes');
     _notes = data.notes || [];
+  await _loadFolders();
   } catch { _notes = []; }
   _renderList(_notes);
 }
@@ -478,6 +628,40 @@ function _ensureDir(root, dirPath) {
 }
 
 // Build a nested tree { dirs: Map<name, node>, files: [item] } from flat paths.
+
+function _sessionFolderList() {
+  if (!_emptyFolders) return [];
+  if (typeof _emptyFolders.forEach === 'function') {
+    const out = [];
+    _emptyFolders.forEach((f) => { if (f) out.push(String(f)); });
+    return out;
+  }
+  if (Array.isArray(_emptyFolders)) return _emptyFolders.filter(Boolean).map(String);
+  return [];
+}
+
+function _resolvePathForSelectedFolder(input) {
+  let value = String(input || '').trim().replace(/\\/g, '/');
+  if (!value) return '';
+
+  // Leading slash means "create at Atlas session root".
+  if (value.startsWith('/')) return value.replace(/^\/+/, '');
+
+  // Explicit paths are respected.
+  if (value.includes('/')) return value.replace(/^\/+/, '');
+
+  // Plain names inherit the selected folder.
+  if (_selectedFolder) return `${_selectedFolder}/${value}`;
+
+  return value;
+}
+
+function _clearSelectedFolder() {
+  _selectedFolder = '';
+  try { _renderList(_notes); } catch (_) {}
+  showToast('Session root selected');
+}
+
 function _buildTree(items) {
   const root = { dirs: new Map(), files: [] };
   for (const it of items) {
@@ -493,14 +677,37 @@ function _buildTree(items) {
 function _renderList(items) {
   const list = _modal.querySelector('.atlas-list');
   list.innerHTML = '';
-  if (!items.length) {
-    list.innerHTML = '<div style="padding:14px; opacity:.5; font-size:12px;">No notes yet. Click + to create one.</div>';
-    return;
+
+  const sessionSection = document.createElement('section');
+  sessionSection.className = 'atlas-files-section atlas-session-section';
+  sessionSection.innerHTML = `
+    <div class="atlas-files-section-head">
+      <button type="button" class="atlas-section-root-btn" data-act="session-root" title="Create new notes at the Atlas session root">Session Notes</button>
+      <span class="grow"></span>
+      <button type="button" class="atlas-reset-btn" data-act="reset-session" title="Reset Atlas session notes and folders">Reset</button>
+    </div>
+    <div class="atlas-session-list"></div>`;
+  list.appendChild(sessionSection);
+
+  const sessionList = sessionSection.querySelector('.atlas-session-list');
+  const hasNotes = Array.isArray(items) && items.length > 0;
+  const hasFolders = !!(_emptyFolders && (
+    (_emptyFolders.size && _emptyFolders.size > 0) ||
+    (Array.isArray(_emptyFolders) && _emptyFolders.length > 0)
+  ));
+
+  if (!hasNotes && !hasFolders) {
+    sessionList.innerHTML = '<div style="opacity:.5;padding:10px;">No session notes</div>';
+  } else {
+    const tree = _buildTree(Array.isArray(items) ? items : []);
+    _renderTreeLevel(sessionList, tree, 0);
+    // Dropping on empty session-list space moves a note to the Atlas session root.
+    _wireDropTarget(sessionList, '');
   }
-  const tree = _buildTree(items);
-  _renderTreeLevel(list, tree, 0);
-  // Dropping on empty list space moves a note to the vault root.
-  _wireDropTarget(list, '');
+
+  _renderRootSection(list);
+  _wireFilesPanelActions();
+  try { _refreshDockHandlesSoon(); } catch (_) {}
 }
 
 function _renderTreeLevel(container, node, depth) {
@@ -618,6 +825,7 @@ async function _deleteCurrentNote() {
 
       _renderBacklinks([]);
       await _reloadNotes();
+  await _refreshFilesTree();
       if (_graphOpen) _openGraph();
       showToast(`Deleted ${name}`);
     } catch (e) {
@@ -656,6 +864,7 @@ function _openPlusMenu(anchor) {
 
   const menu = document.createElement('div');
   menu.className = 'atlas-floating-menu';
+  menu.style.zIndex = '2147483647';
   menu.dataset.owner = 'atlas';
 
   const here = _selectedFolder ? ` (in ${_selectedFolder}/)` : '';
@@ -708,6 +917,7 @@ async function _newNote(name) {
   try {
     const res = await apiSend('/note', 'PUT', { path, content: `# ${path.split('/').pop()}\n\n` });
     await _reloadNotes();
+  await _refreshFilesTree();
     openNote(res.path);
   } catch (e) { showError('Could not create note: ' + e.message); }
 }
@@ -727,10 +937,12 @@ async function _newFolder() {
     _selectedFolder = res.path;
     _collapsed.delete(res.path);
     _emptyFolders.add(res.path);
-    await _reloadNotes();
+    await _loadFolders();
+    _emptyFolders.add(res.path);
+    _renderList(_notes);
+    _refreshAtlasLayoutAfterFileChange();
   } catch (e) { showError('Could not create folder: ' + e.message); }
 }
-
 async function _saveCurrent() {
   if (!_current || !_dirty) return;
   const content = _modal.querySelector('textarea').value;
@@ -901,6 +1113,18 @@ function _expandTemplate(text) {
 
 // ── import (drop-in dialog) / export ─────────────────────────────────────────
 let _importOverlay = null;
+
+function _refreshAtlasLayoutAfterFileChange() {
+  // The shared dock seam can stale after Atlas rebuilds its file tree
+  // through create/delete/reset actions. Keep this Atlas-local.
+  try { _syncAtlasWorkspaceTitle(); } catch (_) {}
+  try { _refreshDockHandlesSoon(); } catch (_) {
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'));
+      requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+    });
+  }
+}
 
 function _refreshDockHandlesSoon() {
   // Atlas Import is a transient overlay. The shared dock seam can hide while

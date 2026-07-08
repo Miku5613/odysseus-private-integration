@@ -226,6 +226,19 @@ def setup_atlas_routes() -> APIRouter:
         items.sort(key=lambda n: n["mtime"], reverse=True)
         return {"notes": items}
 
+    @router.get("/folders")
+    async def list_folders(request: Request):
+        owner = require_user(request)
+        root = owner_root(owner)
+        folders = []
+        for dirpath, dirnames, _filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+            rel = str(Path(dirpath).relative_to(root)).replace(os.sep, "/")
+            if rel and rel != ".":
+                folders.append(rel)
+        folders.sort(key=str.lower)
+        return {"folders": folders}
+
     @router.get("/note")
     async def get_note(request: Request, path: str):
         owner = require_user(request)
@@ -325,6 +338,21 @@ def setup_atlas_routes() -> APIRouter:
         shutil.rmtree(abs_path)
         invalidate_cache(owner)
         return {"ok": True, "path": rel}
+
+    @router.post("/session/reset")
+    async def reset_session(request: Request):
+        owner = require_user(request)
+        root = owner_root(owner)
+        removed = 0
+        for child in list(root.iterdir()):
+            if child.is_dir():
+                shutil.rmtree(child)
+                removed += 1
+            else:
+                child.unlink()
+                removed += 1
+        invalidate_cache(owner)
+        return {"ok": True, "removed": removed}
 
     @router.get("/graph")
     async def graph(request: Request):

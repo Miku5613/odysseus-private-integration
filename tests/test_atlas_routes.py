@@ -79,6 +79,32 @@ def test_rename_and_delete(client):
     assert client.get("/api/atlas/notes", headers=_as("alice")).json()["notes"] == []
 
 
+def test_list_folders_includes_empty_folder(client):
+    client.post("/api/atlas/folder", json={"path": "Empty/Sub"}, headers=_as("alice"))
+    folders = client.get("/api/atlas/folders", headers=_as("alice")).json()["folders"]
+    assert "Empty" in folders
+    assert "Empty/Sub" in folders
+
+    client.put("/api/atlas/note", json={"path": "Empty/Sub/Note", "content": "x"}, headers=_as("alice"))
+    client.post("/api/atlas/delete", json={"path": "Empty/Sub/Note.md"}, headers=_as("alice"))
+
+    folders = client.get("/api/atlas/folders", headers=_as("alice")).json()["folders"]
+    assert "Empty" in folders
+    assert "Empty/Sub" in folders
+
+
+def test_reset_session_clears_notes_and_folders(client):
+    client.post("/api/atlas/folder", json={"path": "Ghost/Sub"}, headers=_as("alice"))
+    client.put("/api/atlas/note", json={"path": "Ghost/Sub/Note", "content": "x"}, headers=_as("alice"))
+
+    r = client.post("/api/atlas/session/reset", headers=_as("alice"))
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    assert client.get("/api/atlas/notes", headers=_as("alice")).json()["notes"] == []
+    assert client.get("/api/atlas/folders", headers=_as("alice")).json()["folders"] == []
+
+
 def test_owner_isolation(client):
     client.put("/api/atlas/note", json={"path": "secret", "content": "alice only"}, headers=_as("alice"))
     # Bob sees nothing and cannot read alice's note.
