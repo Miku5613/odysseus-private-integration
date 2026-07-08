@@ -15,6 +15,9 @@ const _FOLDER_SVG = '<svg class="workspace-row-icon" width="15" height="15" view
 let _modal = null;
 let _curPath = '';
 
+const RECENT_WORKSPACES_KEY = 'odysseus.workspace.recent';
+const RECENT_WORKSPACES_LIMIT = 8;
+
 export function getWorkspace() {
   return Storage.get(KEYS.WORKSPACE, '') || '';
 }
@@ -24,6 +27,125 @@ function _basename(p) {
   // Handle both POSIX (/) and Windows (\) separators.
   const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
   return parts[parts.length - 1] || p;
+}
+
+function _loadRecentWorkspaces() {
+  try {
+    const raw = Storage.get(RECENT_WORKSPACES_KEY, '[]') || '[]';
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(p => typeof p === 'string' && p.trim()).slice(0, RECENT_WORKSPACES_LIMIT);
+  } catch (_) {
+    return [];
+  }
+}
+
+function _saveRecentWorkspaces(paths) {
+  const clean = [];
+  const seen = new Set();
+  for (const raw of paths || []) {
+    const p = String(raw || '').trim();
+    if (!p) continue;
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    clean.push(p);
+    if (clean.length >= RECENT_WORKSPACES_LIMIT) break;
+  }
+  Storage.set(RECENT_WORKSPACES_KEY, JSON.stringify(clean));
+}
+
+function _rememberWorkspace(path) {
+  const p = String(path || '').trim();
+  if (!p) return;
+  const rest = _loadRecentWorkspaces().filter(x => x.toLowerCase() !== p.toLowerCase());
+  _saveRecentWorkspaces([p, ...rest]);
+}
+
+function _removeRecentWorkspace(path) {
+  const p = String(path || '').trim();
+  if (!p) return;
+  _saveRecentWorkspaces(_loadRecentWorkspaces().filter(x => x.toLowerCase() !== p.toLowerCase()));
+}
+
+function _authorizedRoots() {
+  // Future integrations can register vetted roots here, for example:
+  // Obsidian vault root, Atlas session root, or managed project roots.
+  // Keep empty for now so Workspace remains self-contained.
+  return [];
+}
+
+function _setWorkspaceAndRemember(path) {
+  setWorkspace(path);
+  _rememberWorkspace(path);
+  _renderQuickStart();
+}
+
+function _renderQuickStart() {
+  if (!_modal) return;
+  const box = _modal.querySelector('#workspace-quickstart');
+  if (!box) return;
+
+  const recent = _loadRecentWorkspaces();
+  const roots = _authorizedRoots();
+
+  const recentHtml = recent.length
+    ? recent.map((p) => `
+      <div class="workspace-quick-row-wrap">
+        <button type="button" class="workspace-quick-row" data-path="${uiModule.esc(p)}" title="${uiModule.esc(p)}">
+          <span class="workspace-quick-name">${uiModule.esc(_basename(p))}</span>
+          <span class="workspace-quick-path">${uiModule.esc(p)}</span>
+        </button>
+        <button type="button" class="workspace-quick-remove" data-path="${uiModule.esc(p)}" title="Remove from recent">×</button>
+      </div>`).join('')
+    : '<div class="workspace-quick-empty">No recent workspaces yet</div>';
+
+  const rootsHtml = roots.length
+    ? roots.map((r) => `
+      <button type="button" class="workspace-quick-row workspace-authorized-root" data-path="${uiModule.esc(r.path)}" title="${uiModule.esc(r.path)}">
+        <span class="workspace-quick-name">${uiModule.esc(r.label || _basename(r.path))}</span>
+        <span class="workspace-quick-path">${uiModule.esc(r.path)}</span>
+      </button>`).join('')
+    : '<div class="workspace-quick-empty">No authorized roots yet</div>';
+
+  box.innerHTML = `
+    <div class="workspace-quick-title">Quick Start</div>
+    <div class="workspace-quick-grid">
+      <section class="workspace-quick-section">
+        <div class="workspace-quick-label">Recent</div>
+        ${recentHtml}
+      </section>
+      <section class="workspace-quick-section">
+        <div class="workspace-quick-label">Authorized Roots</div>
+        ${rootsHtml}
+      </section>
+    </div>`;
+
+  box.querySelectorAll('.workspace-quick-row').forEach((row) => {
+    row.addEventListener('click', async () => {
+      const path = row.dataset.path || '';
+      if (!path) return;
+      const result = await vetAndSetWorkspace(path);
+      if (result.ok) {
+        _rememberWorkspace(result.path || path);
+        _renderQuickStart();
+        if (uiModule && uiModule.showToast) uiModule.showToast(`Workspace set: ${_basename(result.path || path)}`);
+        closeWorkspaceBrowser();
+      } else {
+        _removeRecentWorkspace(path);
+        _renderQuickStart();
+        if (uiModule && uiModule.showError) uiModule.showError('Workspace is no longer usable');
+      }
+    });
+  });
+
+  box.querySelectorAll('.workspace-quick-remove').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _removeRecentWorkspace(btn.dataset.path || '');
+      _renderQuickStart();
+    });
+  });
 }
 
 // Workspace only applies to agent mode (it scopes the file/shell tools), so the
@@ -128,6 +250,7 @@ function _render(data) {
     useBtn.disabled = data.selectable === false;
     useBtn.title = data.selectable === false ? 'This folder cannot be used as a workspace' : '';
   }
+  _renderQuickStart();
 }
 
 async function _navigate(path) {
@@ -154,6 +277,7 @@ function _getModal() {
              spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off"
              placeholder="Type or paste a folder path, then press Enter" />
       <p class="muted workspace-note">File tools are <strong>confined</strong> to this folder. Shell commands start here but are <strong>not sandboxed</strong> and can reach outside it. A workspace scopes the tools; it is not a security boundary.</p>
+      <div class="workspace-quickstart" id="workspace-quickstart"></div>
       <div class="modal-body workspace-body" id="workspace-body"></div>
       <div class="modal-footer workspace-footer">
         <button type="button" class="confirm-btn confirm-btn-secondary" id="workspace-cancel">Cancel</button>
@@ -172,7 +296,7 @@ function _getModal() {
     }
   });
   _modal.querySelector('#workspace-use').addEventListener('click', () => {
-    setWorkspace(_curPath);
+    _setWorkspaceAndRemember(_curPath);
     if (uiModule && uiModule.showToast) uiModule.showToast(`Workspace set: ${_basename(_curPath)}`);
     closeWorkspaceBrowser();
   });

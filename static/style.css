@@ -39597,6 +39597,96 @@ body.theme-frosted .modal {
 }
 .workspace-note { margin: 0 0 8px; font-size: 11px; line-height: 1.4; }
 
+.workspace-quickstart {
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 10px;
+  padding: 9px 10px 10px;
+  margin: 0 0 10px;
+  background: color-mix(in srgb, var(--bg) 86%, var(--border) 14%);
+}
+.workspace-quick-title {
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.82;
+  margin-bottom: 8px;
+}
+.workspace-quick-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+.workspace-quick-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  opacity: .55;
+  margin: 0 0 5px;
+}
+.workspace-quick-row-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 6px;
+  min-width: 0;
+}
+.workspace-quick-row {
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 7px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+}
+.workspace-quick-row:hover {
+  background: color-mix(in srgb, var(--border) 24%, transparent);
+}
+.workspace-quick-name {
+  font-size: 12px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-quick-path {
+  font-size: 10px;
+  opacity: .55;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-quick-remove {
+  flex: 0 0 34px;
+  min-height: 48px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  opacity: .65;
+  cursor: pointer;
+}
+.workspace-quick-remove:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--border) 24%, transparent);
+}
+.workspace-quick-empty {
+  font-size: 11px;
+  opacity: .48;
+  padding: 7px 2px;
+}
+@media (max-width: 760px) {
+  .workspace-quick-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Real-time Diagnostics Log Terminal UI Styles */
 .settings-system-logs-svg {
   vertical-align: -2px;
