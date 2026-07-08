@@ -16,6 +16,7 @@ import * as Modals from './modalManager.js';
 import { mdToHtml } from './markdown.js';
 import { showToast, showError, styledPrompt } from './ui.js';
 import { makeWindowDraggable } from './windowDrag.js';
+import { getWorkspace } from './workspace.js';
 
 // Width (px) the graph panel adds to the dialog when docked open.
 const GRAPH_PANEL_W = 340;
@@ -24,6 +25,51 @@ const GRAPH_PANEL_W = 340;
 const TEMPLATE_DIR = 'templates/';
 
 const API = '/api/atlas';
+
+function _pathBaseName(p) {
+  const s = String(p || '').replace(/[\\/]+$/, '');
+  if (!s) return '';
+  const parts = s.split(/[\\/]/);
+  return parts[parts.length - 1] || s;
+}
+
+function _activeWorkspaceRoot() {
+  try { return getWorkspace ? (getWorkspace() || '') : ''; }
+  catch (_) { return ''; }
+}
+
+function _syncAtlasWorkspaceTitle() {
+  if (!_modal) return;
+  const subtitle = _modal.querySelector('[data-el="workspace-title"]');
+  if (!subtitle) return;
+
+  const root = _activeWorkspaceRoot();
+  if (root) {
+    subtitle.textContent = `Root: ${_pathBaseName(root)}`;
+    subtitle.title = root;
+  } else {
+    subtitle.textContent = 'Session Notes';
+    subtitle.title = 'Atlas session notes';
+  }
+
+  const importBtn = _modal.querySelector('[data-act="import"]');
+  if (importBtn) {
+    importBtn.classList.toggle('disabled', !!root);
+    importBtn.setAttribute('aria-disabled', root ? 'true' : 'false');
+    importBtn.title = root
+      ? 'Import is disabled while an active Workspace root is selected'
+      : 'Import markdown files or a zip into Atlas session notes';
+  }
+}
+
+function _guardAtlasImportAllowed() {
+  const root = _activeWorkspaceRoot();
+  if (!root) return true;
+  showToast("Can't switch Atlas root while an active Workspace is selected. Clear Workspace first.");
+  _syncAtlasWorkspaceTitle();
+  return false;
+}
+
 
 // ── module state ────────────────────────────────────────────────────────
 let _modal = null;
@@ -199,7 +245,10 @@ function _buildModal() {
     if (!ok) return;
     window.open(API + '/export', '_blank');
   };
-  _modal.querySelector('[data-act="import"]').onclick = _openImportDialog;
+  _modal.querySelector('[data-act="import"]').onclick = () => {
+    if (!_guardAtlasImportAllowed()) return;
+    _openImportDialog();
+  };
   _modal.querySelector('[data-act="delete"]').onclick = () => _deleteCurrentNote();
 
   // pane tabs
@@ -208,6 +257,7 @@ function _buildModal() {
   });
   _setAtlasPane('edit', { initial: true });
   _setSidePanel(null);
+  _syncAtlasWorkspaceTitle();
   _wireAtlasSplitters();
 
   // search
@@ -266,6 +316,7 @@ async function openAtlas() {
     _modal._dragWired = true;
   }
   document.addEventListener('keydown', _escHandler);
+  document.addEventListener('overflow-state-change', _syncAtlasWorkspaceTitle);
   await _reloadNotes();
   // Restart the graph sim if the panel was left open from a previous session.
   if (_graphOpen) _openGraph();
@@ -393,6 +444,7 @@ function _doClose() {
   if (_graph) { _graph.stop(); }
   _open = false;
   document.removeEventListener('keydown', _escHandler);
+  document.removeEventListener('overflow-state-change', _syncAtlasWorkspaceTitle);
   if (_modal) { _modal.style.display = 'none'; _modal.classList.add('hidden'); }
 }
 function closeAtlas() { _doClose(); }
@@ -916,6 +968,7 @@ function _buildImportOverlay() {
 }
 
 function _openImportDialog() {
+  if (!_guardAtlasImportAllowed()) return;
   const ov = _buildImportOverlay();
   ov.classList.remove('hidden');
   ov.style.display = 'flex';
