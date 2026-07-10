@@ -118,6 +118,7 @@ logger = logging.getLogger(__name__)
 # and passed to FastAPI so we can use the modern context-manager lifecycle
 # instead of the deprecated @app.on_event("startup"/"shutdown") decorators.
 app = FastAPI(
+
     title="AI Chat Application",
     description="Comprehensive AI chat with memory, research, and multi-modal capabilities",
     version="1.0.0",
@@ -702,7 +703,9 @@ app.include_router(document_router)
 
 # Atlas (Obsidian-style markdown vault: plain .md files + wikilinks + graph)
 from routes.atlas_routes import setup_atlas_routes
+from routes.context_routes import router as context_router
 app.include_router(setup_atlas_routes())
+app.include_router(context_router)
 
 # Signatures (reusable image stamps)
 from routes.signature_routes import setup_signature_routes
