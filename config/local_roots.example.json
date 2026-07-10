@@ -1,0 +1,25 @@
+{
+  "roots": [
+    {
+      "id": "example_workspace",
+      "provider_type": "local_dir",
+      "display_name": "Example Workspace",
+      "path_env": "ODYSSEUS_EXAMPLE_WORKSPACE",
+      "allowed_capabilities": ["context.list", "context.read", "context.search"],
+      "safety_scope": "read_only_sandbox",
+      "enabled": false,
+      "metadata": {
+        "description": "Copy this file to config/local_roots.json and customize locally. Do not commit real local paths."
+      }
+    },
+    {
+      "id": "example_obsidian_vault",
+      "provider_type": "obsidian_vault",
+      "display_name": "Example Obsidian Vault",
+      "path_env": "ODYSSEUS_EXAMPLE_OBSIDIAN_VAULT",
+      "allowed_capabilities": ["context.list", "context.read", "context.search"],
+      "safety_scope": "read_only_sandbox",
+      "enabled": false
+    }
+  ]
+}

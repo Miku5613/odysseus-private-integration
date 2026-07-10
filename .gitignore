@@ -102,3 +102,8 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Local context provider root mappings
+/config/local_roots.json
+/config/local_roots.*.json
+!/config/local_roots.example.json
