@@ -14,6 +14,11 @@ from .registry import (
     ProviderRegistryError,
     build_default_registry,
 )
+from .runtime_tool import (
+    RuntimeContextToolError,
+    RuntimeContextToolLimits,
+    context_tool_call,
+)
 from .roots import (
     AuthorizedRoot,
     RootConfigError,
@@ -29,7 +34,10 @@ __all__ = [
     "ProviderNotRegistered",
     "ProviderRegistryError",
     "RootConfigError",
+    "RuntimeContextToolError",
+    "RuntimeContextToolLimits",
     "build_default_registry",
+    "context_tool_call",
     "load_authorized_roots",
     "verify_authorized_root",
 ]
