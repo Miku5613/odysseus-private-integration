@@ -770,13 +770,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_atlas",
-            "description": "Read and write the user's Atlas markdown vault (an Obsidian-style folder of .md notes with [[wikilinks]], #tags, backlinks and a link graph). action='list' lists notes; 'read' returns a note plus its resolved out-links and back-links; 'write' creates/overwrites a note; 'append' adds to one; 'delete' removes one; 'search' finds notes by text or '#tag'; 'backlinks' lists notes linking to one; 'graph' returns the whole link graph. Use [[Note name]] in content to link notes. Use this for the user's personal knowledge base / vault — not the Documents editor (manage_documents) or Keep-style notes (manage_notes).",
+            "description": "Read/search/inspect the user's Atlas markdown vault (an Obsidian-style folder of .md notes with [[wikilinks]], #tags, backlinks and a link graph). action='list' lists notes; 'read' returns a note plus its resolved out-links and back-links; 'search' finds notes by text or '#tag'; 'backlinks' lists notes linking to one; 'graph' returns the whole link graph. This model-facing schema is read-only for the current runtime. Write/append/delete belong to the later Write profile or write graph, with explicit confirmation.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "read", "write", "append", "delete", "search", "backlinks", "graph"]},
-                    "path": {"type": "string", "description": "Vault-relative note path, e.g. 'Projects/Ideas.md' (.md added if omitted). For read/write/append/delete/backlinks."},
-                    "content": {"type": "string", "description": "Markdown body (for write/append). Use [[Other note]] to link."},
+                    "action": {"type": "string", "enum": ["list", "read", "search", "backlinks", "graph"]},
+                    "path": {"type": "string", "description": "Vault-relative note path, e.g. 'Projects/Ideas.md' (.md added if omitted). For read/backlinks."},
+                    "content": {"type": "string", "description": "Unused in the current read-only model-facing Atlas schema. Reserved for a later confirmation-gated Write profile."},
                     "query": {"type": "string", "description": "Search text, or '#tag' to match by tag (for search)."},
                     "search": {"type": "string", "description": "Optional substring filter (for list)."},
                     "limit": {"type": "integer", "description": "Max results / read length."}
