@@ -16,8 +16,18 @@ def test_context_roots_page_renders_manual_inspector():
 
     assert response.status_code == 200
     assert "Context Roots Inspector" in response.text
-    assert "/api/context/roots" in response.text
-    assert "/api/context/list" in response.text
-    assert "/api/context/read" in response.text
-    assert "/api/context/search" in response.text
+    assert "/context-roots.js" in response.text
     assert "does not call the model" in response.text
+
+
+def test_context_roots_script_serves_javascript():
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/context-roots.js")
+
+    assert response.status_code == 200
+    assert "application/javascript" in response.headers["content-type"]
+    assert "window.contextRootsInspector" in response.text
+    assert "loadRoots" in response.text

@@ -13,7 +13,7 @@ It does not:
 from __future__ import annotations
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 router = APIRouter(tags=["context-ui"])
 
@@ -21,6 +21,11 @@ router = APIRouter(tags=["context-ui"])
 @router.get("/context-roots", response_class=HTMLResponse)
 def context_roots_page() -> str:
     return _HTML
+
+
+@router.get("/context-roots.js")
+def context_roots_script() -> Response:
+    return Response(content=_JS, media_type="application/javascript")
 
 
 _HTML = """
@@ -194,7 +199,7 @@ _HTML = """
     <div class="grid">
       <section class="card">
         <div class="actions" style="margin-top:0">
-          <button class="primary" id="refreshRoots">Refresh roots</button>
+          <button class="primary" id="refreshRootsBtn">Refresh roots</button>
         </div>
         <div id="rootsStatus" class="meta" style="margin-top:12px">Loading roots...</div>
         <div id="roots"></div>
@@ -223,8 +228,12 @@ _HTML = """
     </div>
   </main>
 
-  <script>
-    let roots = [];
+  <script src="/context-roots.js" defer></script>
+</body>
+</html>
+"""
+
+_JS = r"""    let roots = [];
     let selectedRootId = null;
 
     const rootsEl = document.getElementById("roots");
@@ -327,7 +336,7 @@ _HTML = """
       `;
     }
 
-    async function refreshRoots() {
+    async function loadRoots() {
       rootsStatusEl.textContent = "Loading roots...";
       try {
         const payload = await requestJson("/api/context/roots");
@@ -404,13 +413,23 @@ _HTML = """
         .replaceAll("'", "&#039;");
     }
 
-    document.getElementById("refreshRoots").onclick = refreshRoots;
-    document.getElementById("listBtn").onclick = listSelected;
-    document.getElementById("readBtn").onclick = readSelected;
-    document.getElementById("searchBtn").onclick = searchSelected;
+    function initContextRootsInspector() {
+      document.getElementById("refreshRootsBtn").onclick = loadRoots;
+      document.getElementById("listBtn").onclick = listSelected;
+      document.getElementById("readBtn").onclick = readSelected;
+      document.getElementById("searchBtn").onclick = searchSelected;
 
-    refreshRoots();
-  </script>
-</body>
-</html>
+      window.contextRootsInspector = {
+        loadRoots,
+        listSelected,
+        readSelected,
+        searchSelected,
+        getRoots: () => roots,
+        getSelectedRootId: () => selectedRootId,
+      };
+
+      loadRoots();
+    }
+
+    initContextRootsInspector();
 """
