@@ -12,6 +12,7 @@ from .knowledge_graph_router import (
     evaluate_knowledge_request,
 )
 from .obsidian_read_graph import run_obsidian_read_graph
+from .hitl_policy import build_hitl_policy
 from .evidence_tracker import (
     compact_tracker_summary,
     new_evidence_tracker,
@@ -131,6 +132,7 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
         safe_readonly=decision.is_read_only,
         needs_human=decision.needs_human,
     )
+    hitl_policy = build_hitl_policy(decision)
 
     frames: list[str] = []
     tool_events: list[dict[str, Any]] = []
@@ -256,6 +258,8 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             final_answer=final_answer,
         )
 
+        hitl_policy["evidence_summary"] = compact_tracker_summary(evidence_tracker)
+
         metrics = {
             **state.metrics,
             "knowledge_runtime": "v0.16-D",
@@ -265,6 +269,7 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             "elapsed_s": round(time.time() - start, 3),
             "evidence_tracker": evidence_tracker,
             "evidence_tracker_summary": compact_tracker_summary(evidence_tracker),
+            "hitl_policy": hitl_policy,
         }
 
     else:
@@ -293,6 +298,8 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             source_basis="knowledge_router_decision",
             final_answer=final_answer,
         )
+        hitl_policy["evidence_summary"] = compact_tracker_summary(evidence_tracker)
+
         metrics = {
             "runtime": "v0.16-D-knowledge-chat-bridge",
             "model": "deterministic-knowledge-router",
@@ -306,6 +313,7 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             "elapsed_s": round(time.time() - start, 3),
             "evidence_tracker": evidence_tracker,
             "evidence_tracker_summary": compact_tracker_summary(evidence_tracker),
+            "hitl_policy": hitl_policy,
         }
 
     # Important for the current frontend lifecycle:

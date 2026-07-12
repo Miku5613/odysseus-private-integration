@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.agent_runtime.knowledge_chat_bridge import run_knowledge_chat_turn
 from src.agent_runtime.hitl_policy import (
     POLICY_VERSION,
     build_clarification_question,
@@ -83,3 +84,40 @@ def test_clarification_question_has_fallback_when_options_missing():
     assert "I need one detail" in question
     assert "missing note name" in question
     assert "Which exact note, file, document, or source should I use?" in question
+
+
+def test_knowledge_chat_bridge_metrics_include_hitl_policy_for_clarification():
+    final, frames, events, metrics = run_knowledge_chat_turn("Read the doc.")
+
+    policy = metrics.get("hitl_policy")
+
+    assert "I need a bit more context" in final
+    assert policy
+    assert policy["version"] == POLICY_VERSION
+    assert policy["intent"] == "needs_clarification"
+    assert policy["action"] == "ask_user"
+    assert policy["requires_human"] is True
+    assert policy["should_execute_graph"] is False
+    assert policy["fallback_target"] == "human_in_the_loop"
+    assert policy["answer_mode"] == "clarification"
+    assert policy["evidence_summary"]["needs_human"] is True
+    assert any(ev.get("tool") == "knowledge_decision" for ev in events)
+    assert not any(frame.strip() == "data: [DONE]" for frame in frames)
+
+
+def test_knowledge_chat_bridge_metrics_include_hitl_policy_for_blocked_mutation():
+    final, frames, events, metrics = run_knowledge_chat_turn("Delete my daily notes from Ideaverse.")
+
+    policy = metrics.get("hitl_policy")
+
+    assert policy
+    assert policy["version"] == POLICY_VERSION
+    assert policy["intent"] == "unsupported_mutation"
+    assert policy["action"] == "block"
+    assert policy["should_block"] is True
+    assert policy["should_execute_graph"] is False
+    assert policy["fallback_target"] == "blocked"
+    assert policy["sufficiency_status"] == "blocked"
+    assert policy["evidence_summary"]["intent"] == "unsupported_mutation"
+    assert any(ev.get("tool") == "knowledge_decision" for ev in events)
+    assert not any(frame.strip() == "data: [DONE]" for frame in frames)
