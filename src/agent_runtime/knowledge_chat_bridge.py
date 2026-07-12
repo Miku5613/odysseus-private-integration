@@ -12,6 +12,16 @@ from .knowledge_graph_router import (
     evaluate_knowledge_request,
 )
 from .obsidian_read_graph import run_obsidian_read_graph
+from .evidence_tracker import (
+    compact_tracker_summary,
+    new_evidence_tracker,
+    record_fallback,
+    record_final,
+    record_human_gate,
+    record_observations,
+    record_route,
+    record_sufficiency,
+)
 
 
 def sse_frame(payload: dict[str, Any]) -> str:
@@ -108,6 +118,19 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
     """
     start = time.time()
     decision = evaluate_knowledge_request(message)
+    evidence_tracker = new_evidence_tracker(
+        user_request=message,
+        runtime="knowledge_chat_bridge",
+    )
+    record_route(
+        evidence_tracker,
+        intent=decision.intent,
+        target_runtime=decision.target_runtime,
+        reason=decision.reason,
+        confidence=decision.confidence,
+        safe_readonly=decision.is_read_only,
+        needs_human=decision.needs_human,
+    )
 
     frames: list[str] = []
     tool_events: list[dict[str, Any]] = []
@@ -200,6 +223,39 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
 
         final_answer = state.final_answer
 
+        record_observations(
+            evidence_tracker,
+            [
+                {
+                    "kind": obs.tool,
+                    "source_tool": obs.tool,
+                    "content": obs.output_preview,
+                    "output_preview": obs.output_preview,
+                    "success": obs.success,
+                    "args": obs.args,
+                }
+                for obs in state.observations
+            ],
+            label="obsidian_read",
+        )
+        record_sufficiency(
+            evidence_tracker,
+            status="sufficient" if state.observations else "unknown",
+            reason="High-confidence read-only knowledge graph executed." if state.observations else "Read graph returned no observations.",
+        )
+        record_human_gate(
+            evidence_tracker,
+            required=False,
+            reason="High-confidence read-only knowledge route.",
+        )
+        record_fallback(evidence_tracker, used=False)
+        record_final(
+            evidence_tracker,
+            answer_mode="knowledge_read",
+            source_basis="obsidian_read_graph",
+            final_answer=final_answer,
+        )
+
         metrics = {
             **state.metrics,
             "knowledge_runtime": "v0.16-D",
@@ -207,10 +263,36 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             "knowledge_confidence": decision.confidence,
             "needs_human": decision.needs_human,
             "elapsed_s": round(time.time() - start, 3),
+            "evidence_tracker": evidence_tracker,
+            "evidence_tracker_summary": compact_tracker_summary(evidence_tracker),
         }
 
     else:
         final_answer = _natural_clarification(decision)
+        record_observations(evidence_tracker, [])
+        record_sufficiency(
+            evidence_tracker,
+            status="insufficient" if decision.needs_human else "not_applicable",
+            reason=decision.reason,
+        )
+        record_human_gate(
+            evidence_tracker,
+            required=decision.needs_human,
+            reason=decision.reason if decision.needs_human else "No human clarification required.",
+            ambiguity=decision.ambiguity,
+        )
+        record_fallback(
+            evidence_tracker,
+            used=decision.target_runtime != "obsidian_read_graph",
+            target_runtime=decision.target_runtime,
+            reason=decision.reason,
+        )
+        record_final(
+            evidence_tracker,
+            answer_mode="clarification" if decision.needs_human else decision.intent,
+            source_basis="knowledge_router_decision",
+            final_answer=final_answer,
+        )
         metrics = {
             "runtime": "v0.16-D-knowledge-chat-bridge",
             "model": "deterministic-knowledge-router",
@@ -222,6 +304,8 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             "write_allowed": decision.write_allowed,
             "tool_calls": 1,
             "elapsed_s": round(time.time() - start, 3),
+            "evidence_tracker": evidence_tracker,
+            "evidence_tracker_summary": compact_tracker_summary(evidence_tracker),
         }
 
     # Important for the current frontend lifecycle:

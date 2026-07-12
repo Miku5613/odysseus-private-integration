@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.agent_runtime.knowledge_chat_bridge import run_knowledge_chat_turn
 from src.agent_runtime.evidence_tracker import (
     TRACKER_VERSION,
     compact_tracker_summary,
@@ -149,3 +150,27 @@ def test_evidence_tracker_handles_weak_empty_and_path_only_evidence():
     assert tracker["evidence"]["source_paths"] == ["src/example.py"]
     assert tracker["evidence"]["source_count"] == 1
     assert tracker["evidence"]["items"][0]["source_path"] == "src/example.py"
+
+
+def test_knowledge_chat_bridge_metrics_include_evidence_tracker_for_clarification():
+    final, frames, events, metrics = run_knowledge_chat_turn("Read the doc.")
+
+    tracker = metrics.get("evidence_tracker")
+    summary = metrics.get("evidence_tracker_summary")
+
+    assert "I need a bit more context" in final
+    assert tracker
+    assert summary
+
+    assert tracker["runtime"] == "knowledge_chat_bridge"
+    assert tracker["route"]["intent"] == "needs_clarification"
+    assert tracker["human_gate"]["required"] is True
+    assert tracker["fallback"]["used"] is True
+    assert tracker["final"]["answer_mode"] == "clarification"
+
+    assert summary["intent"] == "needs_clarification"
+    assert summary["needs_human"] is True
+    assert summary["fallback_used"] is True
+
+    assert any(ev.get("tool") == "knowledge_decision" for ev in events)
+    assert not any(frame.strip() == "data: [DONE]" for frame in frames)
