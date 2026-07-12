@@ -13,6 +13,7 @@ from .knowledge_vault_index import (
     build_structural_vault_index,
     load_cached_vault_index,
 )
+from .context_vault_read_adapter import ContextVaultReadAdapter
 from .obsidian_read_adapter import ObsidianReadAdapter, ObsidianReadError
 from src.chroma_client import get_chroma_client
 from src.embeddings import EmbeddingClient
@@ -167,12 +168,12 @@ def _delete_existing_namespace(collection) -> int:
 def build_semantic_vault_index(
     *,
     structural_index: KnowledgeVaultIndex | None = None,
-    adapter: ObsidianReadAdapter | None = None,
+    adapter: ObsidianReadAdapter | ContextVaultReadAdapter | None = None,
     rebuild: bool = True,
     max_notes: int = 1000,
     batch_size: int = 16,
 ) -> SemanticIndexStats:
-    adapter = adapter or ObsidianReadAdapter()
+    adapter = adapter or ContextVaultReadAdapter()
     index = structural_index or load_cached_vault_index() or build_structural_vault_index(adapter=adapter, max_notes=max_notes)
 
     emb = _embedding_client()

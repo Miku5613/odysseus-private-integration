@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .context_vault_read_adapter import ContextVaultReadAdapter
 from .obsidian_read_adapter import ObsidianReadAdapter, ObsidianReadError
 
 
@@ -168,14 +169,14 @@ def _extract_note_record(path: str, content: str) -> KnowledgeNoteRecord:
 
 
 def build_structural_vault_index(
-    adapter: ObsidianReadAdapter | None = None,
+    adapter: ObsidianReadAdapter | ContextVaultReadAdapter | None = None,
     *,
     start_path: str = "",
     max_depth: int = 8,
     max_notes: int = 1000,
     cache_path: Path | None = DEFAULT_INDEX_PATH,
 ) -> KnowledgeVaultIndex:
-    adapter = adapter or ObsidianReadAdapter()
+    adapter = adapter or ContextVaultReadAdapter()
 
     folders: set[str] = set()
     notes: list[KnowledgeNoteRecord] = []
