@@ -13,6 +13,7 @@ from .knowledge_graph_router import (
 )
 from .obsidian_read_graph import run_obsidian_read_graph
 from .hitl_policy import build_hitl_policy
+from .legacy_fallback_contract import build_legacy_fallback_contract
 from .evidence_tracker import (
     compact_tracker_summary,
     new_evidence_tracker,
@@ -133,6 +134,10 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
         needs_human=decision.needs_human,
     )
     hitl_policy = build_hitl_policy(decision)
+    legacy_fallback_contract = build_legacy_fallback_contract(
+        decision,
+        hitl_policy=hitl_policy,
+    )
 
     frames: list[str] = []
     tool_events: list[dict[str, Any]] = []
@@ -258,7 +263,10 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             final_answer=final_answer,
         )
 
-        hitl_policy["evidence_summary"] = compact_tracker_summary(evidence_tracker)
+        evidence_summary = compact_tracker_summary(evidence_tracker)
+        hitl_policy["evidence_summary"] = evidence_summary
+        legacy_fallback_contract["evidence_summary"] = evidence_summary
+        legacy_fallback_contract["hitl_policy"] = hitl_policy
 
         metrics = {
             **state.metrics,
@@ -270,6 +278,7 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             "evidence_tracker": evidence_tracker,
             "evidence_tracker_summary": compact_tracker_summary(evidence_tracker),
             "hitl_policy": hitl_policy,
+            "legacy_fallback_contract": legacy_fallback_contract,
         }
 
     else:
@@ -298,7 +307,10 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             source_basis="knowledge_router_decision",
             final_answer=final_answer,
         )
-        hitl_policy["evidence_summary"] = compact_tracker_summary(evidence_tracker)
+        evidence_summary = compact_tracker_summary(evidence_tracker)
+        hitl_policy["evidence_summary"] = evidence_summary
+        legacy_fallback_contract["evidence_summary"] = evidence_summary
+        legacy_fallback_contract["hitl_policy"] = hitl_policy
 
         metrics = {
             "runtime": "v0.16-D-knowledge-chat-bridge",
@@ -314,6 +326,7 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
             "evidence_tracker": evidence_tracker,
             "evidence_tracker_summary": compact_tracker_summary(evidence_tracker),
             "hitl_policy": hitl_policy,
+            "legacy_fallback_contract": legacy_fallback_contract,
         }
 
     # Important for the current frontend lifecycle:

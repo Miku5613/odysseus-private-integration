@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.agent_runtime.hitl_policy import build_hitl_policy
+from src.agent_runtime.knowledge_chat_bridge import run_knowledge_chat_turn
 from src.agent_runtime.knowledge_graph_router import evaluate_knowledge_request
 from src.agent_runtime.legacy_fallback_contract import (
     CONTRACT_VERSION,
@@ -106,3 +107,42 @@ def test_contract_accepts_existing_hitl_policy_and_evidence_summary():
     assert contract["hitl_policy"] == policy
     assert contract["evidence_summary"] == summary
     assert contract["ownership"] == "human_gate"
+
+
+def test_knowledge_chat_bridge_metrics_include_legacy_contract_for_clarification():
+    final, frames, events, metrics = run_knowledge_chat_turn("Read the doc.")
+
+    contract = metrics.get("legacy_fallback_contract")
+
+    assert "I need a bit more context" in final
+    assert contract
+    assert contract["version"] == CONTRACT_VERSION
+    assert contract["intent"] == "needs_clarification"
+    assert contract["ownership"] == "human_gate"
+    assert contract["ask_user"] is True
+    assert contract["delegate_to_legacy"] is False
+    assert contract["execute_langgraph"] is False
+    assert contract["block"] is False
+    assert contract["hitl_policy"]["action"] == "ask_user"
+    assert contract["evidence_summary"]["needs_human"] is True
+    assert any(ev.get("tool") == "knowledge_decision" for ev in events)
+    assert not any(frame.strip() == "data: [DONE]" for frame in frames)
+
+
+def test_knowledge_chat_bridge_metrics_include_legacy_contract_for_blocked_mutation():
+    final, frames, events, metrics = run_knowledge_chat_turn("Delete my daily notes from Ideaverse.")
+
+    contract = metrics.get("legacy_fallback_contract")
+
+    assert contract
+    assert contract["version"] == CONTRACT_VERSION
+    assert contract["intent"] == "unsupported_mutation"
+    assert contract["ownership"] == "blocked"
+    assert contract["block"] is True
+    assert contract["delegate_to_legacy"] is False
+    assert contract["execute_langgraph"] is False
+    assert contract["ask_user"] is False
+    assert contract["hitl_policy"]["action"] == "block"
+    assert contract["evidence_summary"]["intent"] == "unsupported_mutation"
+    assert any(ev.get("tool") == "knowledge_decision" for ev in events)
+    assert not any(frame.strip() == "data: [DONE]" for frame in frames)
