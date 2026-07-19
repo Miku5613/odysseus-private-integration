@@ -197,3 +197,43 @@ __all__ = [
     "knowledge_llm_config_from_runtime_locals",
     "try_knowledge_llm_response",
 ]
+
+
+def enforce_knowledge_llm_final_answer(
+    *,
+    final_answer: str,
+    llm_response: dict[str, Any],
+    llm_config: dict[str, Any] | None,
+) -> str:
+    """Ensure the user-facing answer is honest about LLM synthesis.
+
+    Raw read/search output may exist as tool evidence, but the final assistant
+    answer should be LLM-authored when the LLM bridge succeeds. If the bridge is
+    skipped or errors, return a clear diagnostic final answer instead of silently
+    presenting deterministic tool output as the assistant's final response.
+    """
+
+    candidate = str(llm_response.get("final_answer") or "").strip()
+    used_llm = bool(llm_response.get("used_llm"))
+    status = str(llm_response.get("status") or "unknown")
+    model = str(llm_response.get("model") or "")
+
+    if used_llm and candidate:
+        return candidate
+
+    config_present = bool(llm_config and (llm_config.get("model") or llm_config.get("url")))
+
+    if config_present:
+        model_part = f" using model {model}" if model else ""
+        return (
+            "I read the requested knowledge source, but the LLM finalizer did not "
+            f"produce the final assistant answer{model_part}. "
+            f"Bridge status: {status}. The raw tool result is available above as evidence."
+        )
+
+    return (
+        "I read the requested knowledge source, but the selected model configuration "
+        "was not available to the LLM finalizer. "
+        f"Bridge status: {status}. The raw tool result is available above as evidence."
+    )
+

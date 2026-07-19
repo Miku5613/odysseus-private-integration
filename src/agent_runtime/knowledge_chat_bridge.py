@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import json
 import time
 import uuid
@@ -14,8 +16,9 @@ from .knowledge_graph_router import (
 from .obsidian_read_graph import run_obsidian_read_graph
 from .hitl_policy import build_hitl_policy
 from .legacy_fallback_contract import build_legacy_fallback_contract
-from .knowledge_llm_response_bridge import try_knowledge_llm_response
+from .knowledge_llm_response_bridge import enforce_knowledge_llm_final_answer, try_knowledge_llm_response
 from .evidence_tracker import (
+
     compact_tracker_summary,
     new_evidence_tracker,
     record_fallback,
@@ -26,6 +29,7 @@ from .evidence_tracker import (
     record_sufficiency,
 )
 
+_LOGGER = logging.getLogger(__name__)
 
 def sse_frame(payload: dict[str, Any]) -> str:
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
@@ -343,12 +347,23 @@ def run_knowledge_chat_turn(message: str, *, llm_config: dict[str, Any] | None =
         hitl_policy=hitl_policy,
         legacy_fallback_contract=legacy_fallback_contract,
     )
-    if llm_response.get("final_answer"):
+    if llm_config is not None:
+        final_answer = enforce_knowledge_llm_final_answer(
+            final_answer=final_answer,
+            llm_response=llm_response,
+            llm_config=llm_config,
+        )
+    elif llm_response.get("used_llm") and llm_response.get("final_answer"):
         final_answer = str(llm_response.get("final_answer") or final_answer)
 
-    if isinstance(metrics, dict):
-        metrics["llm_response_bridge"] = llm_response
-        metrics["evidence_tracker_summary"] = compact_tracker_summary(evidence_tracker)
+    metrics["llm_response_bridge"] = llm_response
+    _LOGGER.info(
+        "[knowledge-runtime] llm_response_bridge status=%s used_llm=%s model=%s",
+        llm_response.get("status"),
+        llm_response.get("used_llm"),
+        llm_response.get("model"),
+    )
+    metrics["evidence_tracker_summary"] = compact_tracker_summary(evidence_tracker)
 
     frames.append(sse_frame({
         "type": "agent_step",
