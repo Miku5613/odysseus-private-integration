@@ -14,6 +14,7 @@ from .knowledge_graph_router import (
 from .obsidian_read_graph import run_obsidian_read_graph
 from .hitl_policy import build_hitl_policy
 from .legacy_fallback_contract import build_legacy_fallback_contract
+from .knowledge_llm_response_bridge import try_knowledge_llm_response
 from .evidence_tracker import (
     compact_tracker_summary,
     new_evidence_tracker,
@@ -105,7 +106,7 @@ def _natural_clarification(decision: KnowledgeGraphDecision) -> str:
     ])
 
 
-def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str, Any]], dict[str, Any]]:
+def run_knowledge_chat_turn(message: str, *, llm_config: dict[str, Any] | None = None) -> tuple[str, list[str], list[dict[str, Any]], dict[str, Any]]:
     """Run one knowledge-router chat turn.
 
     Returns:
@@ -333,6 +334,22 @@ def run_knowledge_chat_turn(message: str) -> tuple[str, list[str], list[dict[str
     # tool bubbles alone do not guarantee that a visible assistant text holder
     # is active. Emit a finalizing agent_step before the delta, matching the
     # confirmed deterministic runtimes.
+    llm_response = try_knowledge_llm_response(
+        llm_config=llm_config,
+        user_message=message,
+        deterministic_answer=final_answer,
+        runtime_decision=decision.to_dict(),
+        evidence_summary=compact_tracker_summary(evidence_tracker),
+        hitl_policy=hitl_policy,
+        legacy_fallback_contract=legacy_fallback_contract,
+    )
+    if llm_response.get("final_answer"):
+        final_answer = str(llm_response.get("final_answer") or final_answer)
+
+    if isinstance(metrics, dict):
+        metrics["llm_response_bridge"] = llm_response
+        metrics["evidence_tracker_summary"] = compact_tracker_summary(evidence_tracker)
+
     frames.append(sse_frame({
         "type": "agent_step",
         "title": "Finalizing knowledge response",
