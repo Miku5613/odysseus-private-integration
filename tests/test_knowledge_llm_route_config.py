@@ -17,3 +17,12 @@ def test_knowledge_bridge_accepts_llm_config_parameter() -> None:
     assert "llm_config: dict[str, Any] | None = None" in text
     assert "try_knowledge_llm_response(" in text
     assert "metrics[\"llm_response_bridge\"]" in text
+
+
+def test_chat_routes_adds_local_ollama_url_fallback_when_model_exists() -> None:
+    text = Path("routes/chat_routes.py").read_text(encoding="utf-8")
+
+    assert 'if _knowledge_llm_config.get("model") and not _knowledge_llm_config.get("url"):' in text
+    assert '_knowledge_llm_config["url"] = "http://127.0.0.1:11434/v1/chat/completions"' in text
+    assert '_knowledge_llm_config["url_source"] = "local_ollama_openai_compat_fallback"' in text
+

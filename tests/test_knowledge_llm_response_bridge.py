@@ -104,3 +104,30 @@ def test_runtime_locals_extractor_uses_context_and_session_objects() -> None:
     assert config["url"].endswith("/chat/completions")
     assert config["model"] == "llama3:latest"
     assert config["headers"] == {"x-test": "1"}
+
+
+def test_llm_error_result_includes_error_diagnostics() -> None:
+    def boom_call(*args, **kwargs):
+        raise RuntimeError("boom from finalizer")
+
+    result = try_knowledge_llm_response(
+        llm_config={
+            "url": "http://127.0.0.1:11434/v1/chat/completions",
+            "model": "qwen3:8b",
+            "url_source": "local_ollama_openai_compat_fallback",
+        },
+        user_message="read the active Obsidian note",
+        deterministic_answer="deterministic",
+        runtime_decision={"intent": "knowledge_read"},
+        evidence_summary={"observations": [{"tool": "obsidian_active_note", "content": "note"}]},
+        hitl_policy={"needs_human": False, "blocked": False},
+        legacy_fallback_contract={"owner": "langgraph", "fallback_allowed": False},
+        llm_call_func=boom_call,
+    )
+
+    assert result["status"] == "llm_error"
+    assert result["used_llm"] is False
+    assert result["fallback_used"] is True
+    assert result["error_type"] == "RuntimeError"
+    assert "boom from finalizer" in result["error_message"]
+    assert result["final_answer"] == "deterministic"

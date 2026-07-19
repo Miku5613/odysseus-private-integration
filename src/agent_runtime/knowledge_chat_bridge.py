@@ -358,10 +358,13 @@ def run_knowledge_chat_turn(message: str, *, llm_config: dict[str, Any] | None =
 
     metrics["llm_response_bridge"] = llm_response
     _LOGGER.info(
-        "[knowledge-runtime] llm_response_bridge status=%s used_llm=%s model=%s",
+        "[knowledge-runtime] llm_response_bridge status=%s used_llm=%s model=%s url_source=%s error_type=%s error_message=%s",
         llm_response.get("status"),
         llm_response.get("used_llm"),
         llm_response.get("model"),
+        llm_response.get("url_source"),
+        llm_response.get("error_type"),
+        llm_response.get("error_message"),
     )
     metrics["evidence_tracker_summary"] = compact_tracker_summary(evidence_tracker)
 

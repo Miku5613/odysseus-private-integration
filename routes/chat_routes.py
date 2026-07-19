@@ -1510,6 +1510,9 @@ def setup_chat_routes(
                                 _knowledge_full_response, _knowledge_frames, _knowledge_tool_events, _knowledge_metrics = run_knowledge_semantic_chat_turn(message)
                             else:
                                 _knowledge_llm_config = knowledge_llm_config_from_runtime_locals(locals())
+                                if _knowledge_llm_config.get("model") and not _knowledge_llm_config.get("url"):
+                                    _knowledge_llm_config["url"] = "http://127.0.0.1:11434/v1/chat/completions"
+                                    _knowledge_llm_config["url_source"] = "local_ollama_openai_compat_fallback"
                                 _knowledge_full_response, _knowledge_frames, _knowledge_tool_events, _knowledge_metrics = run_knowledge_chat_turn(message, llm_config=_knowledge_llm_config)
                             for _knowledge_chunk in _knowledge_frames:
                                 yield _knowledge_chunk

@@ -184,8 +184,12 @@ def try_knowledge_llm_response(
         })
         return result
     except Exception as exc:
+        error_type = type(exc).__name__
+        error_message = str(exc)
         result.update({
             "status": "llm_error",
+                "error_type": error_type,
+                "error_message": error_message[:600],
             "error": f"{type(exc).__name__}: {exc}",
         })
         return result
