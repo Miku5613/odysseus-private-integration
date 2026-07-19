@@ -23,6 +23,7 @@ from src.agent_runtime.general_bridge import (
     stream_general_runtime_legacy_sse,
 )
 from src.agent_runtime.knowledge_chat_bridge import run_knowledge_chat_turn, should_intercept_knowledge_chat
+from src.agent_runtime.knowledge_llm_response_bridge import knowledge_llm_config_from_runtime_locals
 from src.agent_runtime.knowledge_semantic_chat_bridge import (
     is_semantic_vault_search_request,
     run_knowledge_semantic_chat_turn,
@@ -1508,7 +1509,8 @@ def setup_chat_routes(
                             if is_semantic_vault_search_request(message):
                                 _knowledge_full_response, _knowledge_frames, _knowledge_tool_events, _knowledge_metrics = run_knowledge_semantic_chat_turn(message)
                             else:
-                                _knowledge_full_response, _knowledge_frames, _knowledge_tool_events, _knowledge_metrics = run_knowledge_chat_turn(message)
+                                _knowledge_llm_config = knowledge_llm_config_from_runtime_locals(locals())
+                                _knowledge_full_response, _knowledge_frames, _knowledge_tool_events, _knowledge_metrics = run_knowledge_chat_turn(message, llm_config=_knowledge_llm_config)
                             for _knowledge_chunk in _knowledge_frames:
                                 yield _knowledge_chunk
                             try:
