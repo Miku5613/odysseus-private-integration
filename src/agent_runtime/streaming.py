@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.agent_runtime.clarification_store import consume_pending_clarification
+
 import queue
 import threading
 from pathlib import Path
@@ -27,6 +29,13 @@ def run_stream(
     """
 
     workspace_path = str(Path(workspace).resolve()) if workspace else str(DEFAULT_WORKSPACE)
+    clarified_question = consume_pending_clarification(
+        session_id=str(session_id or ""),
+        answer=question,
+    )
+    if clarified_question:
+        question = clarified_question
+
     scope = infer_tool_scope(question, workspace_path)
     event_queue: queue.Queue = queue.Queue()
 

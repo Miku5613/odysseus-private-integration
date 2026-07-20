@@ -49,6 +49,7 @@ from src.agent_runtime.finalizer import (
 )
 from src.agent_runtime.state import AgentState
 from src.agent_runtime.tool_adapters import TOOL_MAP, get_tools_for_scope
+from src.agent_runtime.clarification_store import register_pending_clarification
 from src.agent_runtime.task_contract import (
     build_task_contract,
     format_task_contract,
@@ -335,6 +336,13 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
                         )
                     )
                     continue
+
+                if runtime_session_id:
+                    register_pending_clarification(
+                        session_id=runtime_session_id,
+                        original_request=query,
+                        question=question,
+                    )
 
                 ask_event = make_event(
                     "ask_user",
