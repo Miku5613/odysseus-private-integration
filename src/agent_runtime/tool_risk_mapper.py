@@ -347,6 +347,97 @@ class ToolExecutionGate:
     blocked_reason: str | None = None
 
 
+READ_ACTIONS = frozenset({
+    "get", "list", "read", "search", "find", "view", "show",
+    "inspect", "status", "count", "check", "query",
+})
+
+DESTRUCTIVE_ACTIONS = frozenset({
+    "delete", "remove", "trash", "truncate", "purge", "destroy",
+})
+
+CAUTION_ACTIONS = frozenset({
+    "add", "append", "create", "edit", "update", "write",
+    "send", "reply", "move", "rename", "archive", "mark_read",
+    "mark_unread", "star", "unstar", "apply", "set",
+})
+
+
+def _extract_call_action(arguments: Mapping[str, object] | None) -> str | None:
+    if not isinstance(arguments, Mapping):
+        return None
+
+    for key in ("action", "operation", "op", "command", "mode"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+
+    return None
+
+
+def decide_tool_call_policy_action(
+    tool_name: str,
+    arguments: Mapping[str, object] | None = None,
+    schema: Mapping[str, object] | None = None,
+) -> ToolRiskDecision:
+    """Classify the concrete tool call, including its selected action.
+
+    Multi-action tools must not inherit the most dangerous action in their
+    schema when the current call is explicitly read-only.
+    """
+
+    action = _extract_call_action(arguments)
+
+    if action in DESTRUCTIVE_ACTIONS:
+        risk = ToolRisk(
+            name=tool_name,
+            level="destructive",
+            reason=f"tool call requests destructive action: {action}",
+            requires_confirmation=True,
+            proposal_only=True,
+        )
+        return ToolRiskDecision(
+            risk=risk,
+            action="propose_only",
+            reason="destructive tool calls must not directly mutate user data",
+        )
+
+    if action in READ_ACTIONS:
+        base = classify_tool_risk(tool_name, schema=None)
+
+        # An explicit read action on a multi-action management tool is safe to
+        # perform directly unless the tool name itself is intrinsically destructive.
+        if base.level != "destructive":
+            risk = ToolRisk(
+                name=tool_name,
+                level="safe_read",
+                reason=f"tool call explicitly requests read-only action: {action}",
+                requires_confirmation=False,
+                proposal_only=False,
+            )
+            return ToolRiskDecision(
+                risk=risk,
+                action="allow",
+                reason="explicit read-only tool action may run directly",
+            )
+
+    if action in CAUTION_ACTIONS:
+        risk = ToolRisk(
+            name=tool_name,
+            level="caution",
+            reason=f"tool call requests mutating action: {action}",
+            requires_confirmation=True,
+            proposal_only=False,
+        )
+        return ToolRiskDecision(
+            risk=risk,
+            action="confirm",
+            reason="mutating tool call requires user confirmation",
+        )
+
+    return decide_tool_policy_action(tool_name, schema=schema)
+
+
 def gate_tool_execution(
     tool_name: str,
     schema: Mapping[str, object] | None = None,
@@ -521,6 +612,7 @@ __all__ = [
     "ToolRiskPolicyAction",
     "build_tool_gate_payload",
     "classify_tool_risk",
+    "decide_tool_call_policy_action",
     "decide_tool_policy_action",
     "gate_tool_execution",
     "group_tools_by_risk",
