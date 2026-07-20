@@ -263,8 +263,54 @@ def classify_tool_risk(
     )
 
 
+def group_tools_by_risk(
+    tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
+) -> dict[ToolRiskLevel, list[ToolRisk]]:
+    """Classify many tools and group them by risk level.
+
+    Accepts either:
+    - a mapping of tool_name -> schema
+    - a list/tuple of tool names
+
+    This is still non-behavioral. It only summarizes the tool surface so later
+    UI/runtime patches can present safe/caution/destructive tools consistently.
+    """
+
+    grouped: dict[ToolRiskLevel, list[ToolRisk]] = {
+        "safe_read": [],
+        "caution": [],
+        "destructive": [],
+        "unknown": [],
+    }
+
+    if isinstance(tools, Mapping):
+        iterable = tools.items()
+    else:
+        iterable = ((name, None) for name in tools)
+
+    for name, schema in iterable:
+        risk = classify_tool_risk(str(name), schema=schema)
+        grouped[risk.level].append(risk)
+
+    for risks in grouped.values():
+        risks.sort(key=lambda item: item.name.lower())
+
+    return grouped
+
+
+def summarize_tool_risks(
+    tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
+) -> dict[ToolRiskLevel, int]:
+    """Return counts by risk level for logs/UI badges."""
+
+    grouped = group_tools_by_risk(tools)
+    return {level: len(items) for level, items in grouped.items()}
+
+
 __all__ = [
     "ToolRisk",
     "ToolRiskLevel",
     "classify_tool_risk",
+    "group_tools_by_risk",
+    "summarize_tool_risks",
 ]
