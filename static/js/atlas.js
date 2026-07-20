@@ -165,6 +165,7 @@ function _syncAtlasWorkspaceTitle() {
   if (importBtn) {
     importBtn.classList.toggle('disabled', !!root);
     importBtn.hidden = !!root;
+    rootBtn.hidden = !!root;
     importBtn.setAttribute('aria-disabled', root ? 'true' : 'false');
     importBtn.title = root
       ? 'Import is disabled while an active Workspace root is selected'
