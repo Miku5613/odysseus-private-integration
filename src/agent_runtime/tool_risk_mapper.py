@@ -385,6 +385,52 @@ def gate_tool_execution(
     )
 
 
+@dataclass(frozen=True)
+class ToolGateSplit:
+    """Direct/gated split for a tool surface.
+
+    direct contains tools that may be shown/executed without confirmation.
+    gated contains tools that require confirmation or proposal handling.
+    """
+
+    direct: tuple[ToolRiskDecision, ...]
+    gated: tuple[ToolRiskDecision, ...]
+
+
+def split_tools_for_direct_execution(
+    tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
+) -> ToolGateSplit:
+    """Split tools into direct-safe and gated groups.
+
+    This is non-executing. It prepares the runtime/UI to pass only direct-safe
+    tools to an automatic execution path while keeping mutating, destructive,
+    and unknown tools behind a confirmation/proposal path.
+    """
+
+    if isinstance(tools, Mapping):
+        iterable = tools.items()
+    else:
+        iterable = ((name, None) for name in tools)
+
+    direct: list[ToolRiskDecision] = []
+    gated: list[ToolRiskDecision] = []
+
+    for name, schema in iterable:
+        decision = decide_tool_policy_action(str(name), schema=schema)
+        if decision.action == "allow":
+            direct.append(decision)
+        else:
+            gated.append(decision)
+
+    direct.sort(key=lambda item: item.risk.name.lower())
+    gated.sort(key=lambda item: item.risk.name.lower())
+
+    return ToolGateSplit(
+        direct=tuple(direct),
+        gated=tuple(gated),
+    )
+
+
 def group_tools_by_risk(
     tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
 ) -> dict[ToolRiskLevel, list[ToolRisk]]:
@@ -431,6 +477,7 @@ def summarize_tool_risks(
 
 __all__ = [
     "ToolExecutionGate",
+    "ToolGateSplit",
     "ToolRisk",
     "ToolRiskDecision",
     "ToolRiskLevel",
@@ -439,6 +486,7 @@ __all__ = [
     "decide_tool_policy_action",
     "gate_tool_execution",
     "group_tools_by_risk",
+    "split_tools_for_direct_execution",
     "summarize_tool_policy_actions",
     "summarize_tool_risks",
 ]
