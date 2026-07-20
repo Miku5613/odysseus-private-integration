@@ -332,6 +332,59 @@ def summarize_tool_policy_actions(
     return summary
 
 
+@dataclass(frozen=True)
+class ToolExecutionGate:
+    """Direct execution decision for a tool.
+
+    This is the narrow runtime seam for future integration:
+    - allowed=True only for safe_read tools
+    - confirm/propose_only tools are blocked from direct execution until the
+      confirmation/proposal layer handles them.
+    """
+
+    decision: ToolRiskDecision
+    allowed: bool
+    blocked_reason: str | None = None
+
+
+def gate_tool_execution(
+    tool_name: str,
+    schema: Mapping[str, object] | None = None,
+    *,
+    confirmation_available: bool = False,
+) -> ToolExecutionGate:
+    """Return whether a tool may execute immediately.
+
+    This function is conservative by design. Until a real confirmation UI/runtime
+    handoff is wired in, caution and unknown tools are not auto-executed.
+    """
+
+    decision = decide_tool_policy_action(tool_name, schema=schema)
+
+    if decision.action == "allow":
+        return ToolExecutionGate(
+            decision=decision,
+            allowed=True,
+            blocked_reason=None,
+        )
+
+    if decision.action == "confirm":
+        suffix = "confirmation required"
+        if not confirmation_available:
+            suffix = "confirmation required but confirmation handoff is not wired"
+        return ToolExecutionGate(
+            decision=decision,
+            allowed=False,
+            blocked_reason=suffix,
+        )
+
+    return ToolExecutionGate(
+        decision=decision,
+        allowed=False,
+        blocked_reason="direct execution blocked; produce a proposal instead",
+    )
+
+
 def group_tools_by_risk(
     tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
 ) -> dict[ToolRiskLevel, list[ToolRisk]]:
@@ -377,12 +430,14 @@ def summarize_tool_risks(
 
 
 __all__ = [
+    "ToolExecutionGate",
     "ToolRisk",
     "ToolRiskDecision",
     "ToolRiskLevel",
     "ToolRiskPolicyAction",
     "classify_tool_risk",
     "decide_tool_policy_action",
+    "gate_tool_execution",
     "group_tools_by_risk",
     "summarize_tool_policy_actions",
     "summarize_tool_risks",
