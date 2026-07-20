@@ -2285,6 +2285,11 @@
                 <label class="settings-label">Max steps per message</label>
                 <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" class="settings-select" style="width:120px;">
               </div>
+              <div class="settings-row">
+                <label class="settings-label">Use LangGraph for Agent mode</label>
+                <input id="set-agentLangGraphEnabled" type="checkbox" checked>
+              </div>
+              <div class="admin-toggle-sub" style="margin-top:-4px;margin-bottom:4px">Turn off to route Agent mode directly through the legacy runtime when LangGraph is unstable.</div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>

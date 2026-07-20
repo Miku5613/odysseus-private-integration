@@ -1472,10 +1472,21 @@ def setup_chat_routes(
                         _forced_tools = {"web_search", "web_fetch"}
 
                     # RUNTIME_ROUTER_V013D_DECISION_START
-                    _runtime_decision = route_agent_runtime(message)
+                    # Agent LangGraph toggle:
+                    # - ON/default: Agent mode may use contract/general/langgraph runtime.
+                    # - OFF: skip runtime routing entirely and fall through to legacy agent loop.
+                    try:
+                        _agent_langgraph_raw = get_setting("agent_langgraph_enabled", True)
+                        _agent_langgraph_enabled = str(_agent_langgraph_raw).strip().lower() not in {"0", "false", "no", "off"}
+                    except Exception:
+                        _agent_langgraph_enabled = True
+
+                    _runtime_decision = route_agent_runtime(message) if _agent_langgraph_enabled else None
 
                     _router_agent_runtime_requested = (
-                        chat_mode == "agent"
+                        _agent_langgraph_enabled
+                        and _runtime_decision is not None
+                        and chat_mode == "agent"
                         and os.getenv("ODYSSEUS_AGENT_RUNTIME", "").strip().lower()
                         in {"contract", "general", "langgraph"}
                     )
