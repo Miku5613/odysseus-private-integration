@@ -263,6 +263,75 @@ def classify_tool_risk(
     )
 
 
+ToolRiskPolicyAction = Literal["allow", "confirm", "propose_only"]
+
+
+@dataclass(frozen=True)
+class ToolRiskDecision:
+    """Runtime-facing policy decision derived from tool risk."""
+
+    risk: ToolRisk
+    action: ToolRiskPolicyAction
+    reason: str
+
+
+def decide_tool_policy_action(
+    tool_name: str,
+    schema: Mapping[str, object] | None = None,
+) -> ToolRiskDecision:
+    """Convert a risk classification into a runtime policy action.
+
+    This is still not wired into execution. It is the stable seam future runtime
+    patches can call when deciding whether a tool may run directly, needs user
+    confirmation, or should only produce a proposal/copy.
+    """
+
+    risk = classify_tool_risk(tool_name, schema=schema)
+
+    if risk.level == "safe_read":
+        return ToolRiskDecision(
+            risk=risk,
+            action="allow",
+            reason="safe read-only tools may run directly",
+        )
+
+    if risk.level == "destructive" or risk.proposal_only:
+        return ToolRiskDecision(
+            risk=risk,
+            action="propose_only",
+            reason="destructive tools must not directly mutate user data",
+        )
+
+    return ToolRiskDecision(
+        risk=risk,
+        action="confirm",
+        reason="mutating, external, or unknown tools require confirmation",
+    )
+
+
+def summarize_tool_policy_actions(
+    tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
+) -> dict[ToolRiskPolicyAction, int]:
+    """Return counts by policy action for logs/UI badges."""
+
+    summary: dict[ToolRiskPolicyAction, int] = {
+        "allow": 0,
+        "confirm": 0,
+        "propose_only": 0,
+    }
+
+    if isinstance(tools, Mapping):
+        iterable = tools.items()
+    else:
+        iterable = ((name, None) for name in tools)
+
+    for name, schema in iterable:
+        decision = decide_tool_policy_action(str(name), schema=schema)
+        summary[decision.action] += 1
+
+    return summary
+
+
 def group_tools_by_risk(
     tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
 ) -> dict[ToolRiskLevel, list[ToolRisk]]:
@@ -309,8 +378,12 @@ def summarize_tool_risks(
 
 __all__ = [
     "ToolRisk",
+    "ToolRiskDecision",
     "ToolRiskLevel",
+    "ToolRiskPolicyAction",
     "classify_tool_risk",
+    "decide_tool_policy_action",
     "group_tools_by_risk",
+    "summarize_tool_policy_actions",
     "summarize_tool_risks",
 ]
