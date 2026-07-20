@@ -164,6 +164,7 @@ function _syncAtlasWorkspaceTitle() {
   const importBtn = _modal.querySelector('[data-act="import"]');
   if (importBtn) {
     importBtn.classList.toggle('disabled', !!root);
+    importBtn.hidden = !!root;
     importBtn.setAttribute('aria-disabled', root ? 'true' : 'false');
     importBtn.title = root
       ? 'Import is disabled while an active Workspace root is selected'
