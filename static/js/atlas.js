@@ -59,7 +59,7 @@ function _renderRootSection(container) {
       <div class="atlas-root-card" title="${_atlasEsc(root)}">
         <div class="atlas-root-name">${_atlasEsc(_pathBaseName(root))}</div>
         <div class="atlas-root-path">${_atlasEsc(root)}</div>
-        <div class="atlas-root-note">Workspace root is active. File view and indexing come later.</div>
+        <div class="atlas-root-note">Workspace is linked. Atlas file tree is not implemented yet; clear Workspace to switch Atlas roots or import.</div>
       </div>
     </div>`;
   container.appendChild(section);
@@ -331,7 +331,7 @@ function _buildModal() {
       <div class="atlas-head">
         <div class="atlas-title-wrap">
           <button class="atlas-title" data-act="home" title="Clear the open note view">Ideaverse</button>
-          <span class="atlas-subtitle" data-el="workspace-title">Atlas workspace</span>
+          <span class="atlas-subtitle" data-el="workspace-title">Atlas workspace · no active Workspace</span>
         </div>
         <span class="grow"></span>
         <button class="atlas-btn" data-act="refresh" title="Refresh Ideaverse UI">↻</button>

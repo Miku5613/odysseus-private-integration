@@ -13,8 +13,9 @@ def test_atlas_ui_displays_active_workspace_root_card() -> None:
     assert "function _activeWorkspaceRoot()" in atlas_js
     assert "getWorkspace" in atlas_js
     assert "atlas-root-card" in atlas_js
-    assert "Workspace root is active" in atlas_js
-    assert "File view and indexing come later" in atlas_js
+    assert "Workspace is linked" in atlas_js
+    assert "Atlas file tree is not implemented yet" in atlas_js
+    assert "clear Workspace to switch Atlas roots or import" in atlas_js
 
 
 def test_atlas_root_switching_is_blocked_when_workspace_is_active() -> None:
