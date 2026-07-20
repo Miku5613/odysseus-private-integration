@@ -431,6 +431,43 @@ def split_tools_for_direct_execution(
     )
 
 
+def _decision_payload(decision: ToolRiskDecision) -> dict[str, object]:
+    """Serialize one tool policy decision for UI/runtime surfaces."""
+
+    return {
+        "name": decision.risk.name,
+        "risk": decision.risk.level,
+        "action": decision.action,
+        "reason": decision.reason,
+        "risk_reason": decision.risk.reason,
+        "requires_confirmation": decision.risk.requires_confirmation,
+        "proposal_only": decision.risk.proposal_only,
+    }
+
+
+def build_tool_gate_payload(
+    tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
+) -> dict[str, object]:
+    """Build a JSON-safe direct/gated tool payload.
+
+    This does not execute or block anything by itself. It gives future Agent
+    Tools UI/runtime patches one stable shape to display or consume.
+    """
+
+    split = split_tools_for_direct_execution(tools)
+    policy_counts = summarize_tool_policy_actions(tools)
+
+    return {
+        "direct": [_decision_payload(item) for item in split.direct],
+        "gated": [_decision_payload(item) for item in split.gated],
+        "counts": {
+            "direct": len(split.direct),
+            "gated": len(split.gated),
+            **policy_counts,
+        },
+    }
+
+
 def group_tools_by_risk(
     tools: Mapping[str, Mapping[str, object] | None] | list[str] | tuple[str, ...],
 ) -> dict[ToolRiskLevel, list[ToolRisk]]:
@@ -482,6 +519,7 @@ __all__ = [
     "ToolRiskDecision",
     "ToolRiskLevel",
     "ToolRiskPolicyAction",
+    "build_tool_gate_payload",
     "classify_tool_risk",
     "decide_tool_policy_action",
     "gate_tool_execution",
