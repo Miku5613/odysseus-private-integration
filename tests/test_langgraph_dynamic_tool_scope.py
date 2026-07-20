@@ -17,7 +17,7 @@ legacy = (ROOT / "src/agent_loop.py").read_text(
 
 
 def test_graph_accepts_resolved_runtime_scope():
-    assert 'def build_graph(scope: str = "file_inspection"):' in graph
+    assert 'def build_graph(scope: str = "file_inspection", session_id: str | None = None):' in graph
     assert 'resolved_scope = str(scope or "file_inspection")' in graph
     assert "tools = get_tools_for_scope(resolved_scope)" in graph
 
@@ -26,7 +26,7 @@ def test_streaming_passes_inferred_scope_to_graph():
     infer_pos = streaming.index(
         "scope = infer_tool_scope(question, workspace_path)"
     )
-    build_pos = streaming.index("graph = build_graph(scope=scope)")
+    build_pos = streaming.index("graph = build_graph(scope=scope, session_id=session_id)")
     assert infer_pos < build_pos
 
 

@@ -24,6 +24,7 @@ from src.agent_runtime.tool_risk_mapper import (
     build_tool_gate_payload,
     decide_tool_call_policy_action,
 )
+from src.agent_runtime.tool_confirmation_store import register_pending_confirmation
 from src.agent_runtime.evidence import (
     analyze_tool_result,
     anchor_key,
@@ -160,9 +161,10 @@ def _evaluate_support(state: AgentState) -> dict:
     )
 
 
-def build_graph(scope: str = "file_inspection"):
+def build_graph(scope: str = "file_inspection", session_id: str | None = None):
     llm = make_llm()
     resolved_scope = str(scope or "file_inspection").strip() or "file_inspection"
+    runtime_session_id = str(session_id or "").strip()
     tools = get_tools_for_scope(resolved_scope)
 
     # LangGraph tool risk visibility v1 — LangGraph-only observational policy.
@@ -347,6 +349,18 @@ def build_graph(scope: str = "file_inspection"):
                 )
                 ok = False
 
+                _pending_confirmation = None
+
+                if runtime_session_id:
+                    _pending_confirmation = register_pending_confirmation(
+                        session_id=runtime_session_id,
+                        call_id=str(call_id),
+                        tool_name=str(name or ""),
+                        arguments=args if isinstance(args, dict) else {},
+                        reason=_risk_decision.reason,
+                        policy_action="confirm",
+                    )
+
                 risk_event = make_event(
                     "tool_confirmation_required",
                     runtime=RUNTIME_VERSION,
@@ -354,6 +368,15 @@ def build_graph(scope: str = "file_inspection"):
                     policy_action="confirm",
                     reason=_risk_decision.reason,
                     call_id=call_id,
+                    session_id=runtime_session_id or None,
+                    fingerprint=(
+                        _pending_confirmation.fingerprint
+                        if _pending_confirmation is not None
+                        else None
+                    ),
+                    confirmation_available=(
+                        _pending_confirmation is not None
+                    ),
                 )
                 print_event(risk_event)
                 events.append(risk_event)
@@ -531,6 +554,19 @@ def build_graph(scope: str = "file_inspection"):
         )
         print_event(event)
         events.append(event)
+
+        # Internal observation expansion is currently hardcoded
+        # to a safe-read tool. Keep that invariant runtime-enforced.
+        _auto_risk_decision = decide_tool_call_policy_action(
+            name,
+            args if isinstance(args, dict) else {},
+        )
+
+        if _auto_risk_decision.action != "allow":
+            raise RuntimeError(
+                "Automatic observation expansion attempted a gated tool: "
+                f"{name} ({_auto_risk_decision.action})"
+            )
 
         tool_obj = TOOL_MAP.get(name)
         if not tool_obj:
@@ -715,6 +751,18 @@ def build_graph(scope: str = "file_inspection"):
                 )
                 ok = False
 
+                _pending_confirmation = None
+
+                if runtime_session_id:
+                    _pending_confirmation = register_pending_confirmation(
+                        session_id=runtime_session_id,
+                        call_id=str(call_id),
+                        tool_name=str(name or ""),
+                        arguments=args if isinstance(args, dict) else {},
+                        reason=_risk_decision.reason,
+                        policy_action="confirm",
+                    )
+
                 risk_event = make_event(
                     "tool_confirmation_required",
                     runtime=RUNTIME_VERSION,
@@ -722,6 +770,15 @@ def build_graph(scope: str = "file_inspection"):
                     policy_action="confirm",
                     reason=_risk_decision.reason,
                     call_id=call_id,
+                    session_id=runtime_session_id or None,
+                    fingerprint=(
+                        _pending_confirmation.fingerprint
+                        if _pending_confirmation is not None
+                        else None
+                    ),
+                    confirmation_available=(
+                        _pending_confirmation is not None
+                    ),
                 )
                 print_event(risk_event)
                 events.append(risk_event)

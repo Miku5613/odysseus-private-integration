@@ -174,7 +174,11 @@ async def stream_langgraph_agent_legacy_sse(
 
     # The runtime itself currently accepts question/workspace through run_stream.
     # If workspace is None, run_stream falls back to its default configured workspace.
-    async for _frame in _run_stream_as_legacy_frames(question, workspace=workspace):
+    async for _frame in _run_stream_as_legacy_frames(
+        question,
+        workspace=workspace,
+        session_id=session_id,
+    ):
         if _frame.startswith("data: ") and not _frame.startswith("data: [DONE]"):
             try:
                 payload = json.loads(_frame[6:])
@@ -209,6 +213,7 @@ async def _run_stream_as_legacy_frames(
     question: str,
     *,
     workspace: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Async facade over run_stream(), which currently yields from a thread.
 
@@ -220,7 +225,11 @@ async def _run_stream_as_legacy_frames(
     # Import here so future workspace-aware runtime changes stay localized.
     from src.agent_runtime.streaming import run_stream as _run_stream
 
-    for event in _run_stream(question, workspace=workspace):
+    for event in _run_stream(
+        question,
+        workspace=workspace,
+        session_id=session_id,
+    ):
         frame = to_legacy_sse_frame(event)
         if frame is not None:
             yield frame

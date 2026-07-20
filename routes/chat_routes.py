@@ -1937,6 +1937,57 @@ def setup_chat_routes(
     # POST /api/chat/stop Ã¢â‚¬â€ cancel a detached run (Stop button). Closing the SSE
     # no longer stops it (it's detached), so the Stop button must call this.
     # ------------------------------------------------------------------ #
+    @router.post(
+        "/api/chat/tool_confirmation/{session_id}"
+    )
+    async def resolve_langgraph_tool_confirmation(
+        request: Request,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """Resolve one exact LangGraph tool confirmation."""
+
+        _verify_session_owner(request, session_id)
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "Invalid JSON")
+
+        call_id = str(body.get("call_id") or "").strip()
+        fingerprint = str(
+            body.get("fingerprint") or ""
+        ).strip()
+        approved = body.get("approved")
+
+        if (
+            not call_id
+            or not fingerprint
+            or not isinstance(approved, bool)
+        ):
+            raise HTTPException(
+                400,
+                "call_id, fingerprint, and boolean approved "
+                "are required",
+            )
+
+        try:
+            from src.agent_runtime.tool_confirmation_execution import (
+                resolve_and_execute_tool_confirmation,
+            )
+
+            return resolve_and_execute_tool_confirmation(
+                session_id=session_id,
+                call_id=call_id,
+                fingerprint=fingerprint,
+                approved=approved,
+            )
+
+        except KeyError as exc:
+            raise HTTPException(404, str(exc))
+
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+
     @router.post("/api/chat/stop/{session_id}")
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)

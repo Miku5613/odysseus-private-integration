@@ -2784,12 +2784,96 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
               } else if (json.type === 'ask_user') {
                 if (_isBg) continue;
-                // The agent posed a multiple-choice question; the turn has ended.
-                // Use the shared history renderer so the live and restored
-                // versions have identical behavior.
+                // Normal ask_user clarification sends the selected answer as
+                // the next user message. Secure tool confirmations reuse the
+                // same card UI but resolve through the fingerprinted endpoint.
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
-                chatRenderer.renderAskUserCard(json.data || {});
+
+                const _askPayload = json.data || {};
+
+                if (_askPayload.interaction_mode === 'tool_confirmation') {
+                  chatRenderer.renderAskUserCard(_askPayload, {
+                    allowOther: false,
+                    onSubmit: async (answer, payload, card) => {
+                      const approved = String(answer).toLowerCase() === 'yes';
+
+                      const buttons = card.querySelectorAll('button');
+                      buttons.forEach((button) => {
+                        button.disabled = true;
+                      });
+
+                      try {
+                        const response = await fetch(
+                          '/api/chat/tool_confirmation/' +
+                          encodeURIComponent(payload.session_id || ''),
+                          {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                              call_id: payload.call_id,
+                              fingerprint: payload.fingerprint,
+                              approved,
+                            }),
+                          },
+                        );
+
+                        const result = await response.json();
+
+                        if (!response.ok) {
+                          throw new Error(
+                            result.detail ||
+                            'Confirmation request failed'
+                          );
+                        }
+
+                        const question = card.querySelector(
+                          '.ask-user-question'
+                        );
+
+                        if (question) {
+                          question.textContent = approved
+                            ? (
+                                result.ok === false
+                                  ? 'Approved, but the tool returned an error.'
+                                  : 'Approved. The action was executed.'
+                              )
+                            : 'Cancelled. The action was not executed.';
+                        }
+
+                        const optionList = card.querySelector(
+                          '.ask-user-options'
+                        );
+
+                        if (optionList) {
+                          optionList.style.display = 'none';
+                        }
+
+                        setTimeout(() => card.remove(), 2200);
+
+                      } catch (error) {
+                        buttons.forEach((button) => {
+                          button.disabled = false;
+                        });
+
+                        const question = card.querySelector(
+                          '.ask-user-question'
+                        );
+
+                        if (question) {
+                          question.textContent =
+                            error?.message ||
+                            'Confirmation failed.';
+                        }
+                      }
+                    },
+                  });
+
+                } else {
+                  chatRenderer.renderAskUserCard(_askPayload);
+                }
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;

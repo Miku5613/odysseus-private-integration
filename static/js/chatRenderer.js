@@ -2163,6 +2163,12 @@ export function renderAskUserCard(payload, options) {
 
   const send = (text) => {
     if (!text) return;
+
+    if (typeof renderOptions.onSubmit === 'function') {
+      renderOptions.onSubmit(text, aq, card);
+      return;
+    }
+
     card.remove();
     const input = uiModule.el('message');
     if (input) input.value = text;
@@ -2201,6 +2207,10 @@ export function renderAskUserCard(payload, options) {
 
   const other = document.createElement('div');
   other.className = 'ask-user-other';
+
+  if (renderOptions.allowOther === false) {
+    other.style.display = 'none';
+  }
   const otherInput = document.createElement('input');
   otherInput.type = 'text';
   otherInput.className = 'styled-prompt-input ask-user-other-input';

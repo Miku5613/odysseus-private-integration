@@ -16,7 +16,11 @@ from src.agent_runtime.tool_policy import infer_tool_scope
 _SENTINEL = object()
 
 
-def run_stream(question: str, workspace: str | None = None) -> Iterator[dict]:
+def run_stream(
+    question: str,
+    workspace: str | None = None,
+    session_id: str | None = None,
+) -> Iterator[dict]:
     """Run the LangGraph runtime and yield event dicts as they happen.
 
     This is the bridge shape that /api/chat_stream can later consume.
@@ -43,7 +47,7 @@ def run_stream(question: str, workspace: str | None = None) -> Iterator[dict]:
                 )
             )
 
-            graph = build_graph(scope=scope)
+            graph = build_graph(scope=scope, session_id=session_id)
 
             result = graph.invoke(
                 {

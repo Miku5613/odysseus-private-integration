@@ -16,6 +16,39 @@ def to_legacy_payload(event: dict[str, Any]) -> dict[str, Any] | str | None:
 
     event_type = event.get("type")
 
+    if event_type == "tool_confirmation_required":
+        tool_name = str(event.get("name") or "This action")
+
+        return {
+            "type": "ask_user",
+            "data": {
+                "interaction_mode": "tool_confirmation",
+                "question": (
+                    f"{tool_name} requires your confirmation. Continue?"
+                ),
+                "options": [
+                    {
+                        "label": "Yes",
+                        "description": "Approve this exact action once.",
+                    },
+                    {
+                        "label": "No",
+                        "description": "Cancel this action.",
+                    },
+                ],
+                "multi": False,
+                "session_id": event.get("session_id"),
+                "call_id": event.get("call_id"),
+                "fingerprint": event.get("fingerprint"),
+                "tool": event.get("name"),
+                "reason": event.get("reason"),
+                "confirmation_available": bool(
+                    event.get("confirmation_available")
+                ),
+            },
+        }
+
+
     if event_type == "stream_start":
         return {
             "type": "agent_prep",
