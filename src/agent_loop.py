@@ -26,6 +26,7 @@ from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
+from src.agent_runtime.tool_risk_mapper import build_tool_gate_payload
 from src.agent_tools import (
     parse_tool_blocks,
     strip_tool_blocks,
@@ -3351,6 +3352,50 @@ async def stream_agent_loop(
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
+        # Tool risk visibility v1 — observational only; no execution filtering.
+        try:
+            _live_tool_schema_map = {}
+            for _tool_schema in (all_tool_schemas or []):
+                if not isinstance(_tool_schema, dict):
+                    continue
+
+                _function = _tool_schema.get("function") or {}
+                if not isinstance(_function, dict):
+                    continue
+
+                _name = _function.get("name")
+                if not _name:
+                    continue
+
+                _parameters = _function.get("parameters")
+                _live_tool_schema_map[str(_name)] = (
+                    _parameters
+                    if isinstance(_parameters, dict)
+                    else None
+                )
+
+            _tool_gate_payload = build_tool_gate_payload(
+                _live_tool_schema_map
+            )
+
+            logger.info(
+                "[tool-risk] live_surface "
+                "round=%s direct=%s gated=%s "
+                "allow=%s confirm=%s propose_only=%s",
+                round_num,
+                _tool_gate_payload["counts"]["direct"],
+                _tool_gate_payload["counts"]["gated"],
+                _tool_gate_payload["counts"]["allow"],
+                _tool_gate_payload["counts"]["confirm"],
+                _tool_gate_payload["counts"]["propose_only"],
+            )
+
+        except Exception as _tool_risk_exc:
+            logger.debug(
+                "[tool-risk] live classification skipped: %s",
+                _tool_risk_exc,
+            )
+
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
