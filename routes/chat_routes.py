@@ -17,6 +17,7 @@ from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import stream_agent_loop
+from src.agent_runtime.legacy_runner import stream_langgraph_agent_legacy_sse
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -113,6 +114,47 @@ def _agent_langgraph_architecture_enabled_for_request(chat_mode: str | None) -> 
         return str(raw).strip().lower() not in {"0", "false", "no", "off"}
     except Exception:
         return True
+
+
+async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
+    """Run native LangGraph first, preserving Legacy as failure fallback."""
+    import inspect
+
+    emitted_any = False
+
+    try:
+        allowed = set(
+            inspect.signature(
+                stream_langgraph_agent_legacy_sse
+            ).parameters
+        )
+
+        langgraph_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key in allowed
+        }
+
+        async for chunk in stream_langgraph_agent_legacy_sse(
+            *args,
+            **langgraph_kwargs,
+        ):
+            emitted_any = True
+            yield chunk
+
+        return
+
+    except Exception:
+        if emitted_any:
+            raise
+
+        logger.exception(
+            "[langgraph-first] native LangGraph failed before output; "
+            "falling back to Legacy agent loop"
+        )
+
+    async for chunk in stream_agent_loop(*args, **kwargs):
+        yield chunk
 
 
 def _append_runtime_tool_event(events, data):
@@ -1525,6 +1567,16 @@ def setup_chat_routes(
                         )
                     # RUNTIME_ROUTER_V013D_DECISION_END
 
+                    # LANGGRAPH_FIRST_AMBIGUOUS_AGENT_V1_START
+                    _langgraph_first_ambiguous_agent = (
+                        _agent_langgraph_architecture_enabled
+                        and chat_mode == "agent"
+                        and _runtime_decision is not None
+                        and _runtime_decision.intent == "legacy_exploratory"
+                        and _runtime_decision.target_runtime == "legacy"
+                    )
+                    # LANGGRAPH_FIRST_AMBIGUOUS_AGENT_V1_END
+
                     # CONTRACT_RUNTIME_V012D_AGENT_BRANCH_START
                     _contract_requested_agent = (
                         _router_agent_runtime_requested
@@ -1541,7 +1593,7 @@ def setup_chat_routes(
                     )
                     # KNOWLEDGE_RUNTIME_V016D_CHAT_BRANCH_START
                     try:
-                        _knowledge_runtime_enabled = os.getenv("ODYSSEUS_ENABLE_KNOWLEDGE_RUNTIME", "1").strip().lower() not in {"0", "false", "no", "off"}
+                        _knowledge_runtime_enabled = (os.getenv("ODYSSEUS_ENABLE_KNOWLEDGE_RUNTIME", "1").strip().lower() not in {"0", "false", "no", "off"} and not _langgraph_first_ambiguous_agent)
                         if _agent_langgraph_architecture_enabled and chat_mode == "agent" and _knowledge_runtime_enabled and should_intercept_knowledge_chat(message):
                             logger.info("[knowledge-runtime] routing request to v0.16-D knowledge chat bridge")
                             if is_semantic_vault_search_request(message):
@@ -1758,7 +1810,18 @@ def setup_chat_routes(
                         _runtime_tool_events = [_runtime_trace_tool_event(message, _runtime_decision)]
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_END
 
-                    async for chunk in stream_agent_loop(
+                    _selected_agent_stream = (
+                        _stream_langgraph_first_with_legacy_fallback
+                        if _langgraph_first_ambiguous_agent
+                        else stream_agent_loop
+                    )
+
+                    if _langgraph_first_ambiguous_agent:
+                        logger.info(
+                            "[langgraph-first] ambiguous Agent request entering native LangGraph runtime"
+                        )
+
+                    async for chunk in _selected_agent_stream(
                         sess.endpoint_url,
                         sess.model,
                         messages,
