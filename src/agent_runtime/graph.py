@@ -20,6 +20,7 @@ from src.agent_runtime.contract_verifier import (
     format_contract_report,
 )
 from src.agent_runtime.events import debug_print, make_event, print_event
+from src.agent_runtime.tool_risk_mapper import build_tool_gate_payload
 from src.agent_runtime.evidence import (
     analyze_tool_result,
     anchor_key,
@@ -159,6 +160,34 @@ def _evaluate_support(state: AgentState) -> dict:
 def build_graph():
     llm = make_llm()
     tools = get_tools_for_scope("file_inspection")
+
+    # LangGraph tool risk visibility v1 — LangGraph-only observational policy.
+    try:
+        _lg_tool_names = [
+            str(tool.name)
+            for tool in (tools or [])
+            if getattr(tool, "name", None)
+        ]
+
+        _lg_tool_risk_payload = build_tool_gate_payload(
+            _lg_tool_names
+        )
+
+        debug_print(
+            "[langgraph-tool-risk] "
+            f"direct={_lg_tool_risk_payload['counts']['direct']} "
+            f"gated={_lg_tool_risk_payload['counts']['gated']} "
+            f"allow={_lg_tool_risk_payload['counts']['allow']} "
+            f"confirm={_lg_tool_risk_payload['counts']['confirm']} "
+            f"propose_only={_lg_tool_risk_payload['counts']['propose_only']}"
+        )
+
+    except Exception as _lg_risk_exc:
+        debug_print(
+            "[langgraph-tool-risk] "
+            f"classification skipped: {_lg_risk_exc}"
+        )
+
     llm_with_tools = llm.bind_tools(tools)
 
     def task_contract_node(state: AgentState):
