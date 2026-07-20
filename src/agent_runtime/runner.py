@@ -20,7 +20,7 @@ def run_once(question: str, workspace: str | None = None) -> str:
     workspace_path = str(Path(workspace).resolve()) if workspace else str(DEFAULT_WORKSPACE)
     scope = infer_tool_scope(question, workspace_path)
 
-    graph = build_graph()
+    graph = build_graph(scope=scope)
 
     result = graph.invoke(
         {

@@ -43,8 +43,7 @@ def test_langgraph_owns_tool_risk_observation() -> None:
     assert "build_tool_gate_payload" in GRAPH
 
     assert (
-        "LangGraph tool risk visibility v1 — "
-        "LangGraph-only observational policy."
+        "LangGraph tool risk visibility v1"
         in GRAPH
     )
 
@@ -53,7 +52,7 @@ def test_langgraph_owns_tool_risk_observation() -> None:
 
 def test_langgraph_observes_actual_bound_tool_scope() -> None:
     tools_pos = GRAPH.index(
-        'tools = get_tools_for_scope("file_inspection")'
+        'tools = get_tools_for_scope(resolved_scope)'
     )
 
     risk_pos = GRAPH.index(

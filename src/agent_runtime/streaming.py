@@ -43,7 +43,7 @@ def run_stream(question: str, workspace: str | None = None) -> Iterator[dict]:
                 )
             )
 
-            graph = build_graph()
+            graph = build_graph(scope=scope)
 
             result = graph.invoke(
                 {

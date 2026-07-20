@@ -160,9 +160,10 @@ def _evaluate_support(state: AgentState) -> dict:
     )
 
 
-def build_graph():
+def build_graph(scope: str = "file_inspection"):
     llm = make_llm()
-    tools = get_tools_for_scope("file_inspection")
+    resolved_scope = str(scope or "file_inspection").strip() or "file_inspection"
+    tools = get_tools_for_scope(resolved_scope)
 
     # LangGraph tool risk visibility v1 — LangGraph-only observational policy.
     try:
