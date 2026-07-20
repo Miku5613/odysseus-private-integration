@@ -106,7 +106,7 @@ function _renderQuickStart() {
         <span class="workspace-quick-name">${uiModule.esc(r.label || _basename(r.path))}</span>
         <span class="workspace-quick-path">${uiModule.esc(r.path)}</span>
       </button>`).join('')
-    : '<div class="workspace-quick-empty">No authorized roots yet</div>';
+    : '<div class="workspace-quick-empty">No saved roots yet</div>';
 
   box.innerHTML = `
     <div class="workspace-quick-title">Quick Start</div>
@@ -116,7 +116,7 @@ function _renderQuickStart() {
         ${recentHtml}
       </section>
       <section class="workspace-quick-section">
-        <div class="workspace-quick-label">Authorized Roots</div>
+        <div class="workspace-quick-label">Saved Roots</div>
         ${rootsHtml}
       </section>
     </div>`;
