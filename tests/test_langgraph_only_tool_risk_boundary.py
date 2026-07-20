@@ -36,10 +36,11 @@ def test_patch4i_observer_is_removed_from_legacy() -> None:
 
 def test_langgraph_owns_tool_risk_observation() -> None:
     assert (
-        "from src.agent_runtime.tool_risk_mapper "
-        "import build_tool_gate_payload"
+        "from src.agent_runtime.tool_risk_mapper import ("
         in GRAPH
     )
+
+    assert "build_tool_gate_payload" in GRAPH
 
     assert (
         "LangGraph tool risk visibility v1 — "

@@ -20,7 +20,10 @@ from src.agent_runtime.contract_verifier import (
     format_contract_report,
 )
 from src.agent_runtime.events import debug_print, make_event, print_event
-from src.agent_runtime.tool_risk_mapper import build_tool_gate_payload
+from src.agent_runtime.tool_risk_mapper import (
+    build_tool_gate_payload,
+    decide_tool_call_policy_action,
+)
 from src.agent_runtime.evidence import (
     analyze_tool_result,
     anchor_key,
@@ -310,17 +313,65 @@ def build_graph():
             print_event(event)
             events.append(event)
 
-            tool_obj = TOOL_MAP.get(name)
-            if not tool_obj:
-                content = f"ERROR: Tool not allowed or not found: {name}"
+            # LangGraph execution-time tool risk gate v1 — Legacy runtime is not involved.
+            _risk_decision = decide_tool_call_policy_action(
+                str(name or ""),
+                args if isinstance(args, dict) else {},
+            )
+
+            if _risk_decision.action == "propose_only":
+                content = (
+                    "DESTRUCTIVE_ACTION_BLOCKED: "
+                    f"{name} was not executed. "
+                    f"{_risk_decision.reason}"
+                )
                 ok = False
+
+                risk_event = make_event(
+                    "tool_risk_blocked",
+                    runtime=RUNTIME_VERSION,
+                    name=name,
+                    policy_action="propose_only",
+                    reason=_risk_decision.reason,
+                    call_id=call_id,
+                )
+                print_event(risk_event)
+                events.append(risk_event)
+
+            elif _risk_decision.action == "confirm":
+                content = (
+                    "CONFIRMATION_REQUIRED: "
+                    f"{name} was not executed. "
+                    f"{_risk_decision.reason}"
+                )
+                ok = False
+
+                risk_event = make_event(
+                    "tool_confirmation_required",
+                    runtime=RUNTIME_VERSION,
+                    name=name,
+                    policy_action="confirm",
+                    reason=_risk_decision.reason,
+                    call_id=call_id,
+                )
+                print_event(risk_event)
+                events.append(risk_event)
+
             else:
-                try:
-                    content = tool_obj.invoke(args)
-                    ok = not str(content).startswith("ERROR:")
-                except Exception as e:
-                    content = f"ERROR executing {name}: {e}"
+                tool_obj = TOOL_MAP.get(name)
+
+                if not tool_obj:
+                    content = (
+                        f"ERROR: Tool not allowed or not found: {name}"
+                    )
                     ok = False
+                else:
+                    try:
+                        content = tool_obj.invoke(args)
+                        ok = not str(content).startswith("ERROR:")
+                    except Exception as e:
+                        content = f"ERROR executing {name}: {e}"
+                        ok = False
 
             content_text = str(content)
             span = complete_span(span, output=content_text, ok=ok)
@@ -630,17 +681,65 @@ def build_graph():
             print_event(event)
             events.append(event)
 
-            tool_obj = TOOL_MAP.get(name)
-            if not tool_obj:
-                content = f"ERROR: Tool not allowed or not found: {name}"
+            # LangGraph execution-time tool risk gate v1 — Legacy runtime is not involved.
+            _risk_decision = decide_tool_call_policy_action(
+                str(name or ""),
+                args if isinstance(args, dict) else {},
+            )
+
+            if _risk_decision.action == "propose_only":
+                content = (
+                    "DESTRUCTIVE_ACTION_BLOCKED: "
+                    f"{name} was not executed. "
+                    f"{_risk_decision.reason}"
+                )
                 ok = False
+
+                risk_event = make_event(
+                    "tool_risk_blocked",
+                    runtime=RUNTIME_VERSION,
+                    name=name,
+                    policy_action="propose_only",
+                    reason=_risk_decision.reason,
+                    call_id=call_id,
+                )
+                print_event(risk_event)
+                events.append(risk_event)
+
+            elif _risk_decision.action == "confirm":
+                content = (
+                    "CONFIRMATION_REQUIRED: "
+                    f"{name} was not executed. "
+                    f"{_risk_decision.reason}"
+                )
+                ok = False
+
+                risk_event = make_event(
+                    "tool_confirmation_required",
+                    runtime=RUNTIME_VERSION,
+                    name=name,
+                    policy_action="confirm",
+                    reason=_risk_decision.reason,
+                    call_id=call_id,
+                )
+                print_event(risk_event)
+                events.append(risk_event)
+
             else:
-                try:
-                    content = tool_obj.invoke(args)
-                    ok = not str(content).startswith("ERROR:")
-                except Exception as e:
-                    content = f"ERROR executing {name}: {e}"
+                tool_obj = TOOL_MAP.get(name)
+
+                if not tool_obj:
+                    content = (
+                        f"ERROR: Tool not allowed or not found: {name}"
+                    )
                     ok = False
+                else:
+                    try:
+                        content = tool_obj.invoke(args)
+                        ok = not str(content).startswith("ERROR:")
+                    except Exception as e:
+                        content = f"ERROR executing {name}: {e}"
+                        ok = False
 
             content_text = str(content)
             span = complete_span(span, output=content_text, ok=ok)
