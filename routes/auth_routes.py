@@ -668,6 +668,14 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                     raise HTTPException(400, f"{key} must be an integer")
                 val = max(lo, min(val, hi))
             current[key] = val
+        def _coerce_bool_setting(value):
+            if isinstance(value, str):
+                return value.strip().lower() not in {"0", "false", "no", "off"}
+            return bool(value)
+
+        if "agent_langgraph_enabled" in body:
+            current["agent_langgraph_enabled"] = _coerce_bool_setting(body.get("agent_langgraph_enabled"))
+
         _save_settings(current)
         return current
 

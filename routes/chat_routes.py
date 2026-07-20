@@ -97,6 +97,24 @@ def _runtime_trace_tool_event(message: str, runtime_decision):
         }
 
 
+
+
+
+def _agent_langgraph_architecture_enabled_for_request(chat_mode: str | None) -> bool:
+    """Return whether Agent mode may enter the LangGraph architecture.
+
+    This is the request-level kill switch. When the Agent Tools setting is OFF,
+    Agent mode must bypass knowledge-runtime, contract runtime, general runtime,
+    and runtime-router probes, then fall through to the legacy agent loop.
+    """
+    try:
+        from src.settings import get_setting
+        raw = get_setting("agent_langgraph_enabled", True)
+        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+    except Exception:
+        return True
+
+
 def _append_runtime_tool_event(events, data):
     if not isinstance(events, list) or not isinstance(data, dict):
         return
@@ -652,10 +670,19 @@ def setup_chat_routes(
         _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
         _tool_intent_needs_tools = bool(_tool_intent and getattr(_tool_intent, "needs_tools", False))
 
+        # AGENT_LANGGRAPH_REQUEST_BYPASS_V1_START
+        # One request-level gate for the whole LangGraph architecture.
+        # When Agent Tools → "Use LangGraph for Agent mode" is OFF, this turn
+        # must not enter knowledge-runtime, contract/general runtime, or runtime
+        # router probes. It falls through to the legacy agent loop instead.
+        _agent_langgraph_architecture_enabled = _agent_langgraph_architecture_enabled_for_request(chat_mode)
+        # AGENT_LANGGRAPH_REQUEST_BYPASS_V1_END
+
         _knowledge_intent_requested = False
         try:
             _knowledge_intent_requested = (
-                isinstance(message, str)
+                _agent_langgraph_architecture_enabled
+                and isinstance(message, str)
                 and os.getenv("ODYSSEUS_ENABLE_KNOWLEDGE_RUNTIME", "1").strip().lower() not in {"0", "false", "no", "off"}
                 and should_intercept_knowledge_chat(message)
             )
@@ -664,9 +691,11 @@ def setup_chat_routes(
 
         _runtime_intent_requested = False
         try:
-            _f3_runtime_probe = route_agent_runtime(message)
+            _f3_runtime_probe = route_agent_runtime(message) if _agent_langgraph_architecture_enabled else None
             _runtime_intent_requested = (
-                getattr(_f3_runtime_probe, "target_runtime", "legacy") in {"contract", "general"}
+                _agent_langgraph_architecture_enabled
+                and _f3_runtime_probe is not None
+                and getattr(_f3_runtime_probe, "target_runtime", "legacy") in {"contract", "general"}
             )
         except Exception as _f3_runtime_probe_exc:
             logger.debug("[daily-driver] runtime intent probe skipped: %s", _f3_runtime_probe_exc)
@@ -686,7 +715,8 @@ def setup_chat_routes(
         )
 
         if (
-            chat_mode == "agent"
+            _agent_langgraph_architecture_enabled
+            and chat_mode == "agent"
             and not _clear_tool_or_runtime_intent
             and not compare_mode
             and not plan_mode
@@ -708,7 +738,7 @@ def setup_chat_routes(
         # shell disabled).
         auto_escalated = False
         _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
-        if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
+        if _agent_langgraph_architecture_enabled and chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
             chat_mode = "agent"
             auto_escalated = True
             logger.info(
@@ -1472,36 +1502,33 @@ def setup_chat_routes(
                         _forced_tools = {"web_search", "web_fetch"}
 
                     # RUNTIME_ROUTER_V013D_DECISION_START
-                    # Agent LangGraph toggle:
-                    # - ON/default: Agent mode may use contract/general/langgraph runtime.
-                    # - OFF: skip runtime routing entirely and fall through to legacy agent loop.
-                    try:
-                        _agent_langgraph_raw = get_setting("agent_langgraph_enabled", True)
-                        _agent_langgraph_enabled = str(_agent_langgraph_raw).strip().lower() not in {"0", "false", "no", "off"}
-                    except Exception:
-                        _agent_langgraph_enabled = True
-
-                    _runtime_decision = route_agent_runtime(message) if _agent_langgraph_enabled else None
+                    _runtime_decision = route_agent_runtime(message) if _agent_langgraph_architecture_enabled else None
 
                     _router_agent_runtime_requested = (
-                        _agent_langgraph_enabled
+                        _agent_langgraph_architecture_enabled
                         and _runtime_decision is not None
                         and chat_mode == "agent"
                         and os.getenv("ODYSSEUS_AGENT_RUNTIME", "").strip().lower()
                         in {"contract", "general", "langgraph"}
                     )
-                    logger.info(
-                        "[odysseus-router] intent=%s runtime=%s safe=%s reason=%s",
-                        _runtime_decision.intent,
-                        _runtime_decision.target_runtime,
-                        _runtime_decision.is_safe_readonly,
-                        _runtime_decision.reason,
-                    )
+                    if _runtime_decision is not None:
+                        logger.info(
+                            "[odysseus-router] intent=%s runtime=%s safe=%s reason=%s",
+                            _runtime_decision.intent,
+                            _runtime_decision.target_runtime,
+                            _runtime_decision.is_safe_readonly,
+                            _runtime_decision.reason,
+                        )
+                    else:
+                        logger.info(
+                            "[odysseus-router] skipped because Agent LangGraph architecture is disabled"
+                        )
                     # RUNTIME_ROUTER_V013D_DECISION_END
 
                     # CONTRACT_RUNTIME_V012D_AGENT_BRANCH_START
                     _contract_requested_agent = (
                         _router_agent_runtime_requested
+                        and _runtime_decision is not None
                         and _runtime_decision.target_runtime == "contract"
                     )
                     _contract_allowed_agent = (
@@ -1515,7 +1542,7 @@ def setup_chat_routes(
                     # KNOWLEDGE_RUNTIME_V016D_CHAT_BRANCH_START
                     try:
                         _knowledge_runtime_enabled = os.getenv("ODYSSEUS_ENABLE_KNOWLEDGE_RUNTIME", "1").strip().lower() not in {"0", "false", "no", "off"}
-                        if chat_mode == "agent" and _knowledge_runtime_enabled and should_intercept_knowledge_chat(message):
+                        if _agent_langgraph_architecture_enabled and chat_mode == "agent" and _knowledge_runtime_enabled and should_intercept_knowledge_chat(message):
                             logger.info("[knowledge-runtime] routing request to v0.16-D knowledge chat bridge")
                             if is_semantic_vault_search_request(message):
                                 _knowledge_full_response, _knowledge_frames, _knowledge_tool_events, _knowledge_metrics = run_knowledge_semantic_chat_turn(message)
@@ -1629,6 +1656,7 @@ def setup_chat_routes(
                     # GENERAL_RUNTIME_V013_AGENT_BRANCH_START
                     _general_requested_agent = (
                         _router_agent_runtime_requested
+                        and _runtime_decision is not None
                         and _runtime_decision.target_runtime == "general"
                     )
                     _general_allowed_agent = (
