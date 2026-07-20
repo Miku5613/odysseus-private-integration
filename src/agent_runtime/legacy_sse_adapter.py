@@ -49,6 +49,16 @@ def to_legacy_payload(event: dict[str, Any]) -> dict[str, Any] | str | None:
         }
 
 
+    if event_type == "ask_user":
+        return {
+            "type": "ask_user",
+            "data": {
+                "question": event.get("question"),
+                "options": event.get("options") or [],
+                "multi": bool(event.get("multi", False)),
+            },
+        }
+
     if event_type == "stream_start":
         return {
             "type": "agent_prep",

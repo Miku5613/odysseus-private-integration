@@ -64,6 +64,10 @@ SYSTEM = SystemMessage(
     content=(
         "You are a read-only local code/file inspection agent. "
         "Use tools when needed. Do not guess. "
+"When missing or ambiguous information materially changes the correct "
+"source, target, tool, or required arguments, use ask_user with one "
+"focused clarification question rather than inventing details. "
+"After clarification, re-evaluate the whole request and available tools. "
         "You may only inspect files inside the workspace. "
         "Do not write, edit, delete, run shell commands, or use web search. "
         "Prefer targeted search: use grep/glob before reading many chunks. "
@@ -295,6 +299,64 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
             name = call.get("name")
             args = call.get("args") or {}
             call_id = call.get("id") or f"call_{len(trace_spans) + 1}"
+
+            if name == "ask_user":
+                question = str(args.get("question") or "").strip()
+                raw_options = args.get("options") or []
+                options = []
+
+                for option in raw_options[:6]:
+                    if isinstance(option, dict):
+                        label = str(option.get("label") or "").strip()
+                        description = str(
+                            option.get("description") or ""
+                        ).strip()
+                    else:
+                        label = str(option or "").strip()
+                        description = ""
+
+                    if label:
+                        options.append(
+                            {
+                                "label": label,
+                                "description": description,
+                            }
+                        )
+
+                if not question or len(options) < 2:
+                    tool_messages.append(
+                        ToolMessage(
+                            content=(
+                                "ERROR: ask_user requires a non-empty "
+                                "question and at least 2 options."
+                            ),
+                            tool_call_id=call_id,
+                            name="ask_user",
+                        )
+                    )
+                    continue
+
+                ask_event = make_event(
+                    "ask_user",
+                    runtime=RUNTIME_VERSION,
+                    question=question,
+                    options=options,
+                    multi=bool(args.get("multi", False)),
+                    call_id=call_id,
+                )
+                print_event(ask_event)
+                events.append(ask_event)
+
+                tool_messages.append(
+                    ToolMessage(
+                        content="Awaiting user clarification.",
+                        tool_call_id=call_id,
+                        name="ask_user",
+                    )
+                )
+
+                # ask_user ends this turn. Never run sibling calls after it.
+                break
 
             debug_print(f"[tools] executing {name}({args})")
 
@@ -1011,6 +1073,18 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
         return "finalizer"
 
     def route_after_tools(state: AgentState):
+        last_message = (
+            state["messages"][-1]
+            if state.get("messages")
+            else None
+        )
+
+        if (
+            isinstance(last_message, ToolMessage)
+            and getattr(last_message, "name", None) == "ask_user"
+        ):
+            return END
+
         claim_support = state.get("claim_support") or _evaluate_support(state)
 
         if has_strong_claim_support(claim_support) or has_strong_evidence(state.get("evidence_hits", [])):

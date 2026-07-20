@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from langchain_core.tools import StructuredTool
+
 import fnmatch
 import re
 from pathlib import Path
@@ -215,7 +217,29 @@ def read_file_around(path: str, line: int, context: int = 30) -> str:
         return f"ERROR: {e}"
 
 
+def _ask_user_marker(
+    question: str,
+    options: list[dict],
+    multi: bool = False,
+) -> str:
+    """LangGraph interaction marker handled by graph.py."""
+    return "ASK_USER"
+
+
+ask_user = StructuredTool.from_function(
+    func=_ask_user_marker,
+    name="ask_user",
+    description=(
+        "Ask the user one focused clarification question when missing or "
+        "ambiguous information materially changes the correct source, "
+        "target, tool, or required arguments. Provide 2-6 useful options. "
+        "The user may also answer with free text. Calling this ends the "
+        "current turn. Do not use this for risk confirmation."
+    ),
+)
+
 ALL_TOOLS = [
+    ask_user,
     get_workspace,
     ls,
     glob_files,
@@ -232,4 +256,8 @@ def get_tools_for_scope(scope: str):
     from src.agent_runtime.tool_policy import allowed_tools_for_scope
 
     allowed = allowed_tools_for_scope(scope)
-    return [tool_obj for tool_obj in ALL_TOOLS if tool_obj.name in allowed]
+    return [
+        tool_obj
+        for tool_obj in ALL_TOOLS
+        if tool_obj.name == "ask_user" or tool_obj.name in allowed
+    ]
