@@ -21,6 +21,7 @@ from src.embeddings import EmbeddingClient
 
 COLLECTION_NAME = "odysseus_knowledge_vault_nomic"
 INDEX_NAMESPACE = "ideaverse_vault"
+DEFAULT_INDEX_NAMESPACE = INDEX_NAMESPACE
 DEFAULT_EMBEDDING_URL = "http://localhost:11434/v1/embeddings"
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text:latest"
 
@@ -72,8 +73,16 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(str(text or "").encode("utf-8", errors="replace")).hexdigest()
 
 
-def _chunk_id(path: str, note_hash: str, chunk_index: int, chunk_text: str) -> str:
-    raw = f"{INDEX_NAMESPACE}|{path}|{note_hash}|{chunk_index}|{_content_hash(chunk_text)}"
+def _chunk_id(
+    path: str,
+    note_hash: str,
+    chunk_index: int,
+    chunk_text: str,
+    *,
+    index_namespace: str = DEFAULT_INDEX_NAMESPACE,
+) -> str:
+    index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
+    raw = f"{index_namespace}|{path}|{note_hash}|{chunk_index}|{_content_hash(chunk_text)}"
     return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
 
 
@@ -151,10 +160,15 @@ def chunk_markdown_note(
     return chunks
 
 
-def _delete_existing_namespace(collection) -> int:
+def _delete_existing_namespace(
+    collection,
+    *,
+    index_namespace: str = DEFAULT_INDEX_NAMESPACE,
+) -> int:
+    index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
     try:
         existing = collection.get(
-            where={"index_namespace": INDEX_NAMESPACE},
+            where={"index_namespace": index_namespace},
             include=["metadatas"],
         )
         ids = existing.get("ids") or []
@@ -169,12 +183,30 @@ def build_semantic_vault_index(
     *,
     structural_index: KnowledgeVaultIndex | None = None,
     adapter: ObsidianReadAdapter | ContextVaultReadAdapter | None = None,
+    index_namespace: str = DEFAULT_INDEX_NAMESPACE,
     rebuild: bool = True,
     max_notes: int = 1000,
     batch_size: int = 16,
 ) -> SemanticIndexStats:
-    adapter = adapter or ContextVaultReadAdapter()
-    index = structural_index or load_cached_vault_index() or build_structural_vault_index(adapter=adapter, max_notes=max_notes)
+    index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
+    adapter = adapter or ContextVaultReadAdapter(root_id=index_namespace)
+
+    if structural_index is not None:
+        index = structural_index
+    elif index_namespace == DEFAULT_INDEX_NAMESPACE:
+        index = (
+            load_cached_vault_index()
+            or build_structural_vault_index(
+                adapter=adapter,
+                max_notes=max_notes,
+            )
+        )
+    else:
+        index = build_structural_vault_index(
+            adapter=adapter,
+            max_notes=max_notes,
+            cache_path=None,
+        )
 
     emb = _embedding_client()
     # Force health/dimension probe early so failures are clear.
@@ -183,7 +215,10 @@ def build_semantic_vault_index(
     col = _collection()
 
     if rebuild:
-        _delete_existing_namespace(col)
+        _delete_existing_namespace(
+            col,
+            index_namespace=index_namespace,
+        )
 
     all_docs: list[str] = []
     all_ids: list[str] = []
@@ -200,12 +235,27 @@ def build_semantic_vault_index(
         chunks = chunk_markdown_note(note.path, note.title, content)
         for ch in chunks:
             chunk_text = ch["text"]
-            chunk_id = _chunk_id(note.path, ch["note_hash"], ch["chunk_index"], chunk_text)
+            chunk_id = _chunk_id(
+                note.path,
+                ch["note_hash"],
+                ch["chunk_index"],
+                chunk_text,
+                index_namespace=index_namespace,
+            )
 
             metadata = {
-                "index_namespace": INDEX_NAMESPACE,
-                "source": "obsidian",
-                "vault": "Ideaverse",
+                "index_namespace": index_namespace,
+                "root_id": index_namespace,
+                "source": (
+                    "obsidian"
+                    if index_namespace == DEFAULT_INDEX_NAMESPACE
+                    else "context_provider"
+                ),
+                "vault": (
+                    "Ideaverse"
+                    if index_namespace == DEFAULT_INDEX_NAMESPACE
+                    else index_namespace
+                ),
                 "path": note.path,
                 "folder": note.folder,
                 "filename": note.filename,
@@ -248,7 +298,13 @@ def build_semantic_vault_index(
     )
 
 
-def search_semantic_vault_index(query: str, *, k: int = 8) -> list[dict[str, Any]]:
+def search_semantic_vault_index(
+    query: str,
+    *,
+    k: int = 8,
+    index_namespace: str = DEFAULT_INDEX_NAMESPACE,
+) -> list[dict[str, Any]]:
+    index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
     query = str(query or "").strip()
     if not query:
         return []
@@ -262,7 +318,7 @@ def search_semantic_vault_index(query: str, *, k: int = 8) -> list[dict[str, Any
     results = col.query(
         query_embeddings=[qvec],
         n_results=max(1, int(k)),
-        where={"index_namespace": INDEX_NAMESPACE},
+        where={"index_namespace": index_namespace},
         include=["documents", "metadatas", "distances"],
     )
 
@@ -297,7 +353,11 @@ def search_semantic_vault_index(query: str, *, k: int = 8) -> list[dict[str, Any
     return out
 
 
-def get_semantic_vault_stats() -> dict[str, Any]:
+def get_semantic_vault_stats(
+    *,
+    index_namespace: str = DEFAULT_INDEX_NAMESPACE,
+) -> dict[str, Any]:
+    index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
     col = _collection()
     try:
         total = col.count()
@@ -306,7 +366,7 @@ def get_semantic_vault_stats() -> dict[str, Any]:
 
     namespace_count = 0
     try:
-        existing = col.get(where={"index_namespace": INDEX_NAMESPACE}, include=["metadatas"])
+        existing = col.get(where={"index_namespace": index_namespace}, include=["metadatas"])
         namespace_count = len(existing.get("ids") or [])
     except Exception:
         namespace_count = 0
@@ -315,7 +375,7 @@ def get_semantic_vault_stats() -> dict[str, Any]:
         "collection_name": COLLECTION_NAME,
         "total_collection_count": total,
         "namespace_count": namespace_count,
-        "index_namespace": INDEX_NAMESPACE,
+        "index_namespace": index_namespace,
         "embedding_model": os.getenv("KNOWLEDGE_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
         "embedding_url": os.getenv("KNOWLEDGE_EMBEDDING_URL", DEFAULT_EMBEDDING_URL),
     }

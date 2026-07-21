@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import inspect
 from typing import Any
 
 from src.agent_runtime.knowledge_vault_semantic import search_semantic_vault_index
@@ -59,8 +60,29 @@ def run_knowledge_worker(
             missing_information=("knowledge query",),
         )
 
+    root_id = str(
+        handoff.context.get("root_id")
+        or "ideaverse_vault"
+    ).strip()
+
     try:
-        results = retriever(query, k=8)
+        parameters = inspect.signature(retriever).parameters
+        supports_namespace = (
+            "index_namespace" in parameters
+            or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in parameters.values()
+            )
+        )
+
+        if supports_namespace:
+            results = retriever(
+                query,
+                k=8,
+                index_namespace=root_id,
+            )
+        else:
+            results = retriever(query, k=8)
     except Exception as exc:
         return WorkerResult(
             capability=KNOWLEDGE_WORKER_CAPABILITY,
@@ -68,6 +90,7 @@ def run_knowledge_worker(
             summary="Semantic knowledge retrieval failed.",
             data={
                 "query": query,
+                "root_id": root_id,
                 "session_id": session_id,
             },
             error=str(exc),
@@ -82,6 +105,7 @@ def run_knowledge_worker(
             summary="No matching indexed knowledge was found.",
             data={
                 "query": query,
+                "root_id": root_id,
                 "result_count": 0,
                 "session_id": session_id,
             },
@@ -93,6 +117,7 @@ def run_knowledge_worker(
         summary=f"Retrieved {len(results)} relevant knowledge result(s).",
         data={
             "query": query,
+            "root_id": root_id,
             "result_count": len(results),
             "results": results,
             "session_id": session_id,
