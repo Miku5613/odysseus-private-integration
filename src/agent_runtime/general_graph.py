@@ -641,6 +641,8 @@ def execute_readonly_plan(state: GeneralState) -> None:
             "find", "where", "the", "handles", "events", "use", "tools", "needed", "guess",
             "inspect", "current", "odysseus", "project", "report", "which", "specialist",
             "available", "read", "only", "summarize", "what", "related", "code",
+            "backend", "frontend", "route", "routes", "handler", "source",
+            "and", "you",
         }
         words = [
             w
