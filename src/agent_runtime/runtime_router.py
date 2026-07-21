@@ -252,8 +252,25 @@ def route_agent_runtime(prompt: str) -> RuntimeDecision:
 
     # Read-only but broad/non-specific project inspection can go to general.
     if (
-        ("inspect" in low or "trace" in low or "show" in low or "find" in low or "locate" in low)
-        and ("code" in low or "route" in low or "frontend" in low or "backend" in low or "module" in low)
+        (
+            "inspect" in low
+            or "trace" in low
+            or "show" in low
+            or "find" in low
+            or "locate" in low
+            or "report" in low
+            or "list" in low
+        )
+        and (
+            "code" in low
+            or "route" in low
+            or "frontend" in low
+            or "backend" in low
+            or "module" in low
+            or "project" in low
+            or "runtime" in low
+            or "worker" in low
+        )
     ):
         return RuntimeDecision(
             intent="general_readonly",

@@ -927,7 +927,7 @@ def setup_chat_routes(
             session_id=session,
             preset_id=preset_id,
             att_ids=att_ids,
-            use_web=use_web,
+            use_web=_search_enabled,
             use_rag=use_rag,
             time_filter=time_filter,
             incognito=incognito,
