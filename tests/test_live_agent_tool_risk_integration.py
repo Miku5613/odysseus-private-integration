@@ -3,88 +3,47 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-AGENT_LOOP = (
-    ROOT / "src" / "agent_loop.py"
-).read_text(
-    encoding="utf-8",
-    errors="replace",
+AGENT_LOOP = (ROOT / "src" / "agent_loop.py").read_text(
+    encoding="utf-8", errors="replace"
 )
+CHAT_ROUTES = (ROOT / "routes" / "chat_routes.py").read_text(
+    encoding="utf-8", errors="replace"
+)
+LIVE_SUPERVISOR = (
+    ROOT / "src" / "agent_runtime" / "live_supervisor.py"
+).read_text(encoding="utf-8", errors="replace")
+DISPATCHER = (
+    ROOT / "src" / "agent_runtime" / "worker_dispatcher.py"
+).read_text(encoding="utf-8", errors="replace")
 
 
-def test_live_agent_imports_tool_gate_builder() -> None:
-    assert (
-        "from src.agent_runtime.tool_risk_mapper "
-        "import build_tool_gate_payload"
-        in AGENT_LOOP
-    )
-
-
-def test_live_agent_classifies_final_schema_surface() -> None:
-    assert (
-        "# Tool risk visibility v1 — observational only; "
-        "no execution filtering."
-        in AGENT_LOOP
-    )
-
-    assert "for _tool_schema in (all_tool_schemas or [])" in AGENT_LOOP
-    assert "_live_tool_schema_map[str(_name)]" in AGENT_LOOP
-
-    assert (
-        "build_tool_gate_payload("
-        in AGENT_LOOP
-    )
-
-    assert "_live_tool_schema_map" in AGENT_LOOP
-
-
-def test_live_agent_uses_schema_parameters_for_risk() -> None:
-    assert '_function.get("parameters")' in AGENT_LOOP
-
-    # Important: schema-aware classification means multi-action tools can
-    # expose destructive actions to the mapper instead of relying only on names.
-    assert "_parameters" in AGENT_LOOP
-
-
-def test_live_agent_emits_policy_counts() -> None:
-    assert "[tool-risk] live_surface " in AGENT_LOOP
-
-    for key in (
-        "direct",
-        "gated",
-        "allow",
-        "confirm",
-        "propose_only",
-    ):
-        assert (
-            f'_tool_gate_payload["counts"]["{key}"]'
-            in AGENT_LOOP
-        )
-
-
-def test_patch4i_remains_observational() -> None:
-    assert (
-        "observational only; no execution filtering"
-        in AGENT_LOOP
-    )
-
-    # No execution gate is invoked by agent_loop yet.
+def test_legacy_agent_loop_has_no_langgraph_policy_instrumentation() -> None:
+    assert "build_tool_gate_payload" not in AGENT_LOOP
     assert "gate_tool_execution(" not in AGENT_LOOP
     assert "split_tools_for_direct_execution(" not in AGENT_LOOP
 
 
-def test_risk_observation_occurs_after_final_schema_build() -> None:
-    schema_pos = AGENT_LOOP.index(
-        "_tool_names_sent = "
-        '[t.get("function", {}).get("name")'
-    )
+def test_live_route_uses_general_supervisor() -> None:
+    assert "stream_general_supervisor_sse" in CHAT_ROUTES
+    assert "stream_langgraph_agent_legacy_sse" not in CHAT_ROUTES
 
-    risk_pos = AGENT_LOOP.index(
-        "# Tool risk visibility v1"
-    )
 
-    stream_pos = AGENT_LOOP.index(
-        "async for chunk in stream_llm_with_fallback(",
-        risk_pos,
-    )
+def test_live_route_preserves_pre_output_legacy_fallback() -> None:
+    assert "_stream_langgraph_first_with_legacy_fallback" in CHAT_ROUTES
+    assert "stream_agent_loop" in CHAT_ROUTES
 
-    assert schema_pos < risk_pos < stream_pos
+
+def test_agent_tools_toggle_remains_the_runtime_boundary() -> None:
+    assert "agent_langgraph_enabled" in CHAT_ROUTES
+
+
+def test_general_supervisor_uses_async_dispatcher_and_evidence() -> None:
+    assert "dispatch_supervisor_decision_async" in LIVE_SUPERVISOR
+    assert "WORKER RESULTS:" in LIVE_SUPERVISOR
+
+
+def test_all_specialist_workers_are_registered() -> None:
+    assert '"code_inspection": run_code_worker' in DISPATCHER
+    assert '"knowledge_search": run_knowledge_worker' in DISPATCHER
+    assert '"deep_research": run_research_worker' in DISPATCHER
+    assert '"mcp_specialized": run_mcp_worker' in DISPATCHER
