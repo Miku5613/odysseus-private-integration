@@ -17,7 +17,7 @@ from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import stream_agent_loop
-from src.agent_runtime.legacy_runner import stream_langgraph_agent_legacy_sse
+from src.agent_runtime.live_supervisor import stream_general_supervisor_sse
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -125,7 +125,7 @@ async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
     try:
         allowed = set(
             inspect.signature(
-                stream_langgraph_agent_legacy_sse
+                stream_general_supervisor_sse
             ).parameters
         )
 
@@ -135,7 +135,7 @@ async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
             if key in allowed
         }
 
-        async for chunk in stream_langgraph_agent_legacy_sse(
+        async for chunk in stream_general_supervisor_sse(
             *args,
             **langgraph_kwargs,
         ):
