@@ -650,8 +650,28 @@ def execute_readonly_plan(state: GeneralState) -> None:
         patterns.extend(re.escape(w) for w in words[:3])
 
     grep_pattern = "|".join(dict.fromkeys(patterns)) or re.escape(state.raw_query[:40])
-    grep_out = tools.grep(state.workspace, grep_pattern, max_results=80)
-    _record(state, "grep", {"pattern": grep_pattern, "max_results": 80}, grep_out, bool(grep_out.strip()))
+
+    grep_path = "."
+    if task.kind == "route_lookup" and "backend" in raw:
+        grep_path = "routes"
+
+    grep_out = tools.grep(
+        state.workspace,
+        grep_pattern,
+        path=grep_path,
+        max_results=80,
+    )
+    _record(
+        state,
+        "grep",
+        {
+            "pattern": grep_pattern,
+            "path": grep_path,
+            "max_results": 80,
+        },
+        grep_out,
+        bool(grep_out.strip()),
+    )
 
     best = choose_best_match(state, grep_out)
     if best:

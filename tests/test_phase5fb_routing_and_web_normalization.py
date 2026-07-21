@@ -127,3 +127,70 @@ def test_backend_match_rejects_non_source_files() -> None:
 
     assert best is not None
     assert best[0].replace("\\", "/") == "routes/chat_routes.py"
+
+
+def test_backend_route_lookup_uses_routes_scope(monkeypatch) -> None:
+    from src.agent_runtime.general_graph import (
+        GeneralState,
+        execute_readonly_plan,
+        plan_task,
+    )
+    from src.agent_runtime import general_graph
+
+    query = (
+        "Inspect backend route code related to chat sessions and "
+        "summarize what you find. Read only."
+    )
+
+    task = plan_task(query)
+
+    assert task.kind == "route_lookup"
+
+    calls = []
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "get_workspace",
+        lambda workspace: workspace,
+    )
+
+    def fake_grep(workspace, pattern, path=".", max_results=80):
+        calls.append(
+            {
+                "workspace": workspace,
+                "pattern": pattern,
+                "path": path,
+                "max_results": max_results,
+            }
+        )
+        return (
+            "routes/chat_routes.py:643: "
+            '@router.post("/api/chat_stream")'
+        )
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "grep",
+        fake_grep,
+    )
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "read_file_around",
+        lambda workspace, path, line, radius=16: (
+            "# File: routes/chat_routes.py\n"
+            ">> 643: @router.post(\"/api/chat_stream\")"
+        ),
+    )
+
+    state = GeneralState(
+        raw_query=query,
+        workspace=r"D:\AI\odysseus",
+    )
+    state.task = task
+
+    execute_readonly_plan(state)
+
+    assert calls
+    assert calls[0]["path"] == "routes"
+    assert "routes/chat_routes.py" in calls[0].get("selected_source", "routes/chat_routes.py")
