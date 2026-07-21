@@ -68,3 +68,62 @@ def test_contract_tool_default_workspace_is_portable_repo_root() -> None:
 def test_contract_tool_default_workspace_is_not_old_test_worktree() -> None:
     normalized = str(tool_adapters.DEFAULT_WORKSPACE).replace("\\", "/").lower()
     assert "odysseus-upstream-test" not in normalized
+
+
+
+def test_worker_inventory_uses_supervisor_capability_registry() -> None:
+    from src.agent_runtime.general_graph import (
+        _format_worker_inventory,
+        _is_worker_inventory_request,
+    )
+
+    query = (
+        "Inspect the current Odysseus project and report which specialist "
+        "runtime workers are available. Use read-only inspection only."
+    )
+
+    assert _is_worker_inventory_request(query) is True
+
+    answer = _format_worker_inventory().lower()
+
+    assert "code_worker" in answer
+    assert "knowledge_worker" in answer
+    assert "research_worker" in answer
+    assert "mcp_worker" in answer
+    assert ".dockerignore" not in answer
+
+
+def test_backend_match_rejects_non_source_files() -> None:
+    from src.agent_runtime.general_graph import (
+        GeneralState,
+        GeneralTask,
+        choose_best_match,
+    )
+
+    state = GeneralState(
+        raw_query=(
+            "Inspect backend route code related to chat sessions and "
+            "summarize what you find. Read only."
+        ),
+        workspace=r"D:\AI\odysseus",
+    )
+    state.task = GeneralTask(
+        raw_query=state.raw_query,
+        kind="route_lookup",
+        target="",
+        reason="test",
+        is_readonly=True,
+        should_fallback=False,
+    )
+
+    grep_output = "\n".join(
+        [
+            ".env:28: # RESEARCH_LLM_ENDPOINT=http://localhost:8000/v1/chat/completions",
+            "routes/chat_routes.py:643: @router.post(\"/api/chat_stream\")",
+        ]
+    )
+
+    best = choose_best_match(state, grep_output)
+
+    assert best is not None
+    assert best[0].replace("\\", "/") == "routes/chat_routes.py"

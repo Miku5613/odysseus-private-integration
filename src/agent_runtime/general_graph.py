@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+from src.agent_runtime.capability_registry import worker_capabilities
+
 import json
 import re
 import time
@@ -519,10 +521,59 @@ def summarize_architecture_from_files(state: GeneralState, files: list[str]) -> 
     return "\n".join(lines)
 
 
+def _is_worker_inventory_request(query: str) -> bool:
+    low = query.lower()
+    worker_terms = ("worker", "workers", "specialist", "specialists")
+    inventory_terms = (
+        "available",
+        "which",
+        "what",
+        "list",
+        "inventory",
+        "capability",
+        "capabilities",
+    )
+    runtime_context = (
+        "runtime" in low
+        or "odysseus" in low
+        or "agent" in low
+        or "supervisor" in low
+    )
+    return (
+        runtime_context
+        and any(term in low for term in worker_terms)
+        and any(term in low for term in inventory_terms)
+    )
+
+
+def _format_worker_inventory() -> str:
+    workers = worker_capabilities()
+    if not workers:
+        return "No specialist worker capabilities are currently registered."
+
+    lines = ["Available specialist runtime workers:"]
+    for capability in workers:
+        lines.append(
+            f"- `{capability.provider}` — `{capability.name}`: "
+            f"{capability.description}"
+        )
+
+    lines.append("")
+    lines.append(
+        "Source: Supervisor capability registry "
+        "(`src/agent_runtime/capability_registry.py`)."
+    )
+    return "\n".join(lines)
+
+
 def execute_readonly_plan(state: GeneralState) -> None:
     assert state.task is not None
     task = state.task
     target = task.target or ""
+
+    if _is_worker_inventory_request(state.raw_query):
+        state.final_answer = _format_worker_inventory()
+        return
 
     # Tool 1: workspace
     out = tools.get_workspace(state.workspace)
@@ -632,6 +683,17 @@ def choose_best_match(state: GeneralState, grep_out: str) -> tuple[str, int] | N
         # Backend questions should prefer routes/agent loop emitters.
         wants_frontend = "frontend" in raw or "client" in raw or "ui" in raw
         wants_backend = "backend" in raw or "server" in raw or "emit" in raw or "emits" in raw
+
+        if wants_backend:
+            authoritative_prefixes = (
+                "routes/",
+                "src/",
+                "services/",
+                "core/",
+                "mcp_servers/",
+            )
+            if not low_file.startswith(authoritative_prefixes):
+                continue
 
         if "static/js/chat.js" in low_file:
             score += 18 if wants_frontend else 10
