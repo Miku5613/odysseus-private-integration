@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from src.agent_runtime.runtime_router import route_agent_runtime
+from src.agent_runtime.general_graph import plan_task
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,3 +39,14 @@ def test_streaming_chat_uses_normalized_web_boolean() -> None:
 
     assert normalized_block in source
     assert raw_block not in source
+
+
+def test_runtime_word_does_not_trigger_write_intent() -> None:
+    task = plan_task(
+        "Inspect the current Odysseus project and report which specialist "
+        "runtime workers are available. Use read-only inspection only."
+    )
+
+    assert task.kind == "general_readonly"
+    assert task.is_readonly is True
+    assert task.should_fallback is False

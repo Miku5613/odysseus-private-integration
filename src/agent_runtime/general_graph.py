@@ -84,7 +84,7 @@ def _has_write_intent(text: str) -> bool:
     low = text.lower()
     if any(p in low for p in WRITE_PHRASES):
         return True
-    return _contains_any(low, WRITE_WORDS)
+    return any(re.search(rf"\b{re.escape(word)}\b", low) for word in WRITE_WORDS)
 
 
 def infer_file_lookup_topic(query: str) -> str:
