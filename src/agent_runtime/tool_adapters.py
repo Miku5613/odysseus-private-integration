@@ -9,7 +9,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 
-DEFAULT_WORKSPACE = Path(r"D:\AI\odysseus-upstream-test").resolve()
+DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
 
 SKIP_DIRS = {
     ".git",

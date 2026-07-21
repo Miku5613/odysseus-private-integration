@@ -2,6 +2,7 @@ from pathlib import Path
 
 from src.agent_runtime.runtime_router import route_agent_runtime
 from src.agent_runtime.general_graph import plan_task
+from src.agent_runtime import tool_adapters
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -58,3 +59,12 @@ def test_module_listing_preserves_file_lookup_semantics() -> None:
     assert task.kind == "file_lookup"
     assert task.is_readonly is True
     assert task.should_fallback is False
+
+
+def test_contract_tool_default_workspace_is_portable_repo_root() -> None:
+    assert tool_adapters.DEFAULT_WORKSPACE == REPO_ROOT
+
+
+def test_contract_tool_default_workspace_is_not_old_test_worktree() -> None:
+    normalized = str(tool_adapters.DEFAULT_WORKSPACE).replace("\\", "/").lower()
+    assert "odysseus-upstream-test" not in normalized
