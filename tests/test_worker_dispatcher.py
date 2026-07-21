@@ -13,6 +13,12 @@ def test_builtin_dispatcher_registers_code_worker():
     assert "code_inspection" in runners
 
 
+def test_builtin_dispatcher_registers_knowledge_worker():
+    runners = builtin_worker_runners()
+
+    assert "knowledge_search" in runners
+
+
 def test_build_handoff_preserves_generic_worker_context():
     handoff = build_worker_handoff(
         "code_inspection",

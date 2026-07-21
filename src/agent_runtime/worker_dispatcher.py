@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.agent_runtime.code_worker import run_code_worker
+from src.agent_runtime.knowledge_worker import run_knowledge_worker
 from src.agent_runtime.supervisor_contracts import (
     SupervisorState,
     WorkerHandoff,
@@ -31,6 +32,7 @@ def builtin_worker_runners() -> dict[str, WorkerRunner]:
 
     return {
         "code_inspection": run_code_worker,
+        "knowledge_search": run_knowledge_worker,
     }
 
 
@@ -74,7 +76,11 @@ def dispatch_supervisor_decision(
     undispatched rather than silently rerouted.
     """
 
-    runners = worker_runners or builtin_worker_runners()
+    runners = (
+        builtin_worker_runners()
+        if worker_runners is None
+        else worker_runners
+    )
 
     results: list[WorkerResult] = []
     completed: list[str] = []
