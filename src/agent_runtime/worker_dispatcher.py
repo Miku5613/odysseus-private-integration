@@ -7,6 +7,7 @@ from typing import Any
 from src.agent_runtime.code_worker import run_code_worker
 from src.agent_runtime.knowledge_worker import run_knowledge_worker
 from src.agent_runtime.research_worker import run_research_worker
+from src.agent_runtime.mcp_worker import run_mcp_worker
 from src.agent_runtime.supervisor_contracts import (
     SupervisorState,
     WorkerHandoff,
@@ -35,6 +36,7 @@ def builtin_worker_runners() -> dict[str, WorkerRunner]:
         "code_inspection": run_code_worker,
         "knowledge_search": run_knowledge_worker,
         "deep_research": run_research_worker,
+        "mcp_specialized": run_mcp_worker,
     }
 
 
