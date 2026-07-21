@@ -265,7 +265,25 @@ def plan_task(query: str) -> GeneralTask:
         kind = "file_lookup"
     elif "/api/" in low or "route" in low:
         kind = "route_lookup"
-    elif "event" in low or "tool_output" in low or "message_saved" in low or "doc_stream" in low:
+    elif (
+        "tool_output" in low
+        or "message_saved" in low
+        or "doc_stream" in low
+        or (
+            "event" in low
+            and not any(
+                token in low
+                for token in (
+                    "inspect",
+                    "backend",
+                    "frontend",
+                    "source",
+                    "code",
+                    "implementation",
+                )
+            )
+        )
+    ):
         kind = "event_lookup"
     elif _contains_any(low, CODE_HINTS):
         kind = "code_lookup"
@@ -566,6 +584,299 @@ def _format_worker_inventory() -> str:
     return "\n".join(lines)
 
 
+
+def _inspection_terms(query: str) -> list[str]:
+    stopwords = {
+        "find", "where", "the", "handles", "handle", "use", "tools", "needed",
+        "inspect", "current", "odysseus", "project", "report", "which",
+        "available", "read", "only", "summarize", "summary", "what", "related",
+        "code", "source", "backend", "frontend", "route", "routes", "handler",
+        "handlers", "module", "modules", "tell", "show", "list", "explain",
+        "and", "you", "me", "how", "does", "that", "this", "implementation",
+        "implement",
+        "implements",
+        "implemented",
+        "file",
+        "files",
+        "responsible",
+        "response",
+        "responses",
+        "handling",
+    }
+
+    aliases = {
+        "sessions": "session",
+        "chats": "chat",
+        "conversations": "conversation",
+        "emails": "email",
+        "polling": "poll",
+        "streaming": "stream",
+        "messages": "message",
+        "events": "event",
+    }
+
+    out = []
+    for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query.lower()):
+        if word in stopwords:
+            continue
+
+        normalized = aliases.get(word, word)
+
+        for candidate in (word, normalized):
+            if candidate not in stopwords and candidate not in out:
+                out.append(candidate)
+
+    return out[:8]
+
+
+def _inspection_file_patterns(query: str, task_kind: str) -> list[str]:
+    raw = query.lower()
+    wants_frontend = "frontend" in raw or "client" in raw or "ui" in raw
+    wants_backend = (
+        "backend" in raw
+        or "server" in raw
+        or task_kind == "route_lookup"
+    )
+
+    if wants_frontend:
+        return [
+            "static/js/*.js",
+            "static/js/**/*.js",
+        ]
+
+    if task_kind == "route_lookup":
+        return [
+            "routes/*.py",
+            "routes/**/*.py",
+        ]
+
+    if wants_backend:
+        return [
+            "routes/*.py",
+            "routes/**/*.py",
+            "services/*.py",
+            "services/**/*.py",
+            "src/*.py",
+            "src/**/*.py",
+            "core/*.py",
+            "core/**/*.py",
+            "mcp_servers/*.py",
+            "mcp_servers/**/*.py",
+        ]
+
+    return [
+        "routes/*.py",
+        "routes/**/*.py",
+        "services/*.py",
+        "services/**/*.py",
+        "src/*.py",
+        "src/**/*.py",
+        "core/*.py",
+        "core/**/*.py",
+        "mcp_servers/*.py",
+        "mcp_servers/**/*.py",
+        "static/js/*.js",
+        "static/js/**/*.js",
+    ]
+
+
+def _execute_broad_source_inspection(state: GeneralState) -> str | None:
+    assert state.task is not None
+
+    terms = _inspection_terms(state.raw_query)
+    if not terms:
+        return None
+
+    patterns = _inspection_file_patterns(
+        state.raw_query,
+        state.task.kind,
+    )
+
+    files = []
+    for pattern in patterns:
+        out = tools.glob_files(
+            state.workspace,
+            pattern,
+            max_results=120,
+        )
+        _record(
+            state,
+            "glob_files",
+            {
+                "pattern": pattern,
+                "max_results": 120,
+            },
+            out,
+            bool(out.strip()),
+        )
+
+        for line in out.splitlines():
+            path = line.strip().replace("\\", "/")
+            if path and path not in files:
+                files.append(path)
+
+    if not files:
+        return "I could not find reliable source files for that request."
+
+    grep_pattern = "|".join(
+        re.escape(term)
+        for term in terms
+    )
+
+    ranked = []
+
+    for path in files[:240]:
+        out = tools.grep(
+            state.workspace,
+            grep_pattern,
+            path=path,
+            max_results=12,
+        )
+
+        if not out.strip():
+            continue
+
+        low_path = path.lower()
+        low_output = out.lower()
+
+        matched_terms = {
+            term
+            for term in terms
+            if term in low_path or term in low_output
+        }
+
+        filename_hits = sum(
+            1
+            for term in terms
+            if term in low_path
+        )
+
+        result_lines = out.splitlines()
+
+        score = (
+            len(matched_terms) * 40
+            + filename_hits * 120
+            + min(len(result_lines), 12)
+        )
+
+        ranked.append(
+            (
+                score,
+                len(matched_terms),
+                filename_hits,
+                path,
+                out,
+            )
+        )
+
+    if not ranked:
+        return "I could not find reliable source-code evidence for that request."
+
+    ranked.sort(
+        key=lambda item: (
+            item[0],
+            item[1],
+            item[2],
+        ),
+        reverse=True,
+    )
+
+    # Prefer files whose own path/name carries the requested topic.
+    # Incidental mentions should not outrank canonical topic files.
+    path_relevant = [
+        item
+        for item in ranked
+        if item[2] > 0
+    ]
+
+    selected = (
+        path_relevant[:4]
+        if path_relevant
+        else ranked[:4]
+    )
+
+    for _, _, _, path, out in selected:
+        _record(
+            state,
+            "grep",
+            {
+                "pattern": grep_pattern,
+                "path": path,
+                "max_results": 12,
+            },
+            out,
+            True,
+        )
+
+    lines = [
+        "Relevant source evidence for this inspection:",
+        "",
+    ]
+
+    for _, _, _, path, out in selected:
+        evidence = out.splitlines()[:3]
+
+        lines.append(f"- {path}")
+
+        for row in evidence:
+            match = re.match(
+                r".+?:(\d+):\s*(.*)",
+                row,
+            )
+
+            if match:
+                lineno = match.group(1)
+                content = match.group(2).strip()
+
+                if len(content) > 180:
+                    content = content[:177] + "..."
+
+                lines.append(
+                    f"  - line {lineno}: {content}"
+                )
+
+    lines.extend(
+        [
+            "",
+            (
+                "These files were selected by topic relevance across "
+                "candidate source files before evidence expansion, rather "
+                "than by taking the first repository-wide grep matches."
+            ),
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def _is_broad_source_inspection(state: GeneralState) -> bool:
+    if state.task is None or state.task.target:
+        return False
+
+    if state.task.kind not in {
+        "route_lookup",
+        "code_lookup",
+        "general_readonly",
+    }:
+        return False
+
+    raw = state.raw_query.lower()
+
+    return any(
+        term in raw
+        for term in (
+            "inspect",
+            "code",
+            "source",
+            "backend",
+            "frontend",
+            "route",
+            "handler",
+            "implementation",
+        )
+    )
+
+
 def execute_readonly_plan(state: GeneralState) -> None:
     assert state.task is not None
     task = state.task
@@ -578,6 +889,14 @@ def execute_readonly_plan(state: GeneralState) -> None:
     # Tool 1: workspace
     out = tools.get_workspace(state.workspace)
     _record(state, "get_workspace", {}, out)
+
+    # Broad source inspection uses file-first semantic retrieval so repository
+    # traversal order cannot truncate relevant evidence before ranking.
+    if _is_broad_source_inspection(state):
+        answer = _execute_broad_source_inspection(state)
+        if answer:
+            state.final_answer = answer
+            return
 
     # File discovery tasks should list likely files, not grep arbitrary content.
     if task.kind == "file_lookup":
@@ -592,7 +911,86 @@ def execute_readonly_plan(state: GeneralState) -> None:
                 if clean and clean not in seen:
                     seen.append(clean)
 
-        state.final_answer = finalize_file_lookup(state, seen)
+        if seen:
+            state.final_answer = finalize_file_lookup(state, seen)
+            return
+
+        # Semantic path-level fallback for paraphrased structural
+        # discovery requests that deterministic glob templates miss.
+        terms = _inspection_terms(state.raw_query)
+        semantic_patterns = _inspection_file_patterns(
+            state.raw_query,
+            task.kind,
+        )
+
+        semantic_files = []
+
+        for pattern in semantic_patterns:
+            out = tools.glob_files(
+                state.workspace,
+                pattern,
+                max_results=120,
+            )
+            _record(
+                state,
+                "glob_files",
+                {
+                    "pattern": pattern,
+                    "max_results": 120,
+                    "semantic_fallback": True,
+                },
+                out,
+                bool(out.strip()),
+            )
+
+            for line in out.splitlines():
+                path = line.strip().replace("\\", "/")
+
+                if path and path not in semantic_files:
+                    semantic_files.append(path)
+
+        ranked_files = []
+
+        for path in semantic_files:
+            low_path = path.lower()
+
+            hits = sum(
+                1
+                for term in terms
+                if term in low_path
+            )
+
+            if hits:
+                ranked_files.append(
+                    (
+                        hits,
+                        -len(path),
+                        path,
+                    )
+                )
+
+        ranked_files.sort(reverse=True)
+
+        matches = [
+            item[2]
+            for item in ranked_files[:12]
+        ]
+
+        if matches:
+            state.final_answer = (
+                "Likely files related to the request:\n"
+                + "\n".join(
+                    f"- {path}"
+                    for path in matches
+                )
+                + "\n\nEvidence: semantic file-path discovery "
+                  "using read-only source inspection."
+            )
+        else:
+            state.final_answer = (
+                "I could not find reliable file matches for that request."
+            )
+
         return
 
     if task.kind == "architecture_summary":

@@ -192,5 +192,434 @@ def test_backend_route_lookup_uses_routes_scope(monkeypatch) -> None:
     execute_readonly_plan(state)
 
     assert calls
-    assert calls[0]["path"] == "routes"
-    assert "routes/chat_routes.py" in calls[0].get("selected_source", "routes/chat_routes.py")
+
+    searched_paths = [
+        call["path"].replace("\\", "/")
+        for call in calls
+    ]
+
+    assert all(
+        path.startswith("routes/")
+        for path in searched_paths
+    )
+
+    assert not any(
+        path.startswith((".env", "docs/", "tests/", "Exclusions/"))
+        for path in searched_paths
+    )
+
+
+
+def test_phase5fp_file_first_semantic_inspection(monkeypatch) -> None:
+    from src.agent_runtime import general_graph
+    from src.agent_runtime.general_graph import (
+        GeneralState,
+        execute_readonly_plan,
+        plan_task,
+    )
+
+    query = (
+        "Inspect backend route code related to chat sessions "
+        "and summarize what you find. Read only."
+    )
+
+    task = plan_task(query)
+    assert task.kind == "route_lookup"
+
+    files = "\n".join(
+        [
+            "routes/admin_wipe_routes.py",
+            "routes/chat_routes.py",
+            "routes/session_routes.py",
+        ]
+    )
+
+    def fake_glob(workspace, pattern, max_results=120):
+        return files if pattern.startswith("routes/") else ""
+
+    def fake_grep(workspace, pattern, path="", max_results=12):
+        data = {
+            "routes/admin_wipe_routes.py": (
+                "routes/admin_wipe_routes.py:5: wipe chats\n"
+                "routes/admin_wipe_routes.py:6: /api/sessions/all"
+            ),
+            "routes/chat_routes.py": (
+                "routes/chat_routes.py:643: @router.post('/api/chat_stream')\n"
+                "routes/chat_routes.py:700: session = session_manager.get_session(session_id)\n"
+                "routes/chat_routes.py:710: chat_handler.preprocess_message(session)"
+            ),
+            "routes/session_routes.py": (
+                "routes/session_routes.py:20: @router.get('/api/sessions')\n"
+                "routes/session_routes.py:25: return session_manager.sessions"
+            ),
+        }
+        return data.get(path, "")
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "get_workspace",
+        lambda workspace: workspace,
+    )
+    monkeypatch.setattr(
+        general_graph.tools,
+        "glob_files",
+        fake_glob,
+    )
+    monkeypatch.setattr(
+        general_graph.tools,
+        "grep",
+        fake_grep,
+    )
+
+    state = GeneralState(
+        raw_query=query,
+        workspace=r"D:\AI\odysseus",
+    )
+    state.task = task
+
+    execute_readonly_plan(state)
+
+    assert "routes/chat_routes.py" in state.final_answer
+    assert "routes/session_routes.py" in state.final_answer
+    assert ".env" not in state.final_answer
+
+
+def test_phase5fp_email_polling_prefers_email_sources(monkeypatch) -> None:
+    from src.agent_runtime import general_graph
+    from src.agent_runtime.general_graph import (
+        GeneralState,
+        execute_readonly_plan,
+        plan_task,
+    )
+
+    query = (
+        "Inspect backend route code related to email polling "
+        "and summarize what you find. Read only."
+    )
+
+    task = plan_task(query)
+
+    files = "\n".join(
+        [
+            "routes/chat_routes.py",
+            "routes/email_pollers.py",
+            "routes/email_routes.py",
+        ]
+    )
+
+    def fake_glob(workspace, pattern, max_results=120):
+        return files if pattern.startswith("routes/") else ""
+
+    def fake_grep(workspace, pattern, path="", max_results=12):
+        data = {
+            "routes/chat_routes.py": (
+                "routes/chat_routes.py:800: active_email_context = True"
+            ),
+            "routes/email_pollers.py": (
+                "routes/email_pollers.py:40: async def poll_email_accounts():\n"
+                "routes/email_pollers.py:55: email polling interval"
+            ),
+            "routes/email_routes.py": (
+                "routes/email_routes.py:100: @router.get('/api/email')"
+            ),
+        }
+        return data.get(path, "")
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "get_workspace",
+        lambda workspace: workspace,
+    )
+    monkeypatch.setattr(
+        general_graph.tools,
+        "glob_files",
+        fake_glob,
+    )
+    monkeypatch.setattr(
+        general_graph.tools,
+        "grep",
+        fake_grep,
+    )
+
+    state = GeneralState(
+        raw_query=query,
+        workspace=r"D:\AI\odysseus",
+    )
+    state.task = task
+
+    execute_readonly_plan(state)
+
+    assert "routes/email_pollers.py" in state.final_answer
+
+
+def test_phase5fp_frontend_inspection_stays_in_frontend(monkeypatch) -> None:
+    from src.agent_runtime import general_graph
+    from src.agent_runtime.general_graph import (
+        GeneralState,
+        execute_readonly_plan,
+        plan_task,
+    )
+
+    query = (
+        "Inspect frontend code related to chat streaming "
+        "and summarize what you find. Read only."
+    )
+
+    task = plan_task(query)
+
+    files = "\n".join(
+        [
+            "static/js/chat.js",
+            "static/js/chatStream.js",
+            "static/js/streamingRenderer.js",
+        ]
+    )
+
+    def fake_glob(workspace, pattern, max_results=120):
+        return files if pattern.startswith("static/js/") else ""
+
+    def fake_grep(workspace, pattern, path="", max_results=12):
+        data = {
+            "static/js/chat.js": (
+                "static/js/chat.js:100: start chat stream"
+            ),
+            "static/js/chatStream.js": (
+                "static/js/chatStream.js:20: export async function streamChat()\n"
+                "static/js/chatStream.js:30: streaming response reader"
+            ),
+            "static/js/streamingRenderer.js": (
+                "static/js/streamingRenderer.js:10: render streaming segment"
+            ),
+        }
+        return data.get(path, "")
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "get_workspace",
+        lambda workspace: workspace,
+    )
+    monkeypatch.setattr(
+        general_graph.tools,
+        "glob_files",
+        fake_glob,
+    )
+    monkeypatch.setattr(
+        general_graph.tools,
+        "grep",
+        fake_grep,
+    )
+
+    state = GeneralState(
+        raw_query=query,
+        workspace=r"D:\AI\odysseus",
+    )
+    state.task = task
+
+    execute_readonly_plan(state)
+
+    assert "static/js/chatStream.js" in state.final_answer
+    assert ".env" not in state.final_answer
+
+
+
+def test_phase5fq_runtime_logic_cleanup() -> None:
+    from src.agent_runtime.general_graph import (
+        _inspection_terms,
+        plan_task,
+    )
+
+    terms = _inspection_terms(
+        "Which backend source files are responsible for "
+        "chat session handling? Inspect read-only."
+    )
+
+    assert "chat" in terms
+    assert "session" in terms
+    assert "files" not in terms
+    assert "responsible" not in terms
+    assert "handling" not in terms
+
+    task = plan_task(
+        "Inspect backend code related to calendar events "
+        "and summarize what you find. Read only."
+    )
+
+    assert task.kind == "code_lookup"
+
+
+def test_phase5fq_file_lookup_semantic_fallback(
+    monkeypatch,
+) -> None:
+    from src.agent_runtime import general_graph
+    from src.agent_runtime.general_graph import (
+        GeneralState,
+        execute_readonly_plan,
+        plan_task,
+    )
+
+    query = (
+        "Which frontend files implement streaming chat "
+        "responses? Inspect the source read-only."
+    )
+
+    task = plan_task(query)
+    assert task.kind == "file_lookup"
+
+    files = "\n".join(
+        [
+            "static/js/chat.js",
+            "static/js/chatStream.js",
+            "static/js/streamingRenderer.js",
+            "static/js/cookbook.js",
+        ]
+    )
+
+    calls = {"count": 0}
+
+    def fake_glob(
+        workspace,
+        pattern,
+        max_results=40,
+    ):
+        calls["count"] += 1
+
+        # Deterministic topic globs miss the paraphrase.
+        if calls["count"] <= 2:
+            return ""
+
+        if pattern.startswith("static/js/"):
+            return files
+
+        return ""
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "get_workspace",
+        lambda workspace: workspace,
+    )
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "glob_files",
+        fake_glob,
+    )
+
+    state = GeneralState(
+        raw_query=query,
+        workspace=r"D:\AI\odysseus",
+    )
+
+    state.task = task
+
+    execute_readonly_plan(state)
+
+    answer = state.final_answer.lower()
+
+    assert (
+        "chat.js" in answer
+        or "chatstream.js" in answer
+    )
+
+    assert "cookbook.js" not in answer
+
+
+def test_phase5fq_path_relevance_beats_incidental_mentions(
+    monkeypatch,
+) -> None:
+    from src.agent_runtime import general_graph
+    from src.agent_runtime.general_graph import (
+        GeneralState,
+        execute_readonly_plan,
+        plan_task,
+    )
+
+    query = (
+        "Inspect backend route code related to chat sessions "
+        "and summarize what you find. Read only."
+    )
+
+    task = plan_task(query)
+
+    files = "\n".join(
+        [
+            "routes/admin_wipe_routes.py",
+            "routes/session_routes.py",
+            "routes/chat_routes.py",
+            "routes/chat_helpers.py",
+        ]
+    )
+
+    def fake_glob(
+        workspace,
+        pattern,
+        max_results=120,
+    ):
+        return (
+            files
+            if pattern.startswith("routes/")
+            else ""
+        )
+
+    def fake_grep(
+        workspace,
+        pattern,
+        path="",
+        max_results=12,
+    ):
+        data = {
+            "routes/admin_wipe_routes.py": (
+                "routes/admin_wipe_routes.py:5: "
+                "chats sessions wipe\n"
+                "routes/admin_wipe_routes.py:6: "
+                "chats sessions delete"
+            ),
+            "routes/session_routes.py": (
+                "routes/session_routes.py:1: "
+                "session routes\n"
+                "routes/session_routes.py:10: "
+                "SessionManager"
+            ),
+            "routes/chat_routes.py": (
+                "routes/chat_routes.py:1: "
+                "chat routes\n"
+                "routes/chat_routes.py:643: "
+                "/api/chat_stream"
+            ),
+            "routes/chat_helpers.py": (
+                "routes/chat_helpers.py:1: "
+                "chat helpers"
+            ),
+        }
+
+        return data.get(path, "")
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "get_workspace",
+        lambda workspace: workspace,
+    )
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "glob_files",
+        fake_glob,
+    )
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "grep",
+        fake_grep,
+    )
+
+    state = GeneralState(
+        raw_query=query,
+        workspace=r"D:\AI\odysseus",
+    )
+
+    state.task = task
+
+    execute_readonly_plan(state)
+
+    assert "session_routes.py" in state.final_answer
+    assert "chat_routes.py" in state.final_answer
+    assert "admin_wipe_routes.py" not in state.final_answer
