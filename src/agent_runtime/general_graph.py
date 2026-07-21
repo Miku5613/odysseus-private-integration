@@ -253,6 +253,8 @@ def plan_task(query: str) -> GeneralTask:
         or "show files" in low
         or "related files" in low
         or "files related" in low
+        or "module" in low
+        or "modules" in low
     )
 
     if is_architecture_summary_request(query):
@@ -584,7 +586,16 @@ def execute_readonly_plan(state: GeneralState) -> None:
         patterns.append(r"doc_stream")
     if not patterns:
         # fallback keyword extraction
-        words = [w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", state.raw_query) if w.lower() not in {"find", "where", "the", "handles", "events", "use", "tools", "needed", "guess"}]
+        stopwords = {
+            "find", "where", "the", "handles", "events", "use", "tools", "needed", "guess",
+            "inspect", "current", "odysseus", "project", "report", "which", "specialist",
+            "available", "read", "only", "summarize", "what", "related", "code",
+        }
+        words = [
+            w
+            for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", state.raw_query)
+            if w.lower() not in stopwords
+        ]
         patterns.extend(re.escape(w) for w in words[:3])
 
     grep_pattern = "|".join(dict.fromkeys(patterns)) or re.escape(state.raw_query[:40])

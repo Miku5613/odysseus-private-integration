@@ -50,3 +50,11 @@ def test_runtime_word_does_not_trigger_write_intent() -> None:
     assert task.kind == "general_readonly"
     assert task.is_readonly is True
     assert task.should_fallback is False
+
+
+def test_module_listing_preserves_file_lookup_semantics() -> None:
+    task = plan_task("List the modules related to memory in Odysseus.")
+
+    assert task.kind == "file_lookup"
+    assert task.is_readonly is True
+    assert task.should_fallback is False
