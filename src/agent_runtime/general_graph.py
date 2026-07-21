@@ -852,10 +852,28 @@ def finalize(state: GeneralState) -> str:
             )
 
     if grep_obs and grep_obs.output.strip():
-        first = grep_obs.output.splitlines()[0]
-        return f"I found a likely match:\n\n- `{first}`"
+        raw = state.raw_query.lower()
+        source_sensitive = (
+            state.task.kind in {"route_lookup", "code_lookup", "general_readonly"}
+            and any(
+                term in raw
+                for term in (
+                    "backend",
+                    "frontend",
+                    "route",
+                    "source",
+                    "code",
+                    "handler",
+                    "module",
+                )
+            )
+        )
 
-    return "I could not find reliable evidence for that request."
+        if not source_sensitive:
+            first = grep_obs.output.splitlines()[0]
+            return f"I found a likely match:\n\n- `{first}`"
+
+    return "I could not find reliable source-code evidence for that request."
 
 
 def run_general_runtime(query: str, workspace: str) -> GeneralState:
