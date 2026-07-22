@@ -848,19 +848,16 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     return Number.isFinite(n) ? n : fallback;
   };
 
-  const _hasVisibleFloatingModal = (owner) => {
+  const _dockHandleZIndex = (owner) => {
+    let z = _zIndexFor(owner);
     const all = Array.from(document.querySelectorAll('.modal:not(.hidden):not(.modal-minimized)'));
-    return all.some((modal) => {
-      if (!modal || modal === owner) return false;
-      if (owner?.contains?.(modal) || modal.contains?.(owner)) return false;
-      if (modal.classList.contains('modal-left-docked')
-          || modal.classList.contains('modal-right-docked')
-          || modal.classList.contains('email-snap-left')) return false;
-      if (modal.style.display === 'none') return false;
+    for (const modal of all) {
+      if (!modal || modal.style.display === 'none') continue;
       const content = _resolveDockNodes(modal)?.content;
       const r = content?.getBoundingClientRect?.();
-      return !!r && r.width > 0 && r.height > 0;
-    });
+      if (r && r.width > 0 && r.height > 0) z = Math.max(z, _zIndexFor(modal));
+    }
+    return z + 1;
   };
 
   const _setWidth = (owner, side, clientX) => {
@@ -916,10 +913,6 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
         _hideHandle(handle);
         continue;
       }
-      if (_hasVisibleFloatingModal(owner)) {
-        _hideHandle(handle);
-        continue;
-      }
       const r = content.getBoundingClientRect();
       const x = side === 'right' ? r.left : r.right;
       if (!Number.isFinite(x) || x <= 0 || x >= window.innerWidth) {
@@ -928,7 +921,10 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
       }
       _setStyle(handle, 'display', 'block');
       _setStyle(handle, 'left', (x - 5) + 'px');
-      _setStyle(handle, 'zIndex', String(_zIndexFor(owner) + 1));
+      // Keep the dock seam usable even while another floating panel is open.
+      // The seam is only ten pixels wide and intentionally sits above panels
+      // so opening a second tool never disables resizing the docked one.
+      _setStyle(handle, 'zIndex', String(_dockHandleZIndex(owner)));
     }
   };
 
@@ -983,7 +979,19 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
       _positionEdgeDockResizeHandles();
     });
   };
-  new MutationObserver(schedulePosition).observe(document.body, { childList: true });
+  new MutationObserver((mutations) => {
+    const modalChanged = mutations.some((mutation) => {
+      if (mutation.target?.classList?.contains('modal')) return true;
+      return Array.from(mutation.addedNodes || []).some((node) =>
+        node?.matches?.('.modal') || node?.querySelector?.('.modal'));
+    });
+    if (modalChanged) schedulePosition();
+  }).observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class', 'style'],
+  });
   window.addEventListener('resize', _positionEdgeDockResizeHandles);
   window.addEventListener('odysseus:modal-opened', _positionEdgeDockResizeHandles);
   _positionEdgeDockResizeHandles();

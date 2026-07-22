@@ -14,14 +14,13 @@ def _read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_panel_drag_is_immediate_and_compositor_driven():
+def test_panel_drag_is_frame_batched_and_compositor_driven():
     source = _read("static/js/windowDrag.js")
 
-    assert "_applyDragTransform(cx - startX, cy - startY)" in source
+    assert "requestAnimationFrame(_paintDragTransform)" in source
     assert "translate3d(${dragDx}px, ${dragDy}px, 0)" in source
     assert "content.style.willChange = 'transform'" in source
     assert "_commitDragTransform();" in source
-    assert "requestAnimationFrame(_paintDragTransform)" not in source
     windowed_move = source.split("// Windowed: just follow the cursor.", 1)[1].split(
         "// Corner guard:", 1
     )[0]
@@ -48,6 +47,11 @@ def test_saved_roots_and_atlas_index_affordances_are_present():
     assert "data-menu-trigger=\"more\"" in atlas
     assert "data-el=\"workspace-tree\"" in atlas
     assert "openWorkspaceNote(entry.path)" in atlas
+    assert "data-el=\"workspace-tree-resizer\"" in atlas
+    assert "WORKSPACE_TREE_HEIGHT_KEY" in atlas
+    assert "workspaceApiGet('/graph', { root })" in atlas
+    assert "_loadWorkspaceBacklinks(_currentWorkspaceRoot, data.path)" in atlas
+    assert "Session ${sessionCount} · Root ${rootCount}" in atlas
     assert "_currentSource === 'workspace'" in atlas
     assert "fetch('/api/workspace/file'" in atlas
     assert 'class="atlas-btn atlas-refresh-btn"' in atlas
@@ -93,6 +97,8 @@ def test_workspace_tree_route_is_registered():
     assert ("/api/workspace/tree", "GET") in surface
     assert ("/api/workspace/file", "GET") in surface
     assert ("/api/workspace/file", "PUT") in surface
+    assert ("/api/workspace/graph", "GET") in surface
+    assert ("/api/workspace/backlinks", "GET") in surface
 
 
 def test_workspace_note_read_write_is_confined(tmp_path, monkeypatch):
@@ -122,6 +128,45 @@ def test_workspace_note_read_write_is_confined(tmp_path, monkeypatch):
         workspace_routes._read_workspace_note(str(root), "image.png")
 
 
+def test_workspace_graph_and_backlinks_include_root_notes(tmp_path, monkeypatch):
+    from routes import workspace_routes
+    from src import tool_execution
+
+    root = tmp_path / "Vault"
+    root.mkdir()
+    (root / "Projects").mkdir()
+    (root / "Projects" / "Alpha.md").write_text(
+        "# Alpha\n\nLinks to [[Beta]].\n", encoding="utf-8"
+    )
+    (root / "Beta.md").write_text("# Beta\n", encoding="utf-8")
+    (root / "venv").mkdir()
+    (root / "venv" / "ignored.md").write_text("# Ignore\n", encoding="utf-8")
+    monkeypatch.setattr(tool_execution, "vet_workspace", lambda path: str(root))
+
+    graph = workspace_routes._workspace_note_graph(str(root))
+    assert {node["id"] for node in graph["nodes"]} == {
+        "Beta.md", "Projects/Alpha.md"
+    }
+    assert graph["links"] == [
+        {"source": "Projects/Alpha.md", "target": "Beta.md"}
+    ]
+    assert graph["note_count"] == 2
+    assert graph["truncated"] is False
+
+    backlinks = workspace_routes._workspace_note_backlinks(str(root), "Beta.md")
+    assert backlinks["backlinks"] == [
+        {"path": "Projects/Alpha.md", "title": "Alpha"}
+    ]
+
+
+def test_docked_resize_handle_stays_available_with_floating_panels():
+    source = _read("static/js/modalSnap.js")
+
+    assert "_dockHandleZIndex(owner)" in source
+    assert "_hasVisibleFloatingModal(owner)" not in source
+    assert "opening a second tool never disables resizing the docked one" in source
+
+
 def test_changed_javascript_parses_and_has_no_nul_or_mojibake():
     node = shutil.which("node")
     if node is None:
@@ -132,6 +177,7 @@ def test_changed_javascript_parses_and_has_no_nul_or_mojibake():
         "static/js/atlas.js",
         "static/js/indexStatus.js",
         "static/js/indexes.js",
+        "static/js/modalSnap.js",
         "static/js/windowDrag.js",
         "static/js/workspace.js",
     ):

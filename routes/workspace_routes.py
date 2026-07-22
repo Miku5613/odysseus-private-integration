@@ -1,9 +1,12 @@
 """Workspace API - browse server directories to pick a tool workspace folder."""
 import os
+import time
 from fastapi import APIRouter, Request, HTTPException, Query
 from pydantic import BaseModel
 
 from src.auth_helpers import get_current_user
+from src.atlas_links import build_graph as _build_atlas_graph
+from src.atlas_links import note_title as _atlas_note_title
 from src.tool_security import owner_is_admin_or_single_user
 
 # Cap entries returned per directory (mirrors filesystem_tools._CODENAV_MAX_HITS).
@@ -13,6 +16,14 @@ _MAX_BROWSE_DIRS = 500
 _MAX_TREE_ENTRIES = 500
 _MAX_WORKSPACE_NOTE_BYTES = 5 * 1024 * 1024
 _WORKSPACE_NOTE_EXTENSIONS = frozenset({".md", ".markdown", ".txt"})
+_MAX_WORKSPACE_GRAPH_NOTES = 1500
+_MAX_WORKSPACE_GRAPH_BYTES = 64 * 1024 * 1024
+_WORKSPACE_GRAPH_SKIP_DIRS = frozenset({
+    "__pycache__", "node_modules", "venv", ".venv", "dist", "build",
+})
+_WORKSPACE_GRAPH_CACHE_TTL = 15.0
+_workspace_graph_cache: dict[str, tuple[float, dict[str, str], dict]] = {}
+_workspace_graph_payload_cache: dict[str, tuple[float, dict]] = {}
 
 
 class WorkspaceNoteWrite(BaseModel):
@@ -130,12 +141,124 @@ def _write_workspace_note(root: str, relative: str, content: str) -> dict:
         raise ValueError("Workspace note is too large to save from Atlas")
     with open(note_path, "w", encoding="utf-8", newline="") as handle:
         handle.write(str(content))
+    cache_key = os.path.normcase(root_path)
+    _workspace_graph_cache.pop(cache_key, None)
+    _workspace_graph_payload_cache.pop(cache_key, None)
     return {
         "root": root_path,
         "path": os.path.relpath(note_path, root_path).replace("\\", "/"),
         "size": len(encoded),
         "mtime": os.path.getmtime(note_path),
         "saved": True,
+    }
+
+
+def _read_workspace_graph_notes(root: str) -> tuple[str, dict[str, str], dict]:
+    """Read a bounded, deterministic set of workspace notes for Atlas links."""
+    root_path, _ = _resolve_workspace_tree_path(root, "")
+    cache_key = os.path.normcase(root_path)
+    cached = _workspace_graph_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] <= _WORKSPACE_GRAPH_CACHE_TTL:
+        return root_path, dict(cached[1]), dict(cached[2])
+    notes: dict[str, str] = {}
+    total_bytes = 0
+    skipped = 0
+    truncated = False
+
+    for dirpath, dirnames, filenames in os.walk(root_path, followlinks=False):
+        dirnames[:] = sorted(
+            (
+                name for name in dirnames
+                if not name.startswith(".")
+                and name.casefold() not in _WORKSPACE_GRAPH_SKIP_DIRS
+                and not os.path.islink(os.path.join(dirpath, name))
+            ),
+            key=str.casefold,
+        )
+        for filename in sorted(filenames, key=str.casefold):
+            note_path = os.path.join(dirpath, filename)
+            if filename.startswith(".") or os.path.islink(note_path):
+                continue
+            if os.path.splitext(filename)[1].casefold() not in _WORKSPACE_NOTE_EXTENSIONS:
+                continue
+            try:
+                size = os.path.getsize(note_path)
+                if size > _MAX_WORKSPACE_NOTE_BYTES:
+                    skipped += 1
+                    continue
+                if (len(notes) >= _MAX_WORKSPACE_GRAPH_NOTES
+                        or total_bytes + size > _MAX_WORKSPACE_GRAPH_BYTES):
+                    truncated = True
+                    break
+                with open(note_path, "r", encoding="utf-8", errors="replace") as handle:
+                    content = handle.read()
+            except OSError:
+                skipped += 1
+                continue
+            relative = os.path.relpath(note_path, root_path).replace("\\", "/")
+            notes[relative] = content
+            total_bytes += size
+        if truncated:
+            break
+
+    meta = {
+        "note_count": len(notes),
+        "bytes": total_bytes,
+        "skipped": skipped,
+        "truncated": truncated,
+    }
+    _workspace_graph_cache[cache_key] = (time.monotonic(), dict(notes), dict(meta))
+    if len(_workspace_graph_cache) > 4:
+        oldest = min(_workspace_graph_cache, key=lambda key: _workspace_graph_cache[key][0])
+        if oldest != cache_key:
+            _workspace_graph_cache.pop(oldest, None)
+    return root_path, notes, meta
+
+
+def _workspace_note_graph(root: str) -> dict:
+    root_path, _ = _resolve_workspace_tree_path(root, "")
+    cache_key = os.path.normcase(root_path)
+    cached = _workspace_graph_payload_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] <= _WORKSPACE_GRAPH_CACHE_TTL:
+        return dict(cached[1])
+    root_path, notes, meta = _read_workspace_graph_notes(root)
+    graph = _build_atlas_graph(notes)
+    payload = {"root": root_path, **graph, **meta}
+    _workspace_graph_payload_cache[cache_key] = (time.monotonic(), payload)
+    if len(_workspace_graph_payload_cache) > 4:
+        oldest = min(
+            _workspace_graph_payload_cache,
+            key=lambda key: _workspace_graph_payload_cache[key][0],
+        )
+        if oldest != cache_key:
+            _workspace_graph_payload_cache.pop(oldest, None)
+    return dict(payload)
+
+
+def _workspace_note_backlinks(root: str, relative: str) -> dict:
+    root_path, note_path = _resolve_workspace_note_path(root, relative)
+    canonical_relative = os.path.relpath(note_path, root_path).replace("\\", "/")
+    graph = _workspace_note_graph(root_path)
+    _root_path, notes, meta = _read_workspace_graph_notes(root_path)
+    if canonical_relative not in notes:
+        with open(note_path, "r", encoding="utf-8", errors="replace") as handle:
+            notes[canonical_relative] = handle.read()
+    links = []
+    seen = set()
+    for edge in graph.get("links", []):
+        source = edge.get("source")
+        if edge.get("target") != canonical_relative or not source or source in seen:
+            continue
+        seen.add(source)
+        links.append(source)
+    return {
+        "root": root_path,
+        "path": canonical_relative,
+        "backlinks": [
+            {"path": path, "title": _atlas_note_title(path, notes.get(path, ""))}
+            for path in links
+        ],
+        **meta,
     }
 
 
@@ -249,6 +372,32 @@ def setup_workspace_routes():
         try:
             return _write_workspace_note(payload.root, payload.path, payload.content)
         except (OSError, UnicodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/graph")
+    def graph(request: Request, root: str = Query(default="")):
+        """Build an Atlas wikilink graph from notes in the active workspace."""
+        owner = get_current_user(request)
+        if not owner_is_admin_or_single_user(owner):
+            raise HTTPException(status_code=403, detail="Workspace graph is admin-only")
+        try:
+            return _workspace_note_graph(root)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/backlinks")
+    def backlinks(
+        request: Request,
+        root: str = Query(default=""),
+        path: str = Query(default=""),
+    ):
+        """Return workspace notes that link to one workspace note."""
+        owner = get_current_user(request)
+        if not owner_is_admin_or_single_user(owner):
+            raise HTTPException(status_code=403, detail="Workspace backlinks are admin-only")
+        try:
+            return _workspace_note_backlinks(root, path)
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return router

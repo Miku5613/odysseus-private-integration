@@ -26,6 +26,7 @@ const GRAPH_PANEL_W = 340;
 const TEMPLATE_DIR = 'templates/';
 
 const API = '/api/atlas';
+const WORKSPACE_TREE_HEIGHT_KEY = 'odysseus.atlas.workspaceTreeHeight';
 
 function _atlasEsc(v) {
   const div = document.createElement('div');
@@ -135,10 +136,46 @@ function _renderRootSection(container) {
         <div class="atlas-root-path">${_atlasEsc(root)}</div>
         <div class="atlas-root-note">Workspace is linked. Open Markdown or text notes below to view and edit them in Atlas; clear Workspace to switch Atlas roots or import.</div>
       </div>
+      <div class="atlas-worktree-resizer" data-el="workspace-tree-resizer" role="separator" aria-orientation="horizontal" title="Drag to resize the root file explorer"></div>
       <div class="atlas-worktree" data-el="workspace-tree"></div>
     </div>`;
   _renderWorkspaceTreeLevel(section.querySelector('[data-el="workspace-tree"]'));
+  _wireWorkspaceTreeResizer(section);
   container.appendChild(section);
+}
+
+function _wireWorkspaceTreeResizer(section) {
+  const tree = section?.querySelector('[data-el="workspace-tree"]');
+  const handle = section?.querySelector('[data-el="workspace-tree-resizer"]');
+  if (!tree || !handle) return;
+
+  handle.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startY = event.clientY;
+    const startHeight = tree.getBoundingClientRect().height;
+    handle.classList.add('dragging');
+    handle.setPointerCapture?.(event.pointerId);
+
+    const onMove = (moveEvent) => {
+      const maxHeight = Math.max(240, Math.min(window.innerHeight * 0.75, 720));
+      const height = _clamp(startHeight + moveEvent.clientY - startY, 120, maxHeight);
+      _modal?.style.setProperty('--atlas-worktree-h', Math.round(height) + 'px');
+    };
+    const onEnd = () => {
+      handle.classList.remove('dragging');
+      try { handle.releasePointerCapture?.(event.pointerId); } catch (_) {}
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onEnd);
+      document.removeEventListener('pointercancel', onEnd);
+      const height = Math.round(tree.getBoundingClientRect().height);
+      try { localStorage.setItem(WORKSPACE_TREE_HEIGHT_KEY, String(height)); } catch (_) {}
+    };
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onEnd, { once: true });
+    document.addEventListener('pointercancel', onEnd, { once: true });
+  });
 }
 
 function _wireFilesPanelActions() {
@@ -323,6 +360,14 @@ async function apiGet(path, params) {
   if (!r.ok) throw new Error(`${path} ${r.status}`);
   return r.json();
 }
+async function workspaceApiGet(path, params) {
+  const url = new URL('/api/workspace' + path, location.origin);
+  if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const response = await fetch(url, { credentials: 'same-origin' });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || `${path} ${response.status}`);
+  return data;
+}
 async function _refreshFilesTree() {
   try {
     await _loadFolders();
@@ -451,7 +496,10 @@ function _buildModal() {
       #atlas-modal .atlas-root-name { font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       #atlas-modal .atlas-root-path { font-size:10px; opacity:.56; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; }
       #atlas-modal .atlas-root-note { font-size:11px; opacity:.52; margin-top:6px; line-height:1.35; }
-      #atlas-modal .atlas-worktree { margin-top:7px; max-height:240px; overflow:auto; overscroll-behavior:contain; border-top:1px solid color-mix(in srgb,var(--bubble-border,#333) 55%,transparent); padding-top:5px; }
+      #atlas-modal .atlas-worktree { margin-top:7px; height:var(--atlas-worktree-h,min(42vh,420px)); min-height:120px; max-height:none; overflow:auto; overscroll-behavior:contain; border-top:1px solid color-mix(in srgb,var(--bubble-border,#333) 55%,transparent); padding-top:5px; }
+      #atlas-modal .atlas-worktree-resizer { height:9px; cursor:ns-resize; touch-action:none; position:relative; }
+      #atlas-modal .atlas-worktree-resizer::after { content:""; position:absolute; left:34%; right:34%; top:3px; height:2px; border-radius:2px; background:color-mix(in srgb,var(--brand-color,#f19ad7) 38%,transparent); opacity:.55; }
+      #atlas-modal .atlas-worktree-resizer:hover::after, #atlas-modal .atlas-worktree-resizer.dragging::after { opacity:1; }
       #atlas-modal .atlas-worktree-row { width:100%; min-width:0; display:flex; align-items:center; gap:4px; border:0; border-radius:5px; background:transparent; color:inherit; padding-top:4px; padding-right:8px; padding-bottom:4px; cursor:pointer; text-align:left; font-family:inherit; font-size:13px; line-height:1.25; }
       #atlas-modal .atlas-worktree-row:hover { background:rgba(127,127,127,.12); }
       #atlas-modal .atlas-worktree-row.active { background:var(--section-accent,rgba(120,140,255,.18)); }
@@ -559,13 +607,19 @@ function _buildModal() {
           <div data-el="backlinks"><div style="opacity:.5;">—</div></div>
         </div>
         <div class="atlas-graph-wrap" style="display:none;">
-          <div class="atlas-graph-bar"><span>Graph</span><span style="flex:1"></span><button class="atlas-btn" data-act="graph-close" title="Hide graph">&#x2715;</button></div>
+          <div class="atlas-graph-bar"><span>Graph</span><span class="atlas-graph-summary" data-el="graph-summary"></span><span style="flex:1"></span><button class="atlas-btn" data-act="graph-close" title="Hide graph">&#x2715;</button></div>
           <canvas class="atlas-graph"></canvas>
         </div>
       </div>
     </div>
   `;
   document.body.appendChild(_modal);
+  try {
+    const savedTreeHeight = parseInt(localStorage.getItem(WORKSPACE_TREE_HEIGHT_KEY) || '', 10);
+    if (Number.isFinite(savedTreeHeight)) {
+      _modal.style.setProperty('--atlas-worktree-h', _clamp(savedTreeHeight, 120, Math.max(180, window.innerHeight - 180)) + 'px');
+    }
+  } catch (_) {}
 
   // header actions
   _modal.querySelector('#atlas-close').onclick = closeAtlas;
@@ -1006,7 +1060,7 @@ async function openNote(path) {
     _modal.querySelector('textarea').value = data.content || '';
     _modal.querySelector('[data-el="path"]').textContent = data.path;
     _renderPreview(data.content || '', data.outlinks);
-    _renderBacklinks(data.backlinks || []);
+    _renderBacklinks(data.backlinks || [], 'session');
     _renderList(_notes);
   } catch (e) { console.error('openNote', e); }
 }
@@ -1034,10 +1088,28 @@ async function openWorkspaceNote(path) {
     _modal.querySelector('textarea').value = data.content || '';
     _modal.querySelector('[data-el="path"]').textContent = `Workspace · ${data.path}`;
     _renderPreview(data.content || '', []);
-    _renderBacklinks([]);
+    const backlinksBox = _modal.querySelector('[data-el="backlinks"]');
+    if (backlinksBox) backlinksBox.innerHTML = '<div style="opacity:.5;">Loading root backlinks…</div>';
     _renderList(_notes);
+    _loadWorkspaceBacklinks(_currentWorkspaceRoot, data.path);
   } catch (error) {
     showError('Could not open workspace note: ' + error.message);
+  }
+}
+
+async function _loadWorkspaceBacklinks(root, path) {
+  try {
+    const data = await workspaceApiGet('/backlinks', { root, path });
+    if (_currentSource !== 'workspace'
+        || _currentWorkspaceRoot !== root
+        || _current !== path) return;
+    _renderBacklinks(data.backlinks || [], 'workspace');
+  } catch (error) {
+    if (_currentSource === 'workspace' && _currentWorkspaceRoot === root && _current === path) {
+      const box = _modal?.querySelector('[data-el="backlinks"]');
+      if (box) box.innerHTML = '<div style="opacity:.5;">Unavailable</div>';
+      console.error('workspace backlinks', error);
+    }
   }
 }
 
@@ -1290,16 +1362,20 @@ function _preprocessMarkdown(src) {
   return src.replace(/\u0000(\d+)\u0000/g, (m, i) => stash[+i]);
 }
 
-function _renderBacklinks(list) {
+function _renderBacklinks(list, source = _currentSource) {
   const box = _modal.querySelector('[data-el="backlinks"]');
   if (!list.length) { box.innerHTML = '<div style="opacity:.5;">None</div>'; return; }
   box.innerHTML = '';
-  for (const path of list) {
+  for (const item of list) {
+    const path = typeof item === 'string' ? item : item.path;
+    const itemSource = (typeof item === 'object' && item.source) || source || 'session';
     const d = document.createElement('div');
     d.className = 'atlas-bl';
-    d.textContent = (_notes.find((n) => n.path === path) || {}).title || path;
+    d.textContent = (typeof item === 'object' && item.title)
+      || (_notes.find((n) => n.path === path) || {}).title
+      || path;
     d.title = path;
-    d.onclick = () => openNote(path);
+    d.onclick = () => itemSource === 'workspace' ? openWorkspaceNote(path) : openNote(path);
     box.appendChild(d);
   }
 }
@@ -1326,15 +1402,63 @@ function _toggleGraph(force) {
 }
 async function _openGraph() {
   const canvas = _modal.querySelector('canvas.atlas-graph');
-  let data;
-  try { data = await apiGet('/graph'); } catch { data = { nodes: [], links: [] }; }
-  if (!_graph) _graph = new GraphView(canvas, (id) => { if (!id.startsWith('::missing::')) openNote(id); });
+  const root = _activeWorkspaceRoot();
+  const [sessionResult, workspaceResult] = await Promise.allSettled([
+    apiGet('/graph'),
+    root ? workspaceApiGet('/graph', { root }) : Promise.resolve({ nodes: [], links: [], note_count: 0 }),
+  ]);
+  const sessionGraph = sessionResult.status === 'fulfilled'
+    ? sessionResult.value : { nodes: [], links: [] };
+  const workspaceGraph = workspaceResult.status === 'fulfilled'
+    ? workspaceResult.value : { nodes: [], links: [], note_count: 0 };
+  const sessionData = _namespaceGraph(sessionGraph, 'session');
+  const workspaceData = _namespaceGraph(workspaceGraph, 'workspace');
+  const data = {
+    nodes: [...sessionData.nodes, ...workspaceData.nodes],
+    links: [...sessionData.links, ...workspaceData.links],
+  };
+  const summary = _modal.querySelector('[data-el="graph-summary"]');
+  if (summary) {
+    const rootCount = Number(workspaceGraph.note_count ?? workspaceGraph.nodes?.filter((n) => !n.missing).length ?? 0);
+    const sessionCount = sessionGraph.nodes?.filter((n) => !n.missing).length || 0;
+    summary.textContent = `Session ${sessionCount} · Root ${rootCount}${workspaceGraph.truncated ? '+' : ''}`;
+    summary.title = workspaceGraph.truncated
+      ? 'The root graph reached its safety limit; the displayed root note count is partial.'
+      : 'Session and active root notes in this graph';
+  }
+  if (!_graph) _graph = new GraphView(canvas, _openGraphNode);
   // Wait one frame so the freshly-shown panel has its real width before the
   // simulation seeds node positions / sizes the canvas.
   requestAnimationFrame(() => {
     _graph.setData(data.nodes, data.links);
     _graph.start();
   });
+}
+
+function _namespaceGraph(graph, source) {
+  const prefix = source + '::';
+  return {
+    nodes: (graph.nodes || []).map((node) => ({
+      ...node,
+      id: prefix + node.id,
+      source,
+      sourcePath: node.id,
+    })),
+    links: (graph.links || []).map((link) => ({
+      source: prefix + link.source,
+      target: prefix + link.target,
+    })),
+  };
+}
+
+function _openGraphNode(id) {
+  const separator = id.indexOf('::');
+  if (separator < 0) return;
+  const source = id.slice(0, separator);
+  const path = id.slice(separator + 2);
+  if (!path || path.startsWith('::missing::')) return;
+  if (source === 'workspace') openWorkspaceNote(path);
+  else if (source === 'session') openNote(path);
 }
 
 // ── templates ─────────────────────────────────────────────────────────────
@@ -1621,7 +1745,11 @@ class GraphView {
       const p = this._toScreen(n);
       const r = (4 + Math.min(n.deg, 8)) * this.scale;
       ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = n.missing ? 'rgba(230,100,100,.65)' : (n === this.hover ? '#6cf' : 'rgba(120,150,255,.85)');
+      ctx.fillStyle = n.missing
+        ? 'rgba(230,100,100,.65)'
+        : (n === this.hover
+          ? '#6cf'
+          : n.source === 'workspace' ? 'rgba(241,154,215,.9)' : 'rgba(120,150,255,.85)');
       ctx.fill();
       if (this.scale > 0.6 || n === this.hover) {
         ctx.fillStyle = fg; ctx.font = `${11}px sans-serif`; ctx.textAlign = 'center';
