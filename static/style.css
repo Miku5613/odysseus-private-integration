@@ -40547,6 +40547,25 @@ body.theme-frosted .modal {
   flex-direction:column;
   gap:12px;
 }
+.workspace-saved-roots-list {
+  max-height: 150px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 3px;
+}
+.workspace-saved-roots-list .workspace-quick-row + .workspace-quick-row {
+  margin-top: 6px;
+}
+.workspace-index-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  color: var(--accent-primary, currentColor);
+  vertical-align: -2px;
+}
+.workspace-index-icon svg { display: block; }
 
 .indexes-card-title {
   display:flex;

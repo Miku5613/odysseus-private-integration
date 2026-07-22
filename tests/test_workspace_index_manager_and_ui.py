@@ -183,6 +183,8 @@ def test_register_root_persists_authorized_structure(tmp_path, monkeypatch):
     assert result["safety_scope"] == "read_only_sandbox"
     assert result["allowed_capabilities"] == ["context.list", "context.read"]
     assert result["embedding_model"] == "nomic-embed-text:latest"
+    assert result["is_indexed"] is False
+    assert result["embedding_size_mb"] == 0
     assert stored == [result]
 
     with pytest.raises(ValueError, match="definitive ID"):
@@ -248,6 +250,11 @@ def test_index_root_uses_explicit_registry_namespace_and_nomic(
     assert semantic["embedding_model"] == "nomic-embed-text:latest"
     assert semantic["strict_reads"] is True
     assert result["stats"]["chunk_count"] == 1
+    saved = json.loads(roots_file.read_text(encoding="utf-8"))["roots"][0]
+    assert saved["is_indexed"] is True
+    assert saved["indexed_chunk_count"] == 1
+    assert saved["embedding_dimension"] == 768
+    assert saved["embedding_size_mb"] == 0.0029
 
 
 def test_structural_workspace_index_accepts_supported_text_files():

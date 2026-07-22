@@ -21,6 +21,8 @@ from src.agent_runtime.knowledge_vault_semantic import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ROOTS_FILE = PROJECT_ROOT / "config" / "local_roots.json"
 WORKSPACE_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
+WORKSPACE_EMBEDDING_DIMENSION = 768
+EMBEDDING_FLOAT_BYTES = 4
 WORKSPACE_EMBEDDING_URL = os.getenv(
     "KNOWLEDGE_EMBEDDING_URL",
     DEFAULT_EMBEDDING_URL,
@@ -56,6 +58,18 @@ _VALID_ROOT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{1,127}$")
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _embedding_metadata(chunk_count: int) -> dict[str, Any]:
+    count = max(0, int(chunk_count or 0))
+    size_bytes = count * WORKSPACE_EMBEDDING_DIMENSION * EMBEDDING_FLOAT_BYTES
+    return {
+        "is_indexed": count > 0,
+        "indexed_chunk_count": count,
+        "embedding_dimension": WORKSPACE_EMBEDDING_DIMENSION,
+        "embedding_size_bytes": size_bytes,
+        "embedding_size_mb": round(size_bytes / (1024 * 1024), 4),
+    }
 
 
 def normalize_root_id(value: str) -> str:
@@ -139,11 +153,38 @@ def _save_registry(data: dict[str, Any]) -> None:
 
 
 def list_roots() -> list[dict[str, Any]]:
-    return [
+    roots = [
         dict(item)
         for item in _load_registry().get("roots", [])
         if isinstance(item, dict)
     ]
+    changed = False
+    for root in roots:
+        if "embedding_size_bytes" in root and "is_indexed" in root:
+            continue
+
+        chunk_count = int(root.get("indexed_chunk_count") or 0)
+        if not chunk_count and root.get("last_indexed"):
+            try:
+                stats = get_semantic_vault_stats(
+                    index_namespace=str(root.get("root_id") or root.get("id") or ""),
+                    embedding_url=WORKSPACE_EMBEDDING_URL,
+                    embedding_model=WORKSPACE_EMBEDDING_MODEL,
+                )
+                chunk_count = int(stats.get("namespace_count") or 0)
+            except Exception:
+                chunk_count = 0
+        root.update(_embedding_metadata(chunk_count))
+        changed = True
+
+    if changed:
+        data = _load_registry()
+        data["roots"] = roots
+        if "local_roots" in data:
+            data["local_roots"] = roots
+        _save_registry(data)
+
+    return roots
 
 
 def get_root(root_id: str) -> dict[str, Any] | None:
@@ -213,6 +254,14 @@ def register_root(
 
     resolved_str = str(resolved)
 
+    embedding_metadata = _embedding_metadata(
+        int(previous.get("indexed_chunk_count") or 0) if previous else 0
+    )
+    if previous:
+        for key in tuple(embedding_metadata):
+            if key in previous:
+                embedding_metadata[key] = previous[key]
+
     record = {
         "id": root_id,
         "provider_type": "local_dir",
@@ -250,6 +299,7 @@ def register_root(
             if previous
             else None
         ),
+        **embedding_metadata,
     }
 
     roots = [
@@ -333,6 +383,7 @@ def index_root(
             item["last_indexed"] = _now_iso()
             item["index_namespace"] = root_id
             item["embedding_model"] = result.embedding_model
+            item.update(_embedding_metadata(result.chunk_count))
 
     if "local_roots" in data:
         data["local_roots"] = data["roots"]
@@ -412,6 +463,14 @@ def flush_root_index(root_id: str) -> dict[str, Any]:
     if ids:
         collection.delete(ids=ids)
 
+    data = _load_registry()
+    for item in data.get("roots", []):
+        if isinstance(item, dict) and str(item.get("root_id") or "") == root_id:
+            item.update(_embedding_metadata(0))
+    if "local_roots" in data:
+        data["local_roots"] = data["roots"]
+    _save_registry(data)
+
     return {
         "root_id": root_id,
         "deleted_chunks": len(ids),
@@ -463,14 +522,17 @@ def root_stats(root_id: str) -> dict[str, Any]:
     if not root:
         raise ValueError(f"Unknown root_id: {root_id}")
 
+    index_stats = get_semantic_vault_stats(
+        index_namespace=root_id,
+        embedding_url=WORKSPACE_EMBEDDING_URL,
+        embedding_model=WORKSPACE_EMBEDDING_MODEL,
+    )
+    embedding_metadata = _embedding_metadata(index_stats.get("namespace_count") or 0)
+
     return {
         "root_id": root_id,
-        "root": root,
-        "index": get_semantic_vault_stats(
-            index_namespace=root_id,
-            embedding_url=WORKSPACE_EMBEDDING_URL,
-            embedding_model=WORKSPACE_EMBEDDING_MODEL,
-        ),
+        "root": {**root, **embedding_metadata},
+        "index": {**index_stats, **embedding_metadata},
     }
 
 
@@ -521,6 +583,7 @@ __all__ = [
     "PROJECT_ROOT",
     "ROOTS_FILE",
     "WORKSPACE_EMBEDDING_MODEL",
+    "WORKSPACE_EMBEDDING_DIMENSION",
     "WORKSPACE_EMBEDDING_URL",
     "WORKSPACE_TEXT_EXTENSIONS",
     "normalize_root_id",

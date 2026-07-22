@@ -129,6 +129,13 @@ async function indexCurrent(rebuild) {
   }
 }
 
+function formatEmbeddingSize(root) {
+  const sizeMb = Number(root.embedding_size_mb || 0);
+  if (!root.is_indexed && sizeMb <= 0) return 'Not indexed';
+  if (sizeMb > 0 && sizeMb < 0.01) return `${sizeMb.toFixed(4)} MB`;
+  return `${sizeMb.toFixed(2)} MB`;
+}
+
 function rootCard(root) {
   const rootId = esc(root.root_id || root.id || '');
   const path = esc(root.path || root.local_path || '');
@@ -147,6 +154,7 @@ function rootCard(root) {
           <span class="indexes-root-path" title="${path}">${path}</span>
           <span>Root ID: <code>${rootId}</code></span>
           <span>Embedding model: <code>${model}</code></span>
+          <span title="Estimated float32 vector payload stored for this isolated index">Embedding size: ${esc(formatEmbeddingSize(root))}</span>
           <span>Last indexed: ${esc(root.last_indexed || 'Never')}</span>
           <span>Last queried: ${esc(root.last_queried || 'Never')}</span>
         </div>

@@ -16,6 +16,8 @@ from .knowledge_vault_semantic import (
     search_semantic_vault_index,
 )
 from .daily_driver_preface import generate_intent_preface
+from .knowledge_worker import run_knowledge_worker
+from .supervisor_contracts import WorkerHandoff
 
 
 def sse_frame(payload: dict[str, Any]) -> str:
@@ -213,15 +215,20 @@ def _format_search_output(results: list[dict[str, Any]], query: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _build_final_answer(results: list[dict[str, Any]], query: str) -> str:
+def _build_final_answer(
+    results: list[dict[str, Any]],
+    query: str,
+    *,
+    source_label: str = "Ideaverse",
+) -> str:
     if not results:
         return (
-            f"I searched your Ideaverse semantic vault index for **{query}**, but I did not find matching note chunks.\n\n"
+            f"I searched the {source_label} semantic index for **{query}**, but I did not find matching note chunks.\n\n"
             "The search was read-only. No notes were changed."
         )
 
     lines = []
-    lines.append(f"I searched your Ideaverse notes for **{query}** and found these strongest matches:")
+    lines.append(f"I searched the {source_label} notes for **{query}** and found these strongest matches:")
     lines.append("")
 
     for i, r in enumerate(results[:6], start=1):
@@ -248,18 +255,26 @@ def _build_final_answer(results: list[dict[str, Any]], query: str) -> str:
     return "\n".join(lines).strip()
 
 
-def run_knowledge_semantic_chat_turn(message: str) -> tuple[str, list[str], list[dict[str, Any]], dict[str, Any]]:
+def run_knowledge_semantic_chat_turn(
+    message: str,
+    *,
+    workspace: str | None = None,
+    root_id: str | None = None,
+) -> tuple[str, list[str], list[dict[str, Any]], dict[str, Any]]:
     started = time.time()
     frames: list[str] = []
     tool_events: list[dict[str, Any]] = []
 
     decision = evaluate_knowledge_request(message)
     query = extract_semantic_query(message)
+    explicit_workspace = str(workspace or "").strip()
+    explicit_root_id = str(root_id or "").strip()
+    source_label = "active workspace" if explicit_workspace else "Ideaverse"
 
     frames.append(sse_frame({
         "type": "agent_prep",
         "title": "Knowledge runtime",
-        "content": "Preparing a read-only semantic vault search.",
+        "content": f"Preparing a read-only semantic search of the {source_label}.",
     }))
     frames.append(sse_frame({
         "type": "agent_step",
@@ -272,7 +287,7 @@ def run_knowledge_semantic_chat_turn(message: str) -> tuple[str, list[str], list
         _preface = generate_intent_preface(
             user_request=message,
             intent="vault_search",
-            resource="Ideaverse notes",
+            resource=f"{source_label} notes",
             next_action="semantic_vault_search",
             safety="read-only",
             timeout_s=8.0,
@@ -352,7 +367,7 @@ def run_knowledge_semantic_chat_turn(message: str) -> tuple[str, list[str], list
     frames.append(sse_frame({
         "type": "agent_step",
         "title": "Searching semantic vault index",
-        "content": f"Searching the local Chroma vault index for: {query}",
+        "content": f"Searching the {source_label} Chroma index for: {query}",
     }))
     frames.append(sse_frame({
         "type": "tool_start",
@@ -362,10 +377,43 @@ def run_knowledge_semantic_chat_turn(message: str) -> tuple[str, list[str], list
         "command": "Search semantic vault index",
     }))
 
-    raw_results = search_semantic_vault_index(query, k=18)
+    source_root_id = explicit_root_id or None
+    worker_result = None
+    if explicit_workspace or explicit_root_id:
+        worker_result = run_knowledge_worker(
+            WorkerHandoff(
+                capability="knowledge_search",
+                objective=message,
+                context={
+                    "query": query,
+                    "workspace": explicit_workspace,
+                    "root_id": explicit_root_id,
+                },
+            )
+        )
+        source_root_id = worker_result.data.get("root_id") or source_root_id
+        raw_results = list(worker_result.data.get("results") or [])
+    else:
+        raw_results = search_semantic_vault_index(query, k=18)
     results = _rerank_and_diversify_results(raw_results, query, max_results=6)
-    stats = get_semantic_vault_stats()
+    if source_root_id:
+        stats = get_semantic_vault_stats(index_namespace=source_root_id)
+    elif explicit_workspace or explicit_root_id:
+        # An explicit but unresolved source must not even consult metadata for
+        # the default/global namespace. Keep the failure fully fail-closed.
+        stats = {}
+    else:
+        stats = get_semantic_vault_stats()
     output = _format_search_output(results, query)
+    if worker_result is not None:
+        output = (
+            f"Source authority: active workspace\n"
+            f"Workspace: {explicit_workspace}\n"
+            f"Root ID: {source_root_id or '(not indexed)'}\n"
+            f"Worker status: {worker_result.status}\n"
+            f"Worker summary: {worker_result.summary}\n\n"
+            f"{output}"
+        )
 
     frames.append(sse_frame({
         "type": "tool_output",
@@ -382,7 +430,22 @@ def run_knowledge_semantic_chat_turn(message: str) -> tuple[str, list[str], list
         "output": output,
     })
 
-    final_answer = _build_final_answer(results, query)
+    if worker_result is not None and worker_result.status == "failed":
+        final_answer = (
+            "Workspace knowledge retrieval failed, so I stopped without "
+            "searching Ideaverse or another global root."
+        )
+    elif worker_result is not None and worker_result.data.get("index_required"):
+        final_answer = (
+            "The active workspace is not indexed yet, so I stopped without "
+            "searching Ideaverse or another global root."
+        )
+    else:
+        final_answer = _build_final_answer(
+            results,
+            query,
+            source_label=source_label,
+        )
 
     frames.append(sse_frame({
         "type": "agent_step",
@@ -404,6 +467,9 @@ def run_knowledge_semantic_chat_turn(message: str) -> tuple[str, list[str], list
         "semantic_results": len(results),
         "semantic_collection": stats.get("collection_name"),
         "semantic_namespace_count": stats.get("namespace_count"),
+        "workspace": explicit_workspace or None,
+        "root_id": source_root_id,
+        "source_authority": "workspace" if explicit_workspace else "explicit_vault_request",
         "elapsed_s": round(time.time() - started, 3),
     }
     frames.append(sse_frame({"type": "metrics", "metrics": metrics}))

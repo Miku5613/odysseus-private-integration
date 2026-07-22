@@ -8,12 +8,14 @@
 import Storage, { KEYS } from './storage.js';
 import uiModule from './ui.js';
 import { makeWindowDraggable } from './windowDrag.js';
+import { indexIconMarkup, loadIndexRoots } from './indexStatus.js';
 
 const API_BASE = window.location.origin;
 // Same folder glyph as the overflow menu item + pill (not an emoji).
 const _FOLDER_SVG = '<svg class="workspace-row-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
 let _modal = null;
 let _curPath = '';
+let _registeredRoots = [];
 
 const RECENT_WORKSPACES_KEY = 'odysseus.workspace.recent';
 const RECENT_WORKSPACES_LIMIT = 8;
@@ -69,10 +71,20 @@ function _removeRecentWorkspace(path) {
 }
 
 function _authorizedRoots() {
-  // Future integrations can register vetted roots here, for example:
-  // Obsidian vault root, Atlas session root, or managed project roots.
-  // Keep empty for now so Workspace remains self-contained.
-  return [];
+  return _registeredRoots.map((root) => ({
+    ...root,
+    path: root.path || root.local_path || '',
+    label: root.display_name || root.root_id || root.id || '',
+  })).filter((root) => root.path);
+}
+
+async function _refreshAuthorizedRoots() {
+  try {
+    _registeredRoots = await loadIndexRoots({ force: true });
+  } catch (_) {
+    _registeredRoots = [];
+  }
+  _renderQuickStart();
 }
 
 function _setWorkspaceAndRemember(path) {
@@ -103,7 +115,7 @@ function _renderQuickStart() {
   const rootsHtml = roots.length
     ? roots.map((r) => `
       <button type="button" class="workspace-quick-row workspace-authorized-root" data-path="${uiModule.esc(r.path)}" title="${uiModule.esc(r.path)}">
-        <span class="workspace-quick-name">${uiModule.esc(r.label || _basename(r.path))}</span>
+        <span class="workspace-quick-name">${uiModule.esc(r.label || _basename(r.path))}${r.is_indexed ? indexIconMarkup('This saved root has a searchable index') : ''}</span>
         <span class="workspace-quick-path">${uiModule.esc(r.path)}</span>
       </button>`).join('')
     : '<div class="workspace-quick-empty">No saved roots yet</div>';
@@ -117,7 +129,7 @@ function _renderQuickStart() {
       </section>
       <section class="workspace-quick-section">
         <div class="workspace-quick-label">Saved Roots</div>
-        ${rootsHtml}
+        <div class="workspace-saved-roots-list">${rootsHtml}</div>
       </section>
     </div>`;
 
@@ -314,6 +326,7 @@ function _getModal() {
 export async function openWorkspaceBrowser() {
   const modal = _getModal();
   modal.style.display = 'flex';
+  void _refreshAuthorizedRoots();
   try {
     _render(await _load(getWorkspace() || ''));
   } catch (e) {

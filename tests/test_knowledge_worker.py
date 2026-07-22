@@ -142,3 +142,59 @@ def test_knowledge_worker_does_not_use_an_implicit_global_root():
     assert result.data["root_id"] is None
     assert "fallback is disabled" in result.summary
     assert called is False
+
+
+def test_workspace_source_precedes_an_explicit_root_id(monkeypatch):
+    import src.agent_runtime.knowledge_worker as worker
+
+    captured = {}
+    monkeypatch.setattr(
+        worker,
+        "find_root_by_path",
+        lambda path: {"root_id": "workspace_root"},
+    )
+
+    def fake_workspace_search(root_id, query, k=8):
+        captured.update(root_id=root_id, query=query, k=k)
+        return [{"path": "dentist.md", "title": "Dentist"}]
+
+    monkeypatch.setattr(worker, "search_root", fake_workspace_search)
+    result = worker.run_knowledge_worker(
+        WorkerHandoff(
+            capability="knowledge_search",
+            objective="When is the dentist appointment?",
+            context={
+                "workspace": "C:/Selected/Workspace",
+                "root_id": "different_global_root",
+            },
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.data["root_id"] == "workspace_root"
+    assert captured["root_id"] == "workspace_root"
+
+
+def test_unindexed_workspace_fails_without_calling_global_retriever(monkeypatch):
+    import src.agent_runtime.knowledge_worker as worker
+
+    called = False
+    monkeypatch.setattr(worker, "find_root_by_path", lambda path: None)
+
+    def forbidden_global_search(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    result = worker.run_knowledge_worker(
+        WorkerHandoff(
+            capability="knowledge_search",
+            objective="What are my Kyoto priorities?",
+            context={"workspace": "C:/Selected/Workspace"},
+        ),
+        retriever=forbidden_global_search,
+    )
+
+    assert result.status == "partial"
+    assert result.data["index_required"] is True
+    assert called is False

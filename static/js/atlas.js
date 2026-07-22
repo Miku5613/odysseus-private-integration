@@ -17,6 +17,7 @@ import { mdToHtml } from './markdown.js';
 import { showToast, showError, styledPrompt } from './ui.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { getWorkspace } from './workspace.js';
+import { findIndexForPath, indexIconMarkup, loadIndexRoots } from './indexStatus.js';
 
 // Width (px) the graph panel adds to the dialog when docked open.
 const GRAPH_PANEL_W = 340;
@@ -46,6 +47,69 @@ function _activeWorkspaceRoot() {
 
 window.getActiveWorkspaceRoot = _activeWorkspaceRoot;
 
+function _indexedWorkspaceRoot(root = _activeWorkspaceRoot()) {
+  const match = findIndexForPath(_knownIndexRoots, root);
+  return match?.is_indexed ? match : null;
+}
+
+function _renderWorkspaceTreeLevel(container, relative = '', depth = 0) {
+  const data = _workspaceTreeCache.get(relative);
+  if (!data) {
+    const pending = document.createElement('div');
+    pending.className = 'atlas-worktree-status';
+    pending.textContent = 'Loading workspace files…';
+    container.appendChild(pending);
+    return;
+  }
+
+  if (!data.entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'atlas-worktree-status';
+    empty.textContent = 'Empty folder';
+    container.appendChild(empty);
+    return;
+  }
+
+  for (const entry of data.entries) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `atlas-worktree-row ${entry.kind}`;
+    row.style.paddingLeft = `${8 + depth * 12}px`;
+    row.title = entry.path;
+
+    const twisty = document.createElement('span');
+    twisty.className = 'atlas-worktree-twisty';
+    const expanded = entry.kind === 'directory' && _workspaceTreeExpanded.has(entry.path);
+    twisty.textContent = entry.kind === 'directory' ? (expanded ? '▾' : '▸') : '·';
+
+    const label = document.createElement('span');
+    label.className = 'atlas-worktree-label';
+    label.textContent = entry.name;
+    row.append(twisty, label);
+    container.appendChild(row);
+
+    if (entry.kind === 'directory') {
+      row.onclick = async () => {
+        if (_workspaceTreeExpanded.has(entry.path)) {
+          _workspaceTreeExpanded.delete(entry.path);
+          _renderList(_notes);
+          return;
+        }
+        _workspaceTreeExpanded.add(entry.path);
+        _renderList(_notes);
+        if (!_workspaceTreeCache.has(entry.path)) await _loadWorkspaceTree(entry.path);
+      };
+      if (expanded) {
+        const children = document.createElement('div');
+        children.className = 'atlas-worktree-children';
+        container.appendChild(children);
+        _renderWorkspaceTreeLevel(children, entry.path, depth + 1);
+      }
+    } else {
+      row.onclick = () => showToast(`Read-only workspace file: ${entry.path}`);
+    }
+  }
+}
 
 
 function _renderRootSection(container) {
@@ -54,17 +118,20 @@ function _renderRootSection(container) {
 
   const section = document.createElement('section');
   section.className = 'atlas-files-section atlas-root-section';
+  const indexed = _indexedWorkspaceRoot(root);
   section.innerHTML = `
     <div class="atlas-files-section-head">
       <span>Root</span>
     </div>
     <div class="atlas-root-placeholder">
       <div class="atlas-root-card" title="${_atlasEsc(root)}">
-        <div class="atlas-root-name">${_atlasEsc(_pathBaseName(root))}</div>
+        <div class="atlas-root-name">${_atlasEsc(_pathBaseName(root))}${indexed ? indexIconMarkup('This workspace has a searchable index') : ''}</div>
         <div class="atlas-root-path">${_atlasEsc(root)}</div>
-        <div class="atlas-root-note">Workspace is linked. Atlas file tree is not implemented yet; clear Workspace to switch Atlas roots or import.</div>
+        <div class="atlas-root-note">Workspace is linked. Browse its read-only worktree below; clear Workspace to switch Atlas roots or import.</div>
       </div>
+      <div class="atlas-worktree" data-el="workspace-tree"></div>
     </div>`;
+  _renderWorkspaceTreeLevel(section.querySelector('[data-el="workspace-tree"]'));
   container.appendChild(section);
 }
 
@@ -155,7 +222,7 @@ function _syncAtlasWorkspaceTitle() {
 
   const root = _activeWorkspaceRoot();
   if (root) {
-    subtitle.textContent = `Root: ${_pathBaseName(root)}`;
+    subtitle.innerHTML = `Root: ${_atlasEsc(_pathBaseName(root))}${_indexedWorkspaceRoot(root) ? indexIconMarkup('This root has a searchable index') : ''}`;
     subtitle.title = root;
   } else {
     subtitle.textContent = 'Session Notes';
@@ -168,7 +235,6 @@ function _syncAtlasWorkspaceTitle() {
   if (importBtn) {
     importBtn.classList.toggle('disabled', !!root);
     importBtn.hidden = !!root;
-    rootBtn.hidden = !!root;
     importBtn.setAttribute('aria-disabled', root ? 'true' : 'false');
     importBtn.title = root
       ? 'Import is disabled while an active Workspace root is selected'
@@ -194,6 +260,45 @@ let _dirty = false;
 let _saveTimer = null;
 let _graphOpen = false;   // graph docked as a right-side panel
 let _graph = null;        // GraphView instance (lazy)
+let _knownIndexRoots = [];
+let _workspaceTreeRoot = '';
+const _workspaceTreeCache = new Map();
+const _workspaceTreeExpanded = new Set();
+
+async function _loadWorkspaceTree(relative = '') {
+  const root = _activeWorkspaceRoot();
+  if (!root) return;
+  const url = new URL('/api/workspace/tree', location.origin);
+  url.searchParams.set('root', root);
+  if (relative) url.searchParams.set('relative', relative);
+  try {
+    const response = await fetch(url, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error(`Workspace tree ${response.status}`);
+    const data = await response.json();
+    if (_activeWorkspaceRoot() !== root) return;
+    _workspaceTreeCache.set(relative, data);
+  } catch (error) {
+    _workspaceTreeCache.set(relative, { entries: [], error: error.message });
+  }
+  if (_modal && Array.isArray(_notes)) _renderList(_notes);
+}
+
+async function _refreshWorkspaceContext({ forceIndexes = false } = {}) {
+  const root = _activeWorkspaceRoot();
+  if (root !== _workspaceTreeRoot) {
+    _workspaceTreeRoot = root;
+    _workspaceTreeCache.clear();
+    _workspaceTreeExpanded.clear();
+  }
+  const work = [
+    loadIndexRoots({ force: forceIndexes })
+      .then((roots) => { _knownIndexRoots = roots; })
+      .catch(() => { _knownIndexRoots = []; }),
+  ];
+  if (root && !_workspaceTreeCache.has('')) work.push(_loadWorkspaceTree(''));
+  await Promise.all(work);
+  _syncAtlasWorkspaceTitle();
+}
 
 // ── tiny fetch helpers ──────────────────────────────────────────────────
 async function apiGet(path, params) {
@@ -241,6 +346,40 @@ async function apiSend(path, method, body) {
 // ── modal lifecycle ───────────────────────────────────────────────────────
 function isAtlasOpen() { return _open; }
 
+function _closeAtlasHeaderMenus() {
+  if (!_modal) return false;
+  let closed = false;
+  _modal.querySelectorAll('.atlas-head-dropdown').forEach((menu) => {
+    if (!menu.hidden) closed = true;
+    menu.hidden = true;
+  });
+  _modal.querySelectorAll('[data-menu-trigger]').forEach((trigger) => {
+    trigger.setAttribute('aria-expanded', 'false');
+  });
+  return closed;
+}
+
+function _wireAtlasHeaderMenus() {
+  if (!_modal || _modal._atlasHeaderMenusWired) return;
+  _modal._atlasHeaderMenusWired = true;
+  _modal.querySelectorAll('[data-menu-trigger]').forEach((trigger) => {
+    trigger.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const name = trigger.dataset.menuTrigger;
+      const menu = _modal.querySelector(`[data-menu="${name}"]`);
+      const open = !!menu?.hidden;
+      _closeAtlasHeaderMenus();
+      if (menu && open) {
+        menu.hidden = false;
+        trigger.setAttribute('aria-expanded', 'true');
+      }
+    });
+  });
+  _modal.addEventListener('click', (event) => {
+    if (!event.target.closest('.atlas-head-menu')) _closeAtlasHeaderMenus();
+  });
+}
+
 function _buildModal() {
   if (_modal) return _modal;
   _modal = document.createElement('div');
@@ -258,6 +397,14 @@ function _buildModal() {
       #atlas-modal .atlas-title:hover { text-decoration:none; filter:none; }
       #atlas-modal .atlas-subtitle { font-size:11px; opacity:.58; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       #atlas-modal .atlas-head .grow { flex:1; }
+      #atlas-modal .atlas-head-menu { position:relative; }
+      #atlas-modal .atlas-menu-trigger { display:inline-flex; align-items:center; gap:5px; }
+      #atlas-modal .atlas-head-dropdown { position:absolute; top:calc(100% + 5px); right:0; z-index:40; min-width:170px; padding:4px; border:1px solid var(--input-border,#444); border-radius:8px; background:var(--input-bg,#222); box-shadow:0 10px 26px rgba(0,0,0,.38); }
+      #atlas-modal .atlas-head-dropdown[hidden] { display:none; }
+      #atlas-modal .atlas-head-menu-item { display:flex; width:100%; align-items:center; border:0; border-radius:5px; padding:7px 9px; background:transparent; color:inherit; text-align:left; cursor:pointer; font-size:12px; }
+      #atlas-modal .atlas-head-menu-item:hover { background:rgba(127,127,127,.18); }
+      #atlas-modal .atlas-head-menu-item.active { color:var(--brand-color,#f19ad7); }
+      #atlas-modal .atlas-icon-btn { width:30px; height:28px; padding:0; display:inline-flex; align-items:center; justify-content:center; }
       #atlas-modal .atlas-tabs { display:flex; align-items:center; gap:4px; padding:6px 10px; border-bottom:1px solid var(--bubble-border,#333); }
       #atlas-modal .atlas-tab { background:transparent; border:0; border-bottom:2px solid transparent; color:inherit; opacity:.62; border-radius:0; padding:6px 10px 7px; cursor:pointer; font-size:12px; }
       #atlas-modal .atlas-tab:hover { background:transparent; opacity:.9; }
@@ -288,6 +435,13 @@ function _buildModal() {
       #atlas-modal .atlas-root-name { font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       #atlas-modal .atlas-root-path { font-size:10px; opacity:.56; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; }
       #atlas-modal .atlas-root-note { font-size:11px; opacity:.52; margin-top:6px; line-height:1.35; }
+      #atlas-modal .atlas-worktree { margin-top:7px; max-height:240px; overflow:auto; overscroll-behavior:contain; border-top:1px solid color-mix(in srgb,var(--bubble-border,#333) 55%,transparent); padding-top:5px; }
+      #atlas-modal .atlas-worktree-row { width:100%; min-width:0; display:flex; align-items:center; gap:4px; border:0; border-radius:5px; background:transparent; color:inherit; padding-top:4px; padding-right:6px; padding-bottom:4px; cursor:pointer; text-align:left; font-size:11px; }
+      #atlas-modal .atlas-worktree-row:hover { background:rgba(127,127,127,.12); }
+      #atlas-modal .atlas-worktree-row.file { opacity:.72; }
+      #atlas-modal .atlas-worktree-twisty { width:12px; flex:0 0 12px; opacity:.58; text-align:center; }
+      #atlas-modal .atlas-worktree-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      #atlas-modal .atlas-worktree-status { padding:7px 8px; font-size:10px; opacity:.48; }
 
       #atlas-modal .atlas-row { display:flex; align-items:center; gap:4px; padding:4px 8px; cursor:pointer; font-size:13px; white-space:nowrap; overflow:hidden; border-radius:5px; }
       #atlas-modal .atlas-row:hover { background:rgba(127,127,127,.12); }
@@ -339,12 +493,22 @@ function _buildModal() {
           <span class="atlas-subtitle" data-el="workspace-title">Atlas workspace · no active Workspace</span>
         </div>
         <span class="grow"></span>
-        <button class="atlas-btn" data-act="refresh" title="Refresh Ideaverse UI">↻</button>
-        <button class="atlas-btn" data-act="graph-toggle" title="Show the link graph alongside your note">Graph</button>
-        <button class="atlas-btn" data-act="backlinks-toggle" title="Show backlinks alongside your note">Backlinks</button>
-        <button class="atlas-btn" data-act="import">Import</button>
-        <button class="atlas-btn" data-act="export">Export</button>
-        <button class="atlas-btn" data-act="delete" title="Delete the open note">Delete</button>
+        <button class="atlas-btn atlas-icon-btn" data-act="refresh" title="Refresh Atlas" aria-label="Refresh Atlas"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg></button>
+        <div class="atlas-head-menu">
+          <button class="atlas-btn atlas-menu-trigger" type="button" data-menu-trigger="view" aria-expanded="false" title="Open view options">View <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg></button>
+          <div class="atlas-head-dropdown" data-menu="view" hidden>
+            <button class="atlas-head-menu-item" type="button" data-act="graph-toggle" title="Show the link graph alongside your note">Link graph</button>
+            <button class="atlas-head-menu-item" type="button" data-act="backlinks-toggle" title="Show backlinks alongside your note">Backlinks</button>
+          </div>
+        </div>
+        <div class="atlas-head-menu">
+          <button class="atlas-btn atlas-menu-trigger" type="button" data-menu-trigger="more" aria-expanded="false" title="Open note and vault actions">More <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg></button>
+          <div class="atlas-head-dropdown" data-menu="more" hidden>
+            <button class="atlas-head-menu-item" type="button" data-act="import" title="Import markdown files or a zip">Import</button>
+            <button class="atlas-head-menu-item" type="button" data-act="export" title="Export Atlas notes as a zip">Export</button>
+            <button class="atlas-head-menu-item" type="button" data-act="delete" title="Delete the open note">Delete open note</button>
+          </div>
+        </div>
         <button class="atlas-btn" id="atlas-close" title="Close">&#x2715;</button>
       </div>
       <div class="atlas-tabs">
@@ -402,6 +566,10 @@ function _buildModal() {
     _openImportDialog();
   };
   _modal.querySelector('[data-act="delete"]').onclick = () => _deleteCurrentNote();
+  _modal.querySelectorAll('.atlas-head-menu-item').forEach((button) => {
+    button.addEventListener('click', () => _closeAtlasHeaderMenus());
+  });
+  _wireAtlasHeaderMenus();
 
   // pane tabs
   _modal.querySelectorAll('.atlas-tab').forEach((tab) => {
@@ -469,7 +637,9 @@ async function openAtlas() {
   }
   document.addEventListener('keydown', _escHandler);
   document.addEventListener('overflow-state-change', _syncAtlasWorkspaceTitle);
+  document.addEventListener('workspace-changed', _handleAtlasWorkspaceChanged);
   await _reloadNotes();
+  await _refreshWorkspaceContext({ forceIndexes: true });
   // Restart the graph sim if the panel was left open from a previous session.
   if (_graphOpen) _openGraph();
 }
@@ -586,12 +756,21 @@ async function _refreshAtlasUi() {
   // open board view. Workspace selection and chat context are intentionally untouched.
   await _reloadNotes();
   await _loadFolders();
+  await _refreshWorkspaceContext({ forceIndexes: true });
   _renderList(_notes);
   _clearOpenNoteView();
   if (_graphOpen) _openGraph();
 }
 
-function _escHandler(e) { if (e.key === 'Escape' && _open) closeAtlas(); }
+function _handleAtlasWorkspaceChanged() {
+  void _refreshWorkspaceContext({ forceIndexes: true });
+}
+
+function _escHandler(e) {
+  if (e.key !== 'Escape' || !_open) return;
+  if (_closeAtlasHeaderMenus()) return;
+  closeAtlas();
+}
 
 function _doClose() {
   if (_saveTimer) { clearTimeout(_saveTimer); _saveCurrent(); }
@@ -599,6 +778,7 @@ function _doClose() {
   _open = false;
   document.removeEventListener('keydown', _escHandler);
   document.removeEventListener('overflow-state-change', _syncAtlasWorkspaceTitle);
+  document.removeEventListener('workspace-changed', _handleAtlasWorkspaceChanged);
   if (_modal) { _modal.style.display = 'none'; _modal.classList.add('hidden'); }
 }
 function closeAtlas() { _doClose(); }
@@ -997,7 +1177,7 @@ function _preprocessMarkdown(src) {
   // Protect code spans from the link/tag passes by stashing them behind
   // placeholders, then restoring verbatim at the end.
   const stash = [];
-  src = src.replace(_CODE_SPAN, (m) => { stash.push(m); return ` ${stash.length - 1} `; });
+  src = src.replace(_CODE_SPAN, (m) => { stash.push(m); return `\u0000${stash.length - 1}\u0000`; });
 
   // Image embeds: ![[pic.png]] → markdown image served from the raw endpoint.
   src = src.replace(/!\[\[([^\]|#]+?)\]\]/g, (m, target) => {
@@ -1025,7 +1205,7 @@ function _preprocessMarkdown(src) {
     return `${pre}[#${tag}](#atlas-tag-${encodeURIComponent(tag)})`;
   });
 
-  return src.replace(/ (\d+) /g, (m, i) => stash[+i]);
+  return src.replace(/\u0000(\d+)\u0000/g, (m, i) => stash[+i]);
 }
 
 function _renderBacklinks(list) {

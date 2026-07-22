@@ -9,6 +9,64 @@ from src.tool_security import owner_is_admin_or_single_user
 # A huge directory shouldn't dump thousands of rows into the picker; the user can
 # type/paste a path to jump straight in instead.
 _MAX_BROWSE_DIRS = 500
+_MAX_TREE_ENTRIES = 500
+
+
+def _resolve_workspace_tree_path(root: str, relative: str = "") -> tuple[str, str]:
+    from src.tool_execution import vet_workspace
+
+    canonical_root = vet_workspace(str(root or "").strip())
+    if not canonical_root:
+        raise ValueError("Workspace root is not allowed")
+
+    root_path = os.path.realpath(canonical_root)
+    clean_relative = str(relative or "").replace("\\", "/").strip("/")
+    candidate = os.path.realpath(os.path.join(root_path, clean_relative))
+    try:
+        if os.path.commonpath([root_path, candidate]) != root_path:
+            raise ValueError("Tree path escapes the workspace root")
+    except ValueError as exc:
+        raise ValueError("Tree path escapes the workspace root") from exc
+    if not os.path.isdir(candidate):
+        raise ValueError("Tree path is not a directory")
+    return root_path, candidate
+
+
+def _workspace_tree_entries(root: str, relative: str = "") -> dict:
+    root_path, target = _resolve_workspace_tree_path(root, relative)
+    entries = []
+    try:
+        with os.scandir(target) as iterator:
+            for entry in iterator:
+                try:
+                    if entry.name.startswith(".") or entry.is_symlink():
+                        continue
+                    is_directory = entry.is_dir(follow_symlinks=False)
+                    is_file = entry.is_file(follow_symlinks=False)
+                    if not (is_directory or is_file):
+                        continue
+                    absolute = os.path.join(target, entry.name)
+                    entries.append({
+                        "name": entry.name,
+                        "path": os.path.relpath(absolute, root_path).replace("\\", "/"),
+                        "kind": "directory" if is_directory else "file",
+                        "size": None if is_directory else entry.stat(follow_symlinks=False).st_size,
+                    })
+                except OSError:
+                    continue
+    except (PermissionError, OSError):
+        entries = []
+
+    entries.sort(key=lambda item: (item["kind"] != "directory", item["name"].casefold()))
+    clean_relative = os.path.relpath(target, root_path).replace("\\", "/")
+    if clean_relative == ".":
+        clean_relative = ""
+    return {
+        "root": root_path,
+        "relative": clean_relative,
+        "entries": entries[:_MAX_TREE_ENTRIES],
+        "truncated": len(entries) > _MAX_TREE_ENTRIES,
+    }
 
 
 def setup_workspace_routes():
@@ -81,5 +139,20 @@ def setup_workspace_routes():
         from src.tool_execution import vet_workspace
         resolved = vet_workspace(path)
         return {"ok": resolved is not None, "path": resolved}
+
+    @router.get("/tree")
+    def tree(
+        request: Request,
+        root: str = Query(default=""),
+        relative: str = Query(default=""),
+    ):
+        """Return one read-only, workspace-confined level for Atlas."""
+        owner = get_current_user(request)
+        if not owner_is_admin_or_single_user(owner):
+            raise HTTPException(status_code=403, detail="Workspace browsing is admin-only")
+        try:
+            return _workspace_tree_entries(root, relative)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return router
