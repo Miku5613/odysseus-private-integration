@@ -104,7 +104,6 @@ export function makeWindowDraggable(modal, options = {}) {
   let startX = 0, startY = 0;
   let startLeft = 0, startTop = 0;
   let dragDx = 0, dragDy = 0;
-  let dragFrame = 0;
   let snapHint = null;
   // Whether the pointer actually moved beyond a small threshold this drag.
   // Used to suppress the synthetic click the browser fires on mouseup —
@@ -113,27 +112,17 @@ export function makeWindowDraggable(modal, options = {}) {
   let movedDuringDrag = false;
   const MOVE_THRESHOLD = 4;
 
-  // Pointer events can arrive much faster than the browser can paint. Moving
-  // a large panel with left/top on every event forces layout for the whole
-  // panel and made dragging visibly stutter. Keep movement on the compositor
-  // during the gesture, capped to one transform update per animation frame,
-  // then commit the final coordinates once when the gesture ends.
-  const _paintDragTransform = () => {
-    dragFrame = 0;
+  // Move immediately on the compositor. A deferred animation-frame write can
+  // be starved while Electron is processing a fast native drag, leaving the
+  // panel frozen until mouseup (then apparently teleporting). Direct transform
+  // writes remain layout-free and give edge docking live pointer feedback.
+  const _applyDragTransform = (dx, dy) => {
+    dragDx = dx;
+    dragDy = dy;
     content.style.transform = `translate3d(${dragDx}px, ${dragDy}px, 0)`;
   };
 
-  const _scheduleDragTransform = (dx, dy) => {
-    dragDx = dx;
-    dragDy = dy;
-    if (!dragFrame) dragFrame = requestAnimationFrame(_paintDragTransform);
-  };
-
   const _commitDragTransform = () => {
-    if (dragFrame) {
-      cancelAnimationFrame(dragFrame);
-      dragFrame = 0;
-    }
     content.style.left = (startLeft + dragDx) + 'px';
     content.style.top = (startTop + dragDy) + 'px';
     content.style.transform = 'none';
@@ -264,7 +253,7 @@ export function makeWindowDraggable(modal, options = {}) {
     if (Math.abs(cx - startX) > MOVE_THRESHOLD || Math.abs(cy - startY) > MOVE_THRESHOLD) {
       movedDuringDrag = true;
     }
-    _scheduleDragTransform(cx - startX, cy - startY);
+    _applyDragTransform(cx - startX, cy - startY);
     // Corner guard: in the top fullscreen band the side docks stay OFF, so a
     // top corner only ever snaps to fullscreen — never the corner hybrid.
     const inTopBand = cy <= SNAP_PX;

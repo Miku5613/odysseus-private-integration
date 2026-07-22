@@ -1,6 +1,7 @@
 """Workspace API - browse server directories to pick a tool workspace folder."""
 import os
 from fastapi import APIRouter, Request, HTTPException, Query
+from pydantic import BaseModel
 
 from src.auth_helpers import get_current_user
 from src.tool_security import owner_is_admin_or_single_user
@@ -10,6 +11,14 @@ from src.tool_security import owner_is_admin_or_single_user
 # type/paste a path to jump straight in instead.
 _MAX_BROWSE_DIRS = 500
 _MAX_TREE_ENTRIES = 500
+_MAX_WORKSPACE_NOTE_BYTES = 5 * 1024 * 1024
+_WORKSPACE_NOTE_EXTENSIONS = frozenset({".md", ".markdown", ".txt"})
+
+
+class WorkspaceNoteWrite(BaseModel):
+    root: str
+    path: str
+    content: str
 
 
 def _resolve_workspace_tree_path(root: str, relative: str = "") -> tuple[str, str]:
@@ -66,6 +75,67 @@ def _workspace_tree_entries(root: str, relative: str = "") -> dict:
         "relative": clean_relative,
         "entries": entries[:_MAX_TREE_ENTRIES],
         "truncated": len(entries) > _MAX_TREE_ENTRIES,
+    }
+
+
+def _resolve_workspace_note_path(root: str, relative: str) -> tuple[str, str]:
+    from src.tool_execution import vet_workspace
+
+    canonical_root = vet_workspace(str(root or "").strip())
+    if not canonical_root:
+        raise ValueError("Workspace root is not allowed")
+
+    root_path = os.path.realpath(canonical_root)
+    clean_relative = str(relative or "").replace("\\", "/").strip("/")
+    if not clean_relative:
+        raise ValueError("A workspace note path is required")
+
+    unresolved = os.path.join(root_path, clean_relative)
+    candidate = os.path.realpath(unresolved)
+    try:
+        if os.path.normcase(os.path.commonpath([root_path, candidate])) != os.path.normcase(root_path):
+            raise ValueError("Workspace note path escapes the workspace root")
+    except ValueError as exc:
+        raise ValueError("Workspace note path escapes the workspace root") from exc
+
+    if os.path.islink(unresolved):
+        raise ValueError("Symlinked workspace notes are not supported")
+    if os.path.splitext(candidate)[1].casefold() not in _WORKSPACE_NOTE_EXTENSIONS:
+        raise ValueError("Atlas can open only Markdown or text workspace notes")
+    if not os.path.isfile(candidate):
+        raise ValueError("Workspace note does not exist")
+    return root_path, candidate
+
+
+def _read_workspace_note(root: str, relative: str) -> dict:
+    root_path, note_path = _resolve_workspace_note_path(root, relative)
+    size = os.path.getsize(note_path)
+    if size > _MAX_WORKSPACE_NOTE_BYTES:
+        raise ValueError("Workspace note is too large to open in Atlas")
+    with open(note_path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    return {
+        "root": root_path,
+        "path": os.path.relpath(note_path, root_path).replace("\\", "/"),
+        "content": content,
+        "size": size,
+        "mtime": os.path.getmtime(note_path),
+    }
+
+
+def _write_workspace_note(root: str, relative: str, content: str) -> dict:
+    root_path, note_path = _resolve_workspace_note_path(root, relative)
+    encoded = str(content).encode("utf-8")
+    if len(encoded) > _MAX_WORKSPACE_NOTE_BYTES:
+        raise ValueError("Workspace note is too large to save from Atlas")
+    with open(note_path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(str(content))
+    return {
+        "root": root_path,
+        "path": os.path.relpath(note_path, root_path).replace("\\", "/"),
+        "size": len(encoded),
+        "mtime": os.path.getmtime(note_path),
+        "saved": True,
     }
 
 
@@ -153,6 +223,32 @@ def setup_workspace_routes():
         try:
             return _workspace_tree_entries(root, relative)
         except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/file")
+    def read_file(
+        request: Request,
+        root: str = Query(default=""),
+        path: str = Query(default=""),
+    ):
+        """Read one Markdown/text note confined to the selected workspace."""
+        owner = get_current_user(request)
+        if not owner_is_admin_or_single_user(owner):
+            raise HTTPException(status_code=403, detail="Workspace notes are admin-only")
+        try:
+            return _read_workspace_note(root, path)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.put("/file")
+    def write_file(request: Request, payload: WorkspaceNoteWrite):
+        """Save an existing Markdown/text note inside the selected workspace."""
+        owner = get_current_user(request)
+        if not owner_is_admin_or_single_user(owner):
+            raise HTTPException(status_code=403, detail="Workspace notes are admin-only")
+        try:
+            return _write_workspace_note(payload.root, payload.path, payload.content)
+        except (OSError, UnicodeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return router

@@ -14,7 +14,8 @@ def test_atlas_ui_displays_active_workspace_root_card() -> None:
     assert "getWorkspace" in atlas_js
     assert "atlas-root-card" in atlas_js
     assert "Workspace is linked" in atlas_js
-    assert "Atlas file tree is not implemented yet" in atlas_js
+    assert "Open Markdown or text notes below to view and edit them in Atlas" in atlas_js
+    assert "Atlas file tree is not implemented yet" not in atlas_js
     assert "clear Workspace to switch Atlas roots or import" in atlas_js
 
 

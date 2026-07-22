@@ -73,7 +73,8 @@ function _renderWorkspaceTreeLevel(container, relative = '', depth = 0) {
   for (const entry of data.entries) {
     const row = document.createElement('button');
     row.type = 'button';
-    row.className = `atlas-worktree-row ${entry.kind}`;
+    const isWorkspaceNote = entry.kind === 'file' && /\.(md|markdown|txt)$/i.test(entry.path);
+    row.className = `atlas-worktree-row ${entry.kind}${isWorkspaceNote ? ' openable' : ''}`;
     row.style.paddingLeft = `${8 + depth * 12}px`;
     row.title = entry.path;
 
@@ -105,8 +106,13 @@ function _renderWorkspaceTreeLevel(container, relative = '', depth = 0) {
         container.appendChild(children);
         _renderWorkspaceTreeLevel(children, entry.path, depth + 1);
       }
+    } else if (isWorkspaceNote) {
+      row.classList.toggle('active', _currentSource === 'workspace' && _current === entry.path);
+      row.title = `Open ${entry.path} in Atlas`;
+      row.onclick = () => openWorkspaceNote(entry.path);
     } else {
-      row.onclick = () => showToast(`Read-only workspace file: ${entry.path}`);
+      row.classList.add('unsupported');
+      row.title = `${entry.path} is not a Markdown/text note`;
     }
   }
 }
@@ -127,7 +133,7 @@ function _renderRootSection(container) {
       <div class="atlas-root-card" title="${_atlasEsc(root)}">
         <div class="atlas-root-name">${_atlasEsc(_pathBaseName(root))}${indexed ? indexIconMarkup('This workspace has a searchable index') : ''}</div>
         <div class="atlas-root-path">${_atlasEsc(root)}</div>
-        <div class="atlas-root-note">Workspace is linked. Browse its read-only worktree below; clear Workspace to switch Atlas roots or import.</div>
+        <div class="atlas-root-note">Workspace is linked. Open Markdown or text notes below to view and edit them in Atlas; clear Workspace to switch Atlas roots or import.</div>
       </div>
       <div class="atlas-worktree" data-el="workspace-tree"></div>
     </div>`;
@@ -191,6 +197,8 @@ async function _resetSessionNotes() {
   }
 
   _current = null;
+  _currentSource = null;
+  _currentWorkspaceRoot = '';
   _dirty = false;
   _selectedFolder = '';
   _emptyFolders.clear();
@@ -256,6 +264,8 @@ let _modal = null;
 let _open = false;
 let _notes = [];          // [{path, title, tags, size, mtime}]
 let _current = null;      // path of the open note
+let _currentSource = null; // 'session' or 'workspace'
+let _currentWorkspaceRoot = '';
 let _dirty = false;
 let _saveTimer = null;
 let _graphOpen = false;   // graph docked as a right-side panel
@@ -286,6 +296,11 @@ async function _loadWorkspaceTree(relative = '') {
 async function _refreshWorkspaceContext({ forceIndexes = false } = {}) {
   const root = _activeWorkspaceRoot();
   if (root !== _workspaceTreeRoot) {
+    if (_currentSource === 'workspace' && _currentWorkspaceRoot && root !== _currentWorkspaceRoot) {
+      if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+      if (_dirty) await _saveCurrent();
+      _clearOpenNoteView();
+    }
     _workspaceTreeRoot = root;
     _workspaceTreeCache.clear();
     _workspaceTreeExpanded.clear();
@@ -390,7 +405,7 @@ function _buildModal() {
     <style>
       #atlas-modal { --atlas-left-w:260px; --atlas-right-w:260px; --atlas-graph-w:340px; }
       #atlas-modal .modal-content { width: min(1200px, 96vw); height: 88vh; display:flex; flex-direction:column; border-radius:16px 10px 10px 10px; overflow:hidden; clip-path:inset(0 round 16px 10px 10px 10px); position:relative; }
-      #atlas-modal .modal-content::after { content:""; position:absolute; inset:0; pointer-events:none; border:1px solid rgba(220,150,210,.28); border-radius:16px 10px 10px 10px; box-shadow:inset 0 1px 0 rgba(255,255,255,.025); z-index:5; }
+      #atlas-modal .modal-content::after { display:none; }
       #atlas-modal .atlas-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--bubble-border,#333); border-top-left-radius:16px; }
       #atlas-modal .atlas-title-wrap { display:flex; flex-direction:column; gap:1px; min-width:0; }
       #atlas-modal .atlas-title { background:none; border:0; color:inherit; padding:0; margin:0; font-family:var(--ui-font,Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif); font-size:16px; font-weight:800; letter-spacing:.16px; cursor:pointer; text-align:left; }
@@ -404,7 +419,8 @@ function _buildModal() {
       #atlas-modal .atlas-head-menu-item { display:flex; width:100%; align-items:center; border:0; border-radius:5px; padding:7px 9px; background:transparent; color:inherit; text-align:left; cursor:pointer; font-size:12px; }
       #atlas-modal .atlas-head-menu-item:hover { background:rgba(127,127,127,.18); }
       #atlas-modal .atlas-head-menu-item.active { color:var(--brand-color,#f19ad7); }
-      #atlas-modal .atlas-icon-btn { width:30px; height:28px; padding:0; display:inline-flex; align-items:center; justify-content:center; }
+      #atlas-modal .atlas-refresh-btn { min-width:86px; height:30px; padding:0 11px; display:inline-flex; align-items:center; justify-content:center; gap:7px; font-weight:600; }
+      #atlas-modal .atlas-refresh-btn svg { flex:0 0 auto; }
       #atlas-modal .atlas-tabs { display:flex; align-items:center; gap:4px; padding:6px 10px; border-bottom:1px solid var(--bubble-border,#333); }
       #atlas-modal .atlas-tab { background:transparent; border:0; border-bottom:2px solid transparent; color:inherit; opacity:.62; border-radius:0; padding:6px 10px 7px; cursor:pointer; font-size:12px; }
       #atlas-modal .atlas-tab:hover { background:transparent; opacity:.9; }
@@ -436,9 +452,12 @@ function _buildModal() {
       #atlas-modal .atlas-root-path { font-size:10px; opacity:.56; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; }
       #atlas-modal .atlas-root-note { font-size:11px; opacity:.52; margin-top:6px; line-height:1.35; }
       #atlas-modal .atlas-worktree { margin-top:7px; max-height:240px; overflow:auto; overscroll-behavior:contain; border-top:1px solid color-mix(in srgb,var(--bubble-border,#333) 55%,transparent); padding-top:5px; }
-      #atlas-modal .atlas-worktree-row { width:100%; min-width:0; display:flex; align-items:center; gap:4px; border:0; border-radius:5px; background:transparent; color:inherit; padding-top:4px; padding-right:6px; padding-bottom:4px; cursor:pointer; text-align:left; font-size:11px; }
+      #atlas-modal .atlas-worktree-row { width:100%; min-width:0; display:flex; align-items:center; gap:4px; border:0; border-radius:5px; background:transparent; color:inherit; padding-top:4px; padding-right:8px; padding-bottom:4px; cursor:pointer; text-align:left; font-family:inherit; font-size:13px; line-height:1.25; }
       #atlas-modal .atlas-worktree-row:hover { background:rgba(127,127,127,.12); }
-      #atlas-modal .atlas-worktree-row.file { opacity:.72; }
+      #atlas-modal .atlas-worktree-row.active { background:var(--section-accent,rgba(120,140,255,.18)); }
+      #atlas-modal .atlas-worktree-row.directory { opacity:.85; font-weight:500; }
+      #atlas-modal .atlas-worktree-row.file { opacity:.82; }
+      #atlas-modal .atlas-worktree-row.file.unsupported { opacity:.42; cursor:default; }
       #atlas-modal .atlas-worktree-twisty { width:12px; flex:0 0 12px; opacity:.58; text-align:center; }
       #atlas-modal .atlas-worktree-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       #atlas-modal .atlas-worktree-status { padding:7px 8px; font-size:10px; opacity:.48; }
@@ -493,7 +512,7 @@ function _buildModal() {
           <span class="atlas-subtitle" data-el="workspace-title">Atlas workspace · no active Workspace</span>
         </div>
         <span class="grow"></span>
-        <button class="atlas-btn atlas-icon-btn" data-act="refresh" title="Refresh Atlas" aria-label="Refresh Atlas"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg></button>
+        <button class="atlas-btn atlas-refresh-btn" data-act="refresh" title="Reload notes, workspace files, and index status" aria-label="Refresh Atlas"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg><span>Refresh</span></button>
         <div class="atlas-head-menu">
           <button class="atlas-btn atlas-menu-trigger" type="button" data-menu-trigger="view" aria-expanded="false" title="Open view options">View <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg></button>
           <div class="atlas-head-dropdown" data-menu="view" hidden>
@@ -740,6 +759,8 @@ function _clearOpenNoteView() {
   if (!_modal) return;
   if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
   _current = null;
+  _currentSource = null;
+  _currentWorkspaceRoot = '';
   _dirty = false;
   const ta = _modal.querySelector('textarea');
   if (ta) ta.value = '';
@@ -754,8 +775,11 @@ function _clearOpenNoteView() {
 async function _refreshAtlasUi() {
   // UI hygiene refresh only. Re-read the note list and graph, then clear the
   // open board view. Workspace selection and chat context are intentionally untouched.
+  if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+  if (_dirty) await _saveCurrent();
   await _reloadNotes();
   await _loadFolders();
+  _workspaceTreeCache.clear();
   await _refreshWorkspaceContext({ forceIndexes: true });
   _renderList(_notes);
   _clearOpenNoteView();
@@ -927,7 +951,7 @@ function _renderTreeLevel(container, node, depth) {
   for (const it of node.files.sort((a, b) => (a.title || a.path).localeCompare(b.title || b.path))) {
     const row = document.createElement('div');
     const isBase = it.path.endsWith('.base');
-    row.className = 'atlas-row' + (it.path === _current ? ' active' : '');
+    row.className = 'atlas-row' + (_currentSource === 'session' && it.path === _current ? ' active' : '');
     row.style.paddingLeft = (8 + depth * 12 + 14) + 'px';
     row.draggable = true;
     row.innerHTML = `<span class="label"></span>${isBase ? '<span class="base-badge">BASE</span>' : ''}`;
@@ -953,7 +977,7 @@ function _wireDropTarget(el, folder) {
     if (dest === src) return;
     try {
       const res = await apiSend('/rename', 'POST', { path: src, new_path: dest });
-      if (_current === src) _current = res.path;
+      if (_currentSource === 'session' && _current === src) _current = res.path;
       await _reloadNotes();
     } catch (err) { showError('Move failed: ' + err.message); }
   });
@@ -974,6 +998,8 @@ async function openNote(path) {
   try {
     const data = await apiGet('/note', { path });
     _current = data.path;
+    _currentSource = 'session';
+    _currentWorkspaceRoot = '';
     _selectedFolder = data.path.includes('/') ? data.path.slice(0, data.path.lastIndexOf('/')) : '';
     _dirty = false;
     _setAtlasPane('edit');
@@ -985,7 +1011,41 @@ async function openNote(path) {
   } catch (e) { console.error('openNote', e); }
 }
 
+async function openWorkspaceNote(path) {
+  if (_dirty) { clearTimeout(_saveTimer); await _saveCurrent(); }
+  const root = _activeWorkspaceRoot();
+  if (!root) {
+    showError('The active workspace is no longer available.');
+    return;
+  }
+
+  const url = new URL('/api/workspace/file', location.origin);
+  url.searchParams.set('root', root);
+  url.searchParams.set('path', path);
+  try {
+    const response = await fetch(url, { credentials: 'same-origin' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `Workspace note ${response.status}`);
+    _current = data.path;
+    _currentSource = 'workspace';
+    _currentWorkspaceRoot = data.root || root;
+    _dirty = false;
+    _setAtlasPane('edit');
+    _modal.querySelector('textarea').value = data.content || '';
+    _modal.querySelector('[data-el="path"]').textContent = `Workspace · ${data.path}`;
+    _renderPreview(data.content || '', []);
+    _renderBacklinks([]);
+    _renderList(_notes);
+  } catch (error) {
+    showError('Could not open workspace note: ' + error.message);
+  }
+}
+
 async function _deleteCurrentNote() {
+  if (_currentSource === 'workspace' && _current) {
+    showToast('Workspace notes can be edited here, but deletion stays outside Atlas.');
+    return;
+  }
   if (_current) {
     const path = _current;
     const name = path.split('/').pop();
@@ -997,6 +1057,8 @@ async function _deleteCurrentNote() {
       if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
       await apiSend('/delete', 'POST', { path });
       _current = null;
+      _currentSource = null;
+      _currentWorkspaceRoot = '';
       _dirty = false;
 
       const ta = _modal.querySelector('textarea');
@@ -1132,11 +1194,31 @@ async function _saveCurrent() {
   if (!_current || !_dirty) return;
   const content = _modal.querySelector('textarea').value;
   try {
-    await apiSend('/note', 'PUT', { path: _current, content });
+    if (_currentSource === 'workspace') {
+      const response = await fetch('/api/workspace/file', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          root: _currentWorkspaceRoot,
+          path: _current,
+          content,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `Workspace save ${response.status}`);
+    } else {
+      await apiSend('/note', 'PUT', { path: _current, content });
+    }
     _dirty = false;
     // Refresh the cached list (title/mtime may have changed) without stealing focus.
-    apiGet('/notes').then((d) => { _notes = d.notes || []; }).catch(() => {});
-  } catch (e) { console.error('save', e); }
+    if (_currentSource === 'session') {
+      apiGet('/notes').then((d) => { _notes = d.notes || []; }).catch(() => {});
+    }
+  } catch (e) {
+    console.error('save', e);
+    showError('Could not save note: ' + e.message);
+  }
 }
 
 // ── preview (with [[wikilink]] + ![[embed]] rendering) ───────────────────────

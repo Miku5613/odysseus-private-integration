@@ -14,13 +14,14 @@ def _read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_panel_drag_is_frame_batched_and_compositor_driven():
+def test_panel_drag_is_immediate_and_compositor_driven():
     source = _read("static/js/windowDrag.js")
 
-    assert "requestAnimationFrame(_paintDragTransform)" in source
+    assert "_applyDragTransform(cx - startX, cy - startY)" in source
     assert "translate3d(${dragDx}px, ${dragDy}px, 0)" in source
     assert "content.style.willChange = 'transform'" in source
     assert "_commitDragTransform();" in source
+    assert "requestAnimationFrame(_paintDragTransform)" not in source
     windowed_move = source.split("// Windowed: just follow the cursor.", 1)[1].split(
         "// Corner guard:", 1
     )[0]
@@ -46,6 +47,13 @@ def test_saved_roots_and_atlas_index_affordances_are_present():
     assert "data-menu-trigger=\"view\"" in atlas
     assert "data-menu-trigger=\"more\"" in atlas
     assert "data-el=\"workspace-tree\"" in atlas
+    assert "openWorkspaceNote(entry.path)" in atlas
+    assert "_currentSource === 'workspace'" in atlas
+    assert "fetch('/api/workspace/file'" in atlas
+    assert 'class="atlas-btn atlas-refresh-btn"' in atlas
+    assert "<span>Refresh</span>" in atlas
+    assert "#atlas-modal .modal-content::after { display:none; }" in atlas
+    assert "font-size:13px" in atlas
     assert "file tree is not implemented" not in atlas
 
 
@@ -83,6 +91,35 @@ def test_workspace_tree_route_is_registered():
         for method in (route.methods or set())
     }
     assert ("/api/workspace/tree", "GET") in surface
+    assert ("/api/workspace/file", "GET") in surface
+    assert ("/api/workspace/file", "PUT") in surface
+
+
+def test_workspace_note_read_write_is_confined(tmp_path, monkeypatch):
+    from routes import workspace_routes
+    from src import tool_execution
+
+    root = tmp_path / "Vault"
+    root.mkdir()
+    note = root / "note.md"
+    note.write_text("# Original\n", encoding="utf-8")
+    (root / "image.png").write_bytes(b"png")
+    monkeypatch.setattr(tool_execution, "vet_workspace", lambda path: str(root))
+
+    loaded = workspace_routes._read_workspace_note(str(root), "note.md")
+    assert loaded["path"] == "note.md"
+    assert loaded["content"] == "# Original\n"
+
+    saved = workspace_routes._write_workspace_note(
+        str(root), "note.md", "# Edited in Atlas\n"
+    )
+    assert saved["saved"] is True
+    assert note.read_text(encoding="utf-8") == "# Edited in Atlas\n"
+
+    with pytest.raises(ValueError, match="escapes"):
+        workspace_routes._read_workspace_note(str(root), "../outside.md")
+    with pytest.raises(ValueError, match="Markdown or text"):
+        workspace_routes._read_workspace_note(str(root), "image.png")
 
 
 def test_changed_javascript_parses_and_has_no_nul_or_mojibake():
