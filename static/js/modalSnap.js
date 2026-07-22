@@ -807,7 +807,9 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     handle.style.position = 'fixed';
     handle.style.top = '0';
     handle.style.bottom = '0';
-    handle.style.width = '10px';
+    // Keep the dock seam usable above floating panels without laying a wide,
+    // invisible interaction strip across their controls.
+    handle.style.width = '4px';
     handle.style.cursor = 'col-resize';
     // Invisible at rest, accent stripe fades in on hover (see
     // .edge-dock-resize-handle CSS rule).
@@ -816,7 +818,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     handle.style.pointerEvents = 'auto';
     handle.style.touchAction = 'none';
     handle.style.display = 'none';
-    handle.title = 'Drag to resize docked window';
+    handle.setAttribute('aria-label', 'Drag to resize docked window');
     document.body.appendChild(handle);
   }
 
@@ -920,9 +922,9 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
         continue;
       }
       _setStyle(handle, 'display', 'block');
-      _setStyle(handle, 'left', (x - 5) + 'px');
+      _setStyle(handle, 'left', (x - 2) + 'px');
       // Keep the dock seam usable even while another floating panel is open.
-      // The seam is only ten pixels wide and intentionally sits above panels
+      // The seam is only four pixels wide and intentionally sits above panels
       // so opening a second tool never disables resizing the docked one.
       _setStyle(handle, 'zIndex', String(_dockHandleZIndex(owner)));
     }

@@ -114,7 +114,7 @@ function _renderQuickStart() {
 
   const rootsHtml = roots.length
     ? roots.map((r) => `
-      <button type="button" class="workspace-quick-row workspace-authorized-root" data-path="${uiModule.esc(r.path)}" title="${uiModule.esc(r.path)}">
+      <button type="button" class="workspace-quick-row workspace-authorized-root" data-path="${uiModule.esc(r.path)}" title="${uiModule.esc(`${r.label || _basename(r.path)} — ${r.path}`)}">
         <span class="workspace-quick-name">${uiModule.esc(r.label || _basename(r.path))}${r.is_indexed ? indexIconMarkup('This saved root has a searchable index') : ''}</span>
         <span class="workspace-quick-path">${uiModule.esc(r.path)}</span>
       </button>`).join('')

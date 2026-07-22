@@ -38,6 +38,10 @@ def test_saved_roots_and_atlas_index_affordances_are_present():
     assert "This saved root has a searchable index" in workspace
     assert ".workspace-saved-roots-list" in css
     assert "overflow-y: auto" in css
+    assert "overflow-x: hidden" in css
+    assert ".workspace-saved-roots-list::-webkit-scrollbar { width: 5px; height: 0; }" in css
+    assert "text-overflow: ellipsis" in css
+    assert "`${r.label || _basename(r.path)} — ${r.path}`" in workspace
     assert "Embedding size:" in indexes
     assert "embedding_size_mb" in indexes
     assert "findIndexForPath" in atlas
@@ -51,7 +55,7 @@ def test_saved_roots_and_atlas_index_affordances_are_present():
     assert ".atlas-root-section { flex:1 1 auto; min-height:0; display:flex" in atlas
     assert ".atlas-worktree { margin-top:7px; flex:1 1 auto; min-height:0" in atlas
     assert ".atlas-editor { display:flex; flex-direction:column; overflow:hidden" in atlas
-    assert "height:100%; min-height:0; box-sizing:border-box; overflow:auto" in atlas
+    assert "height:100%; min-height:0; max-height:none; box-sizing:border-box; overflow:auto" in atlas
     assert "_setAtlasPane('edit');" not in atlas
     assert "workspaceApiGet('/graph', { root })" in atlas
     assert "_loadWorkspaceBacklinks(_currentWorkspaceRoot, data.path)" in atlas
@@ -63,6 +67,17 @@ def test_saved_roots_and_atlas_index_affordances_are_present():
     assert "#atlas-modal .modal-content::after { display:none; }" in atlas
     assert "font-size:13px" in atlas
     assert "file tree is not implemented" not in atlas
+
+
+def test_dock_resize_seam_stays_active_without_covering_floating_controls():
+    source = _read("static/js/modalSnap.js")
+    css = _read("static/style.css")
+
+    assert "handle.style.width = '4px'" in source
+    assert "_setStyle(handle, 'left', (x - 2) + 'px')" in source
+    assert "handle.setAttribute('aria-label', 'Drag to resize docked window')" in source
+    assert "handle.title = 'Drag to resize docked window'" not in source
+    assert "transparent 3px 4px" in css
 
 
 def test_workspace_tree_is_sorted_confined_and_skips_hidden(tmp_path, monkeypatch):

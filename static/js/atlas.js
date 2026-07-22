@@ -493,7 +493,7 @@ function _buildModal() {
       #atlas-modal .atlas-editor, #atlas-modal .atlas-preview { flex:1; height:100%; min-height:0; min-width:0; box-sizing:border-box; padding:14px; }
       #atlas-modal .atlas-editor { display:flex; flex-direction:column; overflow:hidden; border-right:1px solid var(--bubble-border,#333); }
       #atlas-modal .atlas-preview { overflow:auto; }
-      #atlas-modal .atlas-editor textarea { flex:1 1 auto; width:100%; height:100%; min-height:0; box-sizing:border-box; overflow:auto; resize:none; border:0; background:transparent; color:inherit; font-family:var(--code-font,monospace); font-size:13px; line-height:1.55; outline:none; }
+      #atlas-modal .atlas-editor textarea { flex:1 1 auto; width:100%; height:100%; min-height:0; max-height:none; box-sizing:border-box; overflow:auto; resize:none; border:0; background:transparent; color:inherit; font-family:var(--code-font,monospace); font-size:13px; line-height:1.55; outline:none; }
       #atlas-modal .atlas-preview a.atlas-wikilink { color:var(--brand-color,#6cf); text-decoration:none; border-bottom:1px dashed currentColor; cursor:pointer; }
       #atlas-modal .atlas-preview a.atlas-wikilink.missing { color:var(--accent-error,#e66); opacity:.8; }
       #atlas-modal .atlas-right { display:none; width:var(--atlas-right-w,260px); flex:0 0 var(--atlas-right-w,260px); border-left:1px solid var(--bubble-border,#333); overflow:auto; padding:10px; font-size:12px; }
