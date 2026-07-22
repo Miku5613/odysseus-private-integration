@@ -12,7 +12,7 @@ _TRUE_VALUES = {"1", "true", "yes", "on", "contract"}
 
 
 def contract_runtime_enabled() -> bool:
-    return (os.getenv("ODYSSEUS_ENABLE_CONTRACT_RUNTIME", "") or "").strip().lower() in _TRUE_VALUES
+    return (os.getenv("ODYSSEUS_ENABLE_CONTRACT_RUNTIME", "1") or "").strip().lower() in _TRUE_VALUES
 
 
 def looks_like_readonly_contract_task(message: str | None) -> bool:

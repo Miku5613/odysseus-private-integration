@@ -106,6 +106,8 @@ async def stream_general_supervisor_sse(
     owner: str | None = None,
     workspace: str | None = None,
     active_document: Any = None,
+    disabled_tools: set[str] | None = None,
+    tool_policy: Any = None,
     llm_caller: AsyncLlmCaller = llm_call_async,
     dispatcher: AsyncDispatcher = dispatch_supervisor_decision_async,
     **kwargs: Any,
@@ -167,6 +169,8 @@ async def stream_general_supervisor_sse(
             "workspace": workspace,
             "active_doc": active_document,
             "root_id": kwargs.get("root_id"),
+            "disabled_tools": tuple(disabled_tools or ()),
+            "tool_policy": tool_policy,
         },
     }
 

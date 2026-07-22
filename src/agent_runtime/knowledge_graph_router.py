@@ -179,6 +179,7 @@ MUTATION_PATTERNS = [
     r"\bdraft\b",
     r"\bmake\s+a\s+note\b",
     r"\bnew\s+note\b",
+    r"\brewrite\b",
 ]
 
 DESTRUCTIVE_PATTERNS = [

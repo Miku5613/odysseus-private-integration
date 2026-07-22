@@ -11,12 +11,17 @@ from .knowledge_graph_router import (
     build_human_clarification_prompt,
     evaluate_knowledge_request,
 )
+from .runtime_router import (
+    is_casual_conversation_request,
+    route_agent_runtime,
+)
 from .knowledge_vault_semantic import (
     get_semantic_vault_stats,
     search_semantic_vault_index,
 )
 from .daily_driver_preface import generate_intent_preface
 from .knowledge_worker import run_knowledge_worker
+from .knowledge_llm_response_bridge import try_knowledge_llm_response
 from .supervisor_contracts import WorkerHandoff
 
 
@@ -64,6 +69,54 @@ def is_semantic_vault_search_request(message: str) -> bool:
     ]
 
     return any(marker in text for marker in semantic_markers)
+
+
+def should_intercept_workspace_knowledge(message: str) -> bool:
+    """Treat an active workspace as authoritative context for safe questions.
+
+    The workspace is request-scoped context, so users should not have to repeat
+    "in my notes" on every follow-up. Clear code inspection, current-world
+    research, and short social turns remain with their dedicated runtimes.
+    """
+
+    text = str(message or "").strip()
+    if not text:
+        return False
+
+    decision = evaluate_knowledge_request(text)
+    if decision.intent != "not_knowledge":
+        return True
+
+    if is_casual_conversation_request(text):
+        return False
+
+    runtime = route_agent_runtime(text)
+    if runtime.target_runtime in {"contract", "general"}:
+        return False
+
+    low = text.lower()
+    if re.search(
+        r"\b(?:research|latest|news|web|online|browser|google|search online|look up online)\b",
+        low,
+    ):
+        return False
+
+    if re.search(
+        r"\b(?:backend|frontend|source code|codebase|implementation|route|function|class|module|callsite|handler)\b|"
+        r"(?:^|\s)(?:src|routes|static/js)/|\.(?:py|js|ts|tsx|jsx)\b",
+        low,
+    ):
+        return False
+
+    # A question or contextual read request inside an active workspace should
+    # consult that workspace before claiming the information is unavailable.
+    return bool(
+        "?" in text
+        or re.search(
+            r"^\s*(?:what|when|which|where|who|how|should|do|did|was|were|is|are|can|could|would|remind|summarize|list|help|give|tell)\b",
+            low,
+        )
+    )
 
 
 def extract_semantic_query(message: str) -> str:
@@ -260,6 +313,7 @@ def run_knowledge_semantic_chat_turn(
     *,
     workspace: str | None = None,
     root_id: str | None = None,
+    llm_config: dict[str, Any] | None = None,
 ) -> tuple[str, list[str], list[dict[str, Any]], dict[str, Any]]:
     started = time.time()
     frames: list[str] = []
@@ -282,22 +336,67 @@ def run_knowledge_semantic_chat_turn(
         "content": "Checking intent, confidence, and graph safety before semantic search.",
     }))
 
+    runtime_status = {
+        "intent": f"workspace_{getattr(decision, 'intent', 'knowledge')}",
+        "runtime": "knowledge",
+        "runtime_family": "workspace_semantic",
+        "safe_readonly": bool(getattr(decision, "is_read_only", True)),
+        "safety_profile": (
+            "read_only"
+            if getattr(decision, "is_read_only", True)
+            else "policy_gated"
+        ),
+        "reason": (
+            "The validated active workspace is authoritative for this "
+            "knowledge request."
+        ),
+    }
+
+    runtime_call_id = "runtime_decision_" + uuid.uuid4().hex[:10]
+    runtime_output = json.dumps(runtime_status, indent=2, ensure_ascii=False)
+    frames.append(sse_frame({
+        "type": "tool_start",
+        "id": runtime_call_id,
+        "call_id": runtime_call_id,
+        "tool": "runtime_decision",
+        "command": "Runtime decision",
+    }))
+    frames.append(sse_frame({
+        "type": "tool_output",
+        "id": runtime_call_id,
+        "call_id": runtime_call_id,
+        "tool": "runtime_decision",
+        "command": "Runtime decision",
+        "output": runtime_output,
+        "exit_code": 0,
+        "runtime_decision": runtime_status,
+    }))
+    tool_events.append({
+        "type": "tool_output",
+        "tool": "runtime_decision",
+        "command": "Runtime decision",
+        "output": runtime_output,
+        "exit_code": 0,
+        "runtime_decision": runtime_status,
+    })
+
     # DAILY_DRIVER_PREFACE_V016F1C_START
-    try:
-        _preface = generate_intent_preface(
-            user_request=message,
-            intent="vault_search",
-            resource=f"{source_label} notes",
-            next_action="semantic_vault_search",
-            safety="read-only",
-            timeout_s=8.0,
-        )
-        _preface_text = str(_preface.get("text") or "").strip()
-        if _preface_text:
-            frames.append(sse_frame({"delta": _preface_text + "\n\n"}))
-    except Exception:
-        # Preface is UX-only. Never block semantic search.
-        pass
+    if getattr(decision, "is_read_only", True):
+        try:
+            _preface = generate_intent_preface(
+                user_request=message,
+                intent="vault_search",
+                resource=f"{source_label} notes",
+                next_action="semantic_vault_search",
+                safety="read-only",
+                timeout_s=8.0,
+            )
+            _preface_text = str(_preface.get("text") or "").strip()
+            if _preface_text:
+                frames.append(sse_frame({"delta": _preface_text + "\n\n"}))
+        except Exception:
+            # Preface is UX-only. Never block semantic search.
+            pass
     # DAILY_DRIVER_PREFACE_V016F1C_END
 
     decision_call_id = "knowledge_decision_" + uuid.uuid4().hex[:10]
@@ -325,6 +424,40 @@ def run_knowledge_semantic_chat_turn(
         "output": decision_output,
     })
 
+    if getattr(decision, "intent", "") in {"unsupported_mutation", "knowledge_propose", "knowledge_research"}:
+        if decision.intent == "unsupported_mutation":
+            final_answer = (
+                "I cannot execute this destructive workspace request directly. "
+                "The central policy path blocks delete, move, rename, purge, and "
+                "cleanup operations from automatic execution.\n\n"
+                "No files were changed. I can prepare a non-executing proposal; "
+                "any later mutating action would require explicit confirmation."
+            )
+        elif decision.intent == "knowledge_propose":
+            final_answer = (
+                "I cannot apply this workspace write automatically. No files were "
+                "changed. I can prepare a reviewable proposal or copy, and execution "
+                "would require explicit confirmation through the policy gate."
+            )
+        else:
+            final_answer = (
+                "This request requires the isolated research capability rather "
+                "than a workspace write. No notes were changed."
+            )
+        frames.append(sse_frame({"delta": final_answer}))
+        metrics = {
+            "runtime": "knowledge_semantic_chat",
+            "knowledge_runtime": "semantic_vault_search",
+            "knowledge_intent": getattr(decision, "intent", ""),
+            "knowledge_confidence": getattr(decision, "confidence", ""),
+            "needs_human": getattr(decision, "needs_human", False),
+            "read_only": True,
+            "write_capable": False,
+            "elapsed_s": round(time.time() - started, 3),
+        }
+        frames.append(sse_frame({"type": "metrics", "metrics": metrics}))
+        return final_answer, frames, tool_events, metrics
+
     # Respect HITL/blocks before any search.
     if getattr(decision, "needs_human", False) and getattr(decision, "intent", "") not in {"knowledge_read"}:
         final_answer = build_human_clarification_prompt(decision)
@@ -335,26 +468,6 @@ def run_knowledge_semantic_chat_turn(
             "knowledge_intent": getattr(decision, "intent", ""),
             "knowledge_confidence": getattr(decision, "confidence", ""),
             "needs_human": True,
-            "read_only": True,
-            "write_capable": False,
-            "elapsed_s": round(time.time() - started, 3),
-        }
-        frames.append(sse_frame({"type": "metrics", "metrics": metrics}))
-        return final_answer, frames, tool_events, metrics
-
-    if getattr(decision, "intent", "") in {"unsupported_mutation", "knowledge_propose", "knowledge_research"}:
-        final_answer = (
-            "I did not run semantic vault search because this request is not a safe read-only vault search.\n\n"
-            f"Router intent: `{getattr(decision, 'intent', '')}`\n"
-            "No notes were changed."
-        )
-        frames.append(sse_frame({"delta": final_answer}))
-        metrics = {
-            "runtime": "knowledge_semantic_chat",
-            "knowledge_runtime": "semantic_vault_search",
-            "knowledge_intent": getattr(decision, "intent", ""),
-            "knowledge_confidence": getattr(decision, "confidence", ""),
-            "needs_human": getattr(decision, "needs_human", False),
             "read_only": True,
             "write_capable": False,
             "elapsed_s": round(time.time() - started, 3),
@@ -447,6 +560,34 @@ def run_knowledge_semantic_chat_turn(
             source_label=source_label,
         )
 
+        llm_response = try_knowledge_llm_response(
+            llm_config=llm_config,
+            user_message=message,
+            deterministic_answer=final_answer,
+            runtime_decision=decision.to_dict(),
+            evidence_summary={
+                "source_authority": (
+                    "workspace" if explicit_workspace else "explicit_vault_request"
+                ),
+                "workspace": explicit_workspace or None,
+                "root_id": source_root_id,
+                "results": results,
+                "formatted_evidence": output,
+            },
+            hitl_policy={
+                "read_only": True,
+                "write_allowed": False,
+            },
+            legacy_fallback_contract={
+                "global_fallback_allowed": not bool(explicit_workspace),
+                "fail_closed": bool(explicit_workspace),
+            },
+        )
+        if llm_response.get("used_llm") and str(
+            llm_response.get("final_answer") or ""
+        ).strip():
+            final_answer = str(llm_response["final_answer"]).strip()
+
     frames.append(sse_frame({
         "type": "agent_step",
         "title": "Finalizing grounded note answer",
@@ -471,6 +612,14 @@ def run_knowledge_semantic_chat_turn(
         "root_id": source_root_id,
         "source_authority": "workspace" if explicit_workspace else "explicit_vault_request",
         "elapsed_s": round(time.time() - started, 3),
+        "llm_synthesis": bool(
+            'llm_response' in locals() and llm_response.get("used_llm")
+        ),
+        "llm_synthesis_status": (
+            llm_response.get("status")
+            if 'llm_response' in locals()
+            else "not_applicable"
+        ),
     }
     frames.append(sse_frame({"type": "metrics", "metrics": metrics}))
 

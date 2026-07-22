@@ -28,8 +28,14 @@ from src.agent_runtime.knowledge_llm_response_bridge import knowledge_llm_config
 from src.agent_runtime.knowledge_semantic_chat_bridge import (
     is_semantic_vault_search_request,
     run_knowledge_semantic_chat_turn,
+    should_intercept_workspace_knowledge,
 )
-from src.agent_runtime.runtime_router import route_agent_runtime, explain_runtime_route
+from src.agent_runtime.runtime_router import (
+    route_agent_runtime,
+    explain_runtime_route,
+    is_casual_conversation_request,
+)
+from src.agent_runtime.mutation_request_policy import evaluate_mutation_request
 
 def _runtime_trace_sse_frame(message: str, runtime_decision):
     try:
@@ -1553,7 +1559,7 @@ def setup_chat_routes(
                         _agent_langgraph_architecture_enabled
                         and _runtime_decision is not None
                         and chat_mode == "agent"
-                        and os.getenv("ODYSSEUS_AGENT_RUNTIME", "").strip().lower()
+                        and os.getenv("ODYSSEUS_AGENT_RUNTIME", "langgraph").strip().lower()
                         in {"contract", "general", "langgraph"}
                     )
                     if _runtime_decision is not None:
@@ -1577,6 +1583,7 @@ def setup_chat_routes(
                         and _runtime_decision is not None
                         and _runtime_decision.intent == "legacy_exploratory"
                         and _runtime_decision.target_runtime == "legacy"
+                        and not is_casual_conversation_request(message)
                     )
                     # LANGGRAPH_FIRST_AMBIGUOUS_AGENT_V1_END
 
@@ -1597,19 +1604,27 @@ def setup_chat_routes(
                     )
                     # KNOWLEDGE_RUNTIME_V016D_CHAT_BRANCH_START
                     try:
-                        _knowledge_runtime_enabled = (os.getenv("ODYSSEUS_ENABLE_KNOWLEDGE_RUNTIME", "1").strip().lower() not in {"0", "false", "no", "off"} and not _langgraph_first_ambiguous_agent)
-                        if _agent_langgraph_architecture_enabled and chat_mode == "agent" and _knowledge_runtime_enabled and should_intercept_knowledge_chat(message):
+                        _knowledge_runtime_enabled = os.getenv("ODYSSEUS_ENABLE_KNOWLEDGE_RUNTIME", "1").strip().lower() not in {"0", "false", "no", "off"}
+                        _knowledge_intercept = (
+                            should_intercept_knowledge_chat(message)
+                            or (
+                                bool(workspace)
+                                and should_intercept_workspace_knowledge(message)
+                            )
+                        )
+                        if _agent_langgraph_architecture_enabled and chat_mode == "agent" and _knowledge_runtime_enabled and _knowledge_intercept:
                             logger.info("[knowledge-runtime] routing request to v0.16-D knowledge chat bridge")
+                            _knowledge_llm_config = knowledge_llm_config_from_runtime_locals(locals())
+                            if _knowledge_llm_config.get("model") and not _knowledge_llm_config.get("url"):
+                                _knowledge_llm_config["url"] = "http://127.0.0.1:11434/v1/chat/completions"
+                                _knowledge_llm_config["url_source"] = "local_ollama_openai_compat_fallback"
                             if workspace or is_semantic_vault_search_request(message):
                                 _knowledge_full_response, _knowledge_frames, _knowledge_tool_events, _knowledge_metrics = run_knowledge_semantic_chat_turn(
                                     message,
                                     workspace=workspace or None,
+                                    llm_config=_knowledge_llm_config,
                                 )
                             else:
-                                _knowledge_llm_config = knowledge_llm_config_from_runtime_locals(locals())
-                                if _knowledge_llm_config.get("model") and not _knowledge_llm_config.get("url"):
-                                    _knowledge_llm_config["url"] = "http://127.0.0.1:11434/v1/chat/completions"
-                                    _knowledge_llm_config["url_source"] = "local_ollama_openai_compat_fallback"
                                 _knowledge_full_response, _knowledge_frames, _knowledge_tool_events, _knowledge_metrics = run_knowledge_chat_turn(message, llm_config=_knowledge_llm_config)
                             for _knowledge_chunk in _knowledge_frames:
                                 yield _knowledge_chunk
@@ -1653,6 +1668,55 @@ def setup_chat_routes(
                             return
                         logger.exception("[knowledge-runtime] v0.16-D bridge failed; falling back to existing runtime: %s", _knowledge_runtime_exc)
                     # KNOWLEDGE_RUNTIME_V016D_CHAT_BRANCH_END
+
+                    if (
+                        _agent_langgraph_architecture_enabled
+                        and _runtime_decision is not None
+                        and _runtime_decision.intent == "write_mutation"
+                    ):
+                        _policy_result = evaluate_mutation_request(message)
+                        _policy_call_id = "mutation-policy-decision"
+                        _policy_output = json.dumps(
+                            _policy_result,
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                        yield _runtime_trace_sse_frame(message, _runtime_decision)
+                        yield "data: " + json.dumps({
+                            "type": "tool_start",
+                            "id": _policy_call_id,
+                            "call_id": _policy_call_id,
+                            "tool": "policy_decision",
+                            "command": "Central mutation policy",
+                        }, ensure_ascii=False) + "\n\n"
+                        yield "data: " + json.dumps({
+                            "type": "tool_output",
+                            "id": _policy_call_id,
+                            "call_id": _policy_call_id,
+                            "tool": "policy_decision",
+                            "command": "Central mutation policy",
+                            "output": _policy_output,
+                            "exit_code": 0,
+                            "policy_decision": _policy_result,
+                        }, ensure_ascii=False) + "\n\n"
+                        _policy_answer = str(_policy_result["answer"])
+                        yield "data: " + json.dumps(
+                            {"delta": _policy_answer},
+                            ensure_ascii=False,
+                        ) + "\n\n"
+                        yield "data: " + json.dumps({
+                            "type": "metrics",
+                            "data": {
+                                "runtime": "central-mutation-policy-v1",
+                                "model": "deterministic-policy-engine",
+                                "requested_model": sess.model,
+                                "langgraph_runtime": True,
+                                "policy_action": _policy_result["decision"]["action"],
+                                "tool_calls": 0,
+                            },
+                        }, ensure_ascii=False) + "\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
 
                     if _contract_allowed_agent:
                         logger.info(

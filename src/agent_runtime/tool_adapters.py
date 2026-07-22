@@ -58,6 +58,15 @@ SKIP_DIRS = {
     "build",
     "logs",
     "data",
+    # Contract/source lookup must inspect the live implementation, not local
+    # repair artifacts, generated reports, or historical copies.
+    "exclusions",
+    "backups",
+    "backup",
+    "archives",
+    "archive",
+    ".agents",
+    ".codex",
 }
 
 GENERATED_SKIP_PATTERNS = {
@@ -66,6 +75,10 @@ GENERATED_SKIP_PATTERNS = {
     "patch_runtime_*.py",
     "inspect_*.py",
     "fix_runtime_*.py",
+    "*.before_*",
+    "*.bak",
+    "*.backup",
+    "*_backup.*",
 }
 
 
@@ -90,9 +103,13 @@ def _safe_path(path: str | None = None, workspace: str | None = None) -> Path:
 
 
 def _is_skipped(path: Path) -> bool:
-    if any(part in SKIP_DIRS for part in path.parts):
+    if any(part.lower() in SKIP_DIRS for part in path.parts):
         return True
-    return any(fnmatch.fnmatch(path.name, pattern) for pattern in GENERATED_SKIP_PATTERNS)
+    name = path.name.lower()
+    return any(
+        fnmatch.fnmatch(name, pattern.lower())
+        for pattern in GENERATED_SKIP_PATTERNS
+    )
 
 
 def _expand_brace_glob(pattern: str) -> list[str]:

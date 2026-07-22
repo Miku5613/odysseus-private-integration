@@ -48,8 +48,10 @@ def test_agent_langgraph_toggle_is_request_level_bypass() -> None:
 def test_agent_langgraph_toggle_gates_direct_knowledge_runtime_branch() -> None:
     chat = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
 
-    assert 'if _agent_langgraph_architecture_enabled and chat_mode == "agent" and _knowledge_runtime_enabled and should_intercept_knowledge_chat(message):' in chat
-    assert 'if chat_mode == "agent" and _knowledge_runtime_enabled and should_intercept_knowledge_chat(message):' not in chat
+    assert "_knowledge_intercept = (" in chat
+    assert "should_intercept_workspace_knowledge(message)" in chat
+    assert 'if _agent_langgraph_architecture_enabled and chat_mode == "agent" and _knowledge_runtime_enabled and _knowledge_intercept:' in chat
+    assert 'if chat_mode == "agent" and _knowledge_runtime_enabled and _knowledge_intercept:' not in chat
 
 
 def test_agent_langgraph_toggle_has_default_setting() -> None:

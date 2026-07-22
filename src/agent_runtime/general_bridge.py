@@ -11,7 +11,7 @@ from .general_graph import plan_task
 
 
 def general_runtime_enabled() -> bool:
-    return os.getenv("ODYSSEUS_ENABLE_GENERAL_RUNTIME", "").strip().lower() in {
+    return os.getenv("ODYSSEUS_ENABLE_GENERAL_RUNTIME", "1").strip().lower() in {
         "1", "true", "yes", "on", "general"
     }
 
@@ -31,6 +31,16 @@ async def stream_general_runtime_legacy_sse(message: str, workspace: str | None 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    # The runner executes with the inspected workspace as its cwd so every
+    # filesystem operation stays workspace-relative. Keep the Odysseus
+    # package importable when that workspace lives outside the repository.
+    package_root = str(Path(__file__).resolve().parents[2])
+    inherited_pythonpath = str(env.get("PYTHONPATH") or "").strip()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part
+        for part in (package_root, inherited_pythonpath)
+        if part
+    )
 
     proc = await asyncio.create_subprocess_exec(
         sys.executable,

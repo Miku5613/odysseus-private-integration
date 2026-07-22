@@ -330,6 +330,21 @@ def _rank_match_for_task(task: SubTask, match: tuple[str, int, str]) -> int:
     if target and target in low:
         score += 20
 
+    if task.kind == "exact_lookup":
+        # Exact lookup should prefer executable use sites over registries,
+        # aliases, test vectors, and string-only declarations of the symbol.
+        if re.search(r"\b(?:if|elif|for|while|def|async\s+def)\b", low):
+            score += 25
+        if any(token in low for token in ("yield ", "await ", "return ", "addeventlistener")):
+            score += 30
+        if re.search(r"[\"'][^\"']*[\"']\s*[,):]", low) and not any(
+            token in low for token in ("yield ", "if ", "elif ", "await ")
+        ):
+            score -= 18
+        norm_path = path.lower().replace("/", "\\")
+        if "src\\agent_runtime\\contract_runtime.py" in norm_path:
+            score -= 20
+
     if task.kind == "route_lookup":
         if "@router." in low:
             score += 100
@@ -968,4 +983,3 @@ def run_contract_runtime(
     })
 
     _emit_done()
-

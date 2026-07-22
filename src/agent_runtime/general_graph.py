@@ -223,16 +223,37 @@ def build_file_lookup_globs(query: str) -> list[str]:
         if w.lower() not in {
             "find", "files", "file", "related", "show", "list",
             "modules", "module", "code", "involved", "inspect", "the", "to",
+            "markdown", "workspace", "read", "only", "source", "which",
+            "and", "this", "that", "from", "into", "within",
         }
     ]
 
+    explicit_extensions = [
+        ext.lower()
+        for ext in re.findall(r"\.([A-Za-z0-9]{1,8})\b", query)
+    ]
+    low_query = query.lower()
+    if "markdown" in low_query and "md" not in explicit_extensions:
+        explicit_extensions.append("md")
+    if "javascript" in low_query and "js" not in explicit_extensions:
+        explicit_extensions.append("js")
+    if "python" in low_query and "py" not in explicit_extensions:
+        explicit_extensions.append("py")
+
+    extensions = explicit_extensions or ["py", "js"]
     if words:
-        base = words[0]
         return [
-            f"**/*{base}*.py",
-            f"**/*{base}*.js",
-            f"tests/test_*{base}*.py",
+            pattern
+            for word in words[:6]
+            for extension in extensions
+            for pattern in (
+                f"*{word}*.{extension}",
+                f"**/*{word}*.{extension}",
+            )
         ]
+
+    if explicit_extensions:
+        return [f"**/*.{extension}" for extension in explicit_extensions]
 
     return ["**/*.py", "**/*.js"]
 

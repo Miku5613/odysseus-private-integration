@@ -93,6 +93,7 @@ WRITE_PATTERNS = [
     r"\brun\b",
     r"\bexecute\b",
     r"\bfix\b",
+    r"\brewrite\b",
 ]
 
 RESEARCH_OR_BROWSER_PATTERNS = [
@@ -127,14 +128,19 @@ EXACT_LOOKUP_PATTERNS = [
     r"\bwhere\s+is\s+.+?\s+defined\b",
     r"\bwhere\s+does\s+.+?\s+(emit|handle|start|call|save|load|parse|render)\b",
     r"\bwhere\s+.+?\s+(emits|handles|starts|calls|saves|loads|parses|renders)\b",
-    r"\bfind\s+where\s+.+?\s+(emits|handles|starts|calls|saves|loads|parses|renders)\b",
+    r"\bfind\s+where\s+.+?\s+(?:is\s+)?(?:emit(?:ted|s)?|handl(?:ed|es)|start(?:ed|s)?|call(?:ed|s)?|sav(?:ed|es)|load(?:ed|s)?|pars(?:ed|es)|render(?:ed|s)?)\b",
     r"\bfind\s+the\s+callsite\b",
     r"\bcallsite\b",
-    r"\bhandler\b",
-    r"\bemits?\b",
-    r"\bhandles?\b",
     r"\bline\s+\d+\b",
     r"/api/[A-Za-z0-9_\-/{}]+",
+]
+
+
+CASUAL_CONVERSATION_PATTERNS = [
+    r"^\s*(?:hi|hello|hey|yo)(?:\s+there)?[!.?\s]*$",
+    r"^\s*(?:hi|hello|hey)\b.{0,24}\bhow\s+are\s+you(?:\s+doing)?(?:\s+today)?\b[!.?\s]*$",
+    r"^\s*how\s+are\s+you(?:\s+doing)?(?:\s+today)?[!.?\s]*$",
+    r"^\s*(?:thanks|thank\s+you|good\s+morning|good\s+afternoon|good\s+evening)[!.?\s]*$",
 ]
 
 EXACT_EVENT_TERMS = [
@@ -156,6 +162,12 @@ def _has_regex(text: str, patterns: list[str]) -> bool:
 def _has_any_term(text: str, terms: list[str]) -> bool:
     low = text.lower()
     return any(term.lower() in low for term in terms)
+
+
+def is_casual_conversation_request(text: str) -> bool:
+    """Return True only for short social turns with no inspectable objective."""
+
+    return _has_regex(str(text or "").strip(), CASUAL_CONVERSATION_PATTERNS)
 
 
 def _is_architecture_summary_request(text: str) -> bool:
@@ -292,4 +304,9 @@ def explain_runtime_route(prompt: str) -> str:
     return route_agent_runtime(prompt).to_trace_text()
 
 
-__all__ = ["RuntimeDecision", "route_agent_runtime", "explain_runtime_route"]
+__all__ = [
+    "RuntimeDecision",
+    "route_agent_runtime",
+    "explain_runtime_route",
+    "is_casual_conversation_request",
+]
