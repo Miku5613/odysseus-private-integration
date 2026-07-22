@@ -1173,6 +1173,9 @@ def setup_chat_routes(
             # confinement that is not actually in effect.
             if workspace_rejected:
                 yield f"data: {json.dumps({'type': 'workspace_rejected', 'data': {'path': workspace_rejected}})}\n\n"
+                yield f"data: {json.dumps({'delta': 'The selected workspace could not be opened, so I stopped this workspace-scoped request instead of searching another root.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
 
             if ctx.preprocessed.attachment_meta:
                 yield f"data: {json.dumps({'type': 'attachments', 'data': ctx.preprocessed.attachment_meta})}\n\n"
@@ -1587,6 +1590,7 @@ def setup_chat_routes(
                         _contract_requested_agent
                         and contract_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
+                        and bool(workspace)
                         and not compare_mode
                         and not effective_do_research
                         and not _is_image_generation_session(sess, owner=_user)
@@ -1656,7 +1660,7 @@ def setup_chat_routes(
                         _actual_model = _reported_model
                         async for chunk in stream_contract_runtime_legacy_sse(
                             message,
-                            workspace=str(Path(__file__).resolve().parents[1]),
+                            workspace=workspace,
                         ):
                             if chunk.startswith("data: "):
                                 payload = chunk[len("data: "):].strip()
@@ -1715,6 +1719,7 @@ def setup_chat_routes(
                         _general_requested_agent
                         and general_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
+                        and bool(workspace)
                         and not compare_mode
                         and not effective_do_research
                         and not _is_image_generation_session(sess, owner=_user)
@@ -1730,7 +1735,7 @@ def setup_chat_routes(
 
                         async for chunk in stream_general_runtime_legacy_sse(
                             message,
-                            workspace=str(Path(__file__).resolve().parents[1]),
+                            workspace=workspace,
                         ):
                             if chunk.startswith("data: "):
                                 payload = chunk[len("data: "):].strip()

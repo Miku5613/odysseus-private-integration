@@ -1423,6 +1423,10 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
             <span>Users</span>
           </button>
+          <button class="settings-nav-item admin-only" data-settings-tab="indexes">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
+            <span>Indexes</span>
+          </button>
           <button class="settings-nav-item admin-only" data-settings-tab="system">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             <span>System</span>
@@ -2300,7 +2304,63 @@
           </div>
         </div>
 
-        <!-- ═══ SYSTEM TAB ═══ -->
+        <!-- INDEXES TAB -->
+        <div data-settings-panel="indexes" class="hidden admin-only">
+          <div class="admin-card indexes-settings-card">
+            <h2 class="indexes-card-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg><span>Workspace Indexing</span></h2>
+            <p class="settings-help-text">Index the active workspace into an isolated ChromaDB namespace using <code>nomic-embed-text:latest</code>.</p>
+
+            <div class="indexes-current-grid">
+              <label>
+                <span>Active workspace</span>
+                <input id="indexes-workspace-path" type="text" placeholder="Select a workspace from the chat toolbar" readonly>
+              </label>
+
+              <label>
+                <span>Definitive Root ID</span>
+                <input id="indexes-root-id" type="text" placeholder="Generated from the canonical workspace path" readonly>
+              </label>
+            </div>
+
+            <div class="indexes-actions">
+              <button id="indexes-use-active-btn" type="button" title="Load the workspace currently selected in the chat toolbar">Use Active Workspace</button>
+              <button id="indexes-register-btn" type="button" title="Save this workspace root without indexing its files">Register Root</button>
+              <button id="indexes-index-btn" type="button" title="Add or update changed workspace files in its isolated index">Index</button>
+              <button id="indexes-reindex-btn" type="button" title="Clear this workspace index and rebuild it from every supported file">Reindex</button>
+            </div>
+
+            <div id="indexes-current-status" class="indexes-status">No workspace selected.</div>
+          </div>
+
+          <div class="admin-card indexes-settings-card">
+            <div class="indexes-heading-row">
+              <h2 class="indexes-card-title"><span>Saved Indexes</span></h2>
+              <button id="indexes-refresh-btn" class="indexes-icon-button" type="button" title="Reload the saved workspace indexes" aria-label="Reload saved indexes">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg>
+              </button>
+            </div>
+            <div id="indexes-root-list" class="indexes-root-list"></div>
+          </div>
+
+          <div class="admin-card indexes-settings-card">
+            <h2 class="indexes-card-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg><span>Index Maintenance</span></h2>
+            <p class="settings-help-text">Find saved indexes that have not been indexed or queried recently. Reviewing them does not remove any data.</p>
+            <div class="indexes-maintenance-row">
+              <label class="indexes-maintenance-age">
+                <span>Not used for</span>
+                <select id="indexes-stale-days" title="Choose how long an index can remain unused before it is considered stale">
+                  <option value="7">7 days</option>
+                  <option value="30" selected>30 days</option>
+                  <option value="60">60 days</option>
+                  <option value="90">90 days</option>
+                </select>
+              </label>
+              <button id="indexes-check-stale-btn" type="button" title="List saved indexes older than the selected period"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span>Find stale indexes</span></button>
+            </div>
+            <div id="indexes-stale-list" class="indexes-root-list"></div>
+          </div>
+        </div>
+
         <div data-settings-panel="system" class="hidden">
 
           <div class="admin-card" id="settings-system-logs-card">
@@ -2504,5 +2564,6 @@
 <script type="module" src="/static/js/init.js"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
+<script type="module" src="/static/js/indexes.js"></script>
 </body>
 </html>

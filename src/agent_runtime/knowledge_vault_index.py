@@ -175,8 +175,14 @@ def build_structural_vault_index(
     max_depth: int = 8,
     max_notes: int = 1000,
     cache_path: Path | None = DEFAULT_INDEX_PATH,
+    file_extensions: frozenset[str] | None = None,
+    strict: bool = False,
 ) -> KnowledgeVaultIndex:
     adapter = adapter or ContextVaultReadAdapter()
+    allowed_extensions = frozenset(
+        str(value).lower()
+        for value in (file_extensions or frozenset({".md"}))
+    )
 
     folders: set[str] = set()
     notes: list[KnowledgeNoteRecord] = []
@@ -194,6 +200,8 @@ def build_structural_vault_index(
         try:
             entries = adapter.list_dir(clean_folder)
         except ObsidianReadError:
+            if strict:
+                raise
             return
 
         if clean_folder:
@@ -210,11 +218,20 @@ def build_structural_vault_index(
 
             if entry.endswith("/"):
                 walk(child.strip("/"), depth + 1)
-            elif entry.lower().endswith(".md"):
+            else:
+                entry_name = Path(entry.rstrip("/")).name.lower()
+                entry_suffix = Path(entry_name).suffix.lower()
+                if (
+                    entry_name not in allowed_extensions
+                    and entry_suffix not in allowed_extensions
+                ):
+                    continue
                 try:
                     content = adapter.read_note(child)
                     notes.append(_extract_note_record(child, content))
                 except ObsidianReadError:
+                    if strict:
+                        raise
                     continue
 
     walk(start_path, 0)

@@ -61,16 +61,6 @@ def test_module_listing_preserves_file_lookup_semantics() -> None:
     assert task.should_fallback is False
 
 
-def test_contract_tool_default_workspace_is_portable_repo_root() -> None:
-    assert tool_adapters.DEFAULT_WORKSPACE == REPO_ROOT
-
-
-def test_contract_tool_default_workspace_is_not_old_test_worktree() -> None:
-    normalized = str(tool_adapters.DEFAULT_WORKSPACE).replace("\\", "/").lower()
-    assert "odysseus-upstream-test" not in normalized
-
-
-
 def test_worker_inventory_uses_supervisor_capability_registry() -> None:
     from src.agent_runtime.general_graph import (
         _format_worker_inventory,

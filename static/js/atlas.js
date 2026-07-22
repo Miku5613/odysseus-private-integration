@@ -44,6 +44,9 @@ function _activeWorkspaceRoot() {
   catch (_) { return ''; }
 }
 
+window.getActiveWorkspaceRoot = _activeWorkspaceRoot;
+
+
 
 function _renderRootSection(container) {
   const root = _activeWorkspaceRoot();

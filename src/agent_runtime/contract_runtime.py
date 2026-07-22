@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import sys
 
 try:
@@ -15,7 +17,11 @@ import time
 from typing import Any
 
 from src.agent_runtime.contract_models import ContractState, SubTask
-from src.agent_runtime.tool_adapters import TOOL_MAP
+from src.agent_runtime.tool_adapters import (
+    TOOL_MAP,
+    bind_workspace,
+    reset_workspace,
+)
 
 
 RUNTIME_VERSION = "v0.11.3-contract"
@@ -259,12 +265,31 @@ def _call_tool(name: str, args: dict[str, Any], call_id: str, state: ContractSta
         _emit("tool_output", tool=name, output=out, ok=False, call_id=call_id, chars=len(out))
         return out
 
+    workspace_token = None
+
     try:
-        result = str(tool.invoke(args))
+        if not state.workspace:
+            raise RuntimeError(
+                "Contract tool execution requires an explicit workspace."
+            )
+
+        workspace_token = bind_workspace(
+            state.workspace
+        )
+
+        result = str(
+            tool.invoke(args)
+        )
+
         ok = not result.startswith("ERROR:")
     except Exception as e:
         result = f"ERROR executing {name}: {e}"
         ok = False
+    finally:
+        if workspace_token is not None:
+            reset_workspace(
+                workspace_token
+            )
 
     _emit("tool_output", tool=name, output=result[:900], ok=ok, call_id=call_id, chars=len(result))
     state.internal_events.append({
@@ -444,7 +469,72 @@ def _rank_match_for_task(task: SubTask, match: tuple[str, int, str]) -> int:
     return score
 
 
-def _first_match(output: str, task: SubTask | None = None) -> tuple[str, int] | None:
+def _contextual_match_bonus(
+    workspace: str | None,
+    path: str,
+    repository_context: dict | None = None,
+) -> float:
+    """Return soft provenance weight for an already-valid lexical match.
+
+    Provenance never determines eligibility. It only helps rank multiple
+    matches that have already satisfied the Contract grep/search step.
+    """
+    if not workspace:
+        return 0.0
+
+    try:
+        from src.agent_runtime.general_graph import (
+            _build_repository_context,
+            _source_provenance_context,
+        )
+
+        if repository_context is None:
+            repository_context = _build_repository_context(
+                workspace,
+            )
+
+        provenance = _source_provenance_context(
+            workspace,
+            path,
+            repository_context,
+        )
+    except Exception:
+        return 0.0
+
+    score = 0.0
+
+    role = provenance.get("role")
+
+    if role == "source":
+        score += 50.0
+    elif role == "test":
+        score -= 5.0
+    elif role == "documentation_or_report":
+        score -= 10.0
+    elif role == "historical_backup":
+        score -= 25.0
+    elif role == "generated_report":
+        score -= 35.0
+    elif role == "local_script":
+        score -= 40.0
+
+    if provenance.get("tracked") is True:
+        score += 30.0
+
+    if provenance.get("modified") is True:
+        score += 6.0
+
+    if provenance.get("ignored") is True:
+        score -= 4.0
+
+    return score
+
+
+def _first_match(
+    output: str,
+    task: SubTask | None = None,
+    workspace: str | None = None,
+) -> tuple[str, int] | None:
     matches = _all_matches(output)
     if not matches:
         return None
@@ -453,13 +543,40 @@ def _first_match(output: str, task: SubTask | None = None) -> tuple[str, int] | 
         path, line, _content = matches[0]
         return path, line
 
+    repository_context = None
+
+    if workspace:
+        try:
+            from src.agent_runtime.general_graph import (
+                _build_repository_context,
+            )
+
+            repository_context = _build_repository_context(
+                workspace,
+            )
+        except Exception:
+            repository_context = None
+
+    contextual_bonus_by_path = {
+        match[0]: _contextual_match_bonus(
+            workspace,
+            match[0],
+            repository_context,
+        )
+        for match in matches
+    }
+
     ranked = sorted(
         matches,
         key=lambda m: (
-            -_rank_match_for_task(task, m),
+            -(
+                _rank_match_for_task(task, m)
+                + contextual_bonus_by_path.get(m[0], 0.0)
+            ),
             m[1],
         ),
     )
+
     path, line, _content = ranked[0]
     return path, line
 
@@ -542,7 +659,11 @@ def execute_subtask(state: ContractState, task: SubTask) -> ContractState:
         }
         return verify_subtask(state, task)
 
-    match = _first_match(grep_out, task)
+    match = _first_match(
+        grep_out,
+        task,
+        state.workspace,
+    )
 
     # For stream generator, prefer context around a concrete handler line from route task if available.
     if task.kind == "stream_generator_lookup":
@@ -755,16 +876,31 @@ def clean_room_finalizer(state: ContractState) -> str:
     return "\n".join(lines).strip()
 
 
-def run_contract_runtime(question: str, *, legacy_wrapper: bool = True) -> None:
+def run_contract_runtime(
+    question: str,
+    *,
+    legacy_wrapper: bool = True,
+    workspace: str | None = None,
+) -> None:
     started = time.time()
+
+    if not workspace:
+        raise ValueError(
+            "Contract runtime requires an explicit workspace."
+        )
+
+    resolved_workspace = str(
+        Path(workspace).resolve()
+    )
 
     _emit("agent_prep", data={
         "runtime": RUNTIME_VERSION,
         "scope": "file_inspection",
-        "workspace": "D:\\AI\\odysseus-upstream-test",
+        "workspace": resolved_workspace,
     })
 
     state = deconstruct_contract(question)
+    state.workspace = resolved_workspace
 
     _emit("task_contract", data={
         "runtime": RUNTIME_VERSION,

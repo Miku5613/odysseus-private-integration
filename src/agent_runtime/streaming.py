@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage
 
 from src.agent_runtime.events import make_event, reset_event_sink, set_event_sink
 from src.agent_runtime.graph import RUNTIME_VERSION, build_graph
-from src.agent_runtime.tool_adapters import DEFAULT_WORKSPACE
+from src.agent_runtime.tool_adapters import bind_workspace
 from src.agent_runtime.tool_policy import infer_tool_scope
 
 
@@ -28,7 +28,14 @@ def run_stream(
     This is the bridge shape that /api/chat_stream can later consume.
     """
 
-    workspace_path = str(Path(workspace).resolve()) if workspace else str(DEFAULT_WORKSPACE)
+    if not workspace:
+        raise ValueError(
+            "LangGraph runtime requires an explicit workspace."
+        )
+
+    workspace_path = str(
+        Path(workspace).resolve()
+    )
     clarified_question = consume_pending_clarification(
         session_id=str(session_id or ""),
         answer=question,
@@ -43,7 +50,13 @@ def run_stream(
         event_queue.put(event)
 
     def worker() -> None:
-        tokens = set_event_sink(sink, suppress_print=True, suppress_debug=True)
+        bind_workspace(workspace_path)
+
+        tokens = set_event_sink(
+            sink,
+            suppress_print=True,
+            suppress_debug=True,
+        )
 
         try:
             sink(

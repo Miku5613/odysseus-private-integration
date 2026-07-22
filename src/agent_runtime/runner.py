@@ -12,13 +12,29 @@ from src.agent_runtime.legacy_sse_adapter import to_legacy_sse_frame
 from src.agent_runtime.legacy_runner import stream_langgraph_agent_legacy_sse
 from src.agent_runtime.sse_adapter import to_sse_frame, to_sse_payload
 from src.agent_runtime.streaming import run_stream
-from src.agent_runtime.tool_adapters import DEFAULT_WORKSPACE
+from src.agent_runtime.tool_adapters import bind_workspace
 from src.agent_runtime.tool_policy import infer_tool_scope
 
 
-def run_once(question: str, workspace: str | None = None) -> str:
-    workspace_path = str(Path(workspace).resolve()) if workspace else str(DEFAULT_WORKSPACE)
-    scope = infer_tool_scope(question, workspace_path)
+def run_once(
+    question: str,
+    workspace: str | None = None,
+) -> str:
+    if not workspace:
+        raise ValueError(
+            "run_once requires an explicit workspace."
+        )
+
+    workspace_path = str(
+        Path(workspace).resolve()
+    )
+
+    bind_workspace(workspace_path)
+
+    scope = infer_tool_scope(
+        question,
+        workspace_path,
+    )
 
     graph = build_graph(scope=scope)
 
@@ -65,23 +81,27 @@ def main():
     if not question:
         question = "Find where the main chat streaming route is implemented in this Odysseus project. Use tools as needed. Do not guess."
 
-    print(f"Workspace: {DEFAULT_WORKSPACE}")
+    workspace = str(
+        Path.cwd().resolve()
+    )
+
+    print(f"Workspace: {workspace}")
     print(f"Question: {question}")
     print(f"\n--- Running Odysseus LangGraph Runtime {RUNTIME_VERSION} ---\n")
 
     if stream_mode:
-        for event in run_stream(question):
+        for event in run_stream(question, workspace=workspace):
             print("[stream] " + json.dumps(event, ensure_ascii=False, default=str))
         return
 
     if sse_mode:
-        for event in run_stream(question):
+        for event in run_stream(question, workspace=workspace):
             payload = to_sse_payload(event)
             print("[sse-payload] " + json.dumps(payload, ensure_ascii=False, default=str))
         return
 
     if legacy_sse_mode:
-        for event in run_stream(question):
+        for event in run_stream(question, workspace=workspace):
             frame = to_legacy_sse_frame(event)
             if frame is not None:
                 printable = frame.replace("\n", "\\n")
@@ -95,14 +115,14 @@ def main():
                 endpoint_url="http://127.0.0.1:11434/v1",
                 model="batiai/qwen3.5-9b:q6",
                 messages=messages,
-                workspace=DEFAULT_WORKSPACE,
+                workspace=workspace,
             ):
                 printable = frame.replace("\n", "\\n")
                 print("[legacy-wrapper-frame] " + printable)
         asyncio.run(_main())
         return
 
-    answer = run_once(question)
+    answer = run_once(question, workspace=workspace)
 
     print("\n--- Final Answer ---\n")
     print(answer)

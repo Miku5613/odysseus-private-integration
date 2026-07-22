@@ -33,6 +33,7 @@ SAFE_READ_NAMES = frozenset(
         "ask_user",
         "get_workspace",
         "glob",
+        "glob_files",
         "grep",
         "list_cached_models",
         "list_cookbook_servers",

@@ -4,12 +4,49 @@ from langchain_core.tools import StructuredTool
 
 import fnmatch
 import re
+from contextvars import ContextVar
 from pathlib import Path
 
 from langchain_core.tools import tool
 
 
-DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
+_ACTIVE_WORKSPACE: ContextVar[Path | None] = ContextVar(
+    "odysseus_active_workspace",
+    default=None,
+)
+
+
+def bind_workspace(workspace: str | Path):
+    root = Path(workspace).resolve()
+
+    if not root.exists():
+        raise FileNotFoundError(
+            f"Workspace does not exist: {root}"
+        )
+
+    if not root.is_dir():
+        raise NotADirectoryError(
+            f"Workspace is not a directory: {root}"
+        )
+
+    return _ACTIVE_WORKSPACE.set(root)
+
+
+def reset_workspace(token) -> None:
+    _ACTIVE_WORKSPACE.reset(token)
+
+
+def active_workspace() -> Path:
+    root = _ACTIVE_WORKSPACE.get()
+
+    if root is None:
+        raise RuntimeError(
+            "No active workspace is bound to this runtime request."
+        )
+
+    return root
+
+
 
 SKIP_DIRS = {
     ".git",
@@ -33,7 +70,11 @@ GENERATED_SKIP_PATTERNS = {
 
 
 def _safe_path(path: str | None = None, workspace: str | None = None) -> Path:
-    root = Path(workspace or DEFAULT_WORKSPACE).resolve()
+    root = (
+        Path(workspace).resolve()
+        if workspace
+        else active_workspace()
+    )
     raw = path or "."
     p = Path(raw)
 
@@ -75,8 +116,8 @@ def _expand_brace_glob(pattern: str) -> list[str]:
 
 @tool
 def get_workspace() -> str:
-    """Return the active workspace folder."""
-    return str(DEFAULT_WORKSPACE)
+    """Return the active request-scoped workspace folder."""
+    return str(active_workspace())
 
 
 @tool
@@ -90,10 +131,20 @@ def ls(path: str = ".") -> str:
         if not target.is_dir():
             return f"Not a directory: {target}"
 
+        root = active_workspace()
         rows = []
-        for item in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+
+        for item in sorted(
+            target.iterdir(),
+            key=lambda x: (
+                not x.is_dir(),
+                x.name.lower(),
+            ),
+        ):
             kind = "DIR " if item.is_dir() else "FILE"
-            rows.append(f"{kind} {item.relative_to(DEFAULT_WORKSPACE)}")
+            rows.append(
+                f"{kind} {item.relative_to(root)}"
+            )
 
         return "\n".join(rows[:200]) or "(empty)"
     except Exception as e:
@@ -104,14 +155,15 @@ def ls(path: str = ".") -> str:
 def glob_files(pattern: str) -> str:
     """Find files matching a glob pattern inside the workspace, for example '**/*.py' or 'routes/*.py'."""
     try:
+        root = active_workspace()
         matches = []
 
         for expanded_pattern in _expand_brace_glob(pattern):
-            for item in DEFAULT_WORKSPACE.glob(expanded_pattern):
+            for item in root.glob(expanded_pattern):
                 if _is_skipped(item):
                     continue
                 if item.is_file():
-                    matches.append(str(item.relative_to(DEFAULT_WORKSPACE)))
+                    matches.append(str(item.relative_to(root)))
 
         matches = sorted(matches)[:200]
         return "\n".join(matches) or "No matching files."
@@ -146,7 +198,7 @@ def grep(pattern: str, path: str = ".", max_matches: int = 80) -> str:
 
             for i, line in enumerate(text.splitlines(), start=1):
                 if rx.search(line):
-                    rel = file.relative_to(DEFAULT_WORKSPACE)
+                    rel = file.relative_to(active_workspace())
                     rows.append(f"{rel}:{i}: {line.strip()[:260]}")
                     if len(rows) >= max_matches:
                         break
@@ -203,7 +255,7 @@ def read_file_around(path: str, line: int, context: int = 30) -> str:
         end = min(len(lines), center + radius)
 
         out = [
-            f"# File: {target.relative_to(DEFAULT_WORKSPACE)}",
+            f"# File: {target.relative_to(active_workspace())}",
             f"# Showing lines {start}-{end} around target line {center}",
             "",
         ]

@@ -1,22 +1,24 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 CASES_PATH = Path(__file__).with_name("contract_eval_cases.json")
 
 
-def run_case(query: str) -> str:
+def run_case(query: str, workspace: str) -> str:
     cmd = [
         sys.executable,
         "-m",
         "src.agent_runtime.contract_runner",
         "--legacy-wrapper",
+        "--workspace",
+        workspace,
         query,
     ]
     env = dict(os.environ)
@@ -109,7 +111,30 @@ def check_contains(haystack: object, needle: str) -> bool:
 
 
 def main() -> int:
-    cases = json.loads(CASES_PATH.read_text(encoding="utf-8-sig"))
+    parser = argparse.ArgumentParser(
+        description="Odysseus Contract runtime eval matrix"
+    )
+    parser.add_argument(
+        "--workspace",
+        required=True,
+        help=(
+            "Explicit filesystem workspace used as the Contract eval corpus."
+        ),
+    )
+    args = parser.parse_args()
+
+    eval_workspace = str(
+        Path(args.workspace).resolve()
+    )
+
+    if not Path(eval_workspace).is_dir():
+        raise SystemExit(
+            f"Eval workspace does not exist: {eval_workspace}"
+        )
+
+    cases = json.loads(
+        CASES_PATH.read_text(encoding="utf-8-sig")
+    )
 
     passed = 0
     failed = 0
@@ -117,7 +142,7 @@ def main() -> int:
 
     for case in cases:
         name = case["name"]
-        output = run_case(case["query"])
+        output = run_case(case["query"], eval_workspace)
         frames = extract_frames(output)
 
         contract = get_contract(frames)

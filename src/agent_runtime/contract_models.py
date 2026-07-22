@@ -51,6 +51,7 @@ class SubTask(BaseModel):
 
 class ContractState(BaseModel):
     raw_query: str
+    workspace: str | None = None
     task_contract: dict[str, SubTask] = Field(default_factory=dict)
     current_subtask_id: str | None = None
     user_facing_answer: str | None = None

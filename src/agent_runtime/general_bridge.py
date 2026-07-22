@@ -22,7 +22,12 @@ def general_runtime_supports(message: str) -> bool:
 
 
 async def stream_general_runtime_legacy_sse(message: str, workspace: str | None = None):
-    root = Path(workspace or os.getcwd()).resolve()
+    if not workspace:
+        raise ValueError(
+            "General runtime requires an explicit workspace."
+        )
+
+    root = Path(workspace).resolve()
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"

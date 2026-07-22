@@ -183,6 +183,11 @@ export function setWorkspace(path) {
   if (path) Storage.set(KEYS.WORKSPACE, path);
   else Storage.remove(KEYS.WORKSPACE);
   syncWorkspaceIndicator(path || '');
+  try {
+    document.dispatchEvent(new CustomEvent('workspace-changed', {
+      detail: { path: path || '' },
+    }));
+  } catch (_) {}
 }
 
 /**

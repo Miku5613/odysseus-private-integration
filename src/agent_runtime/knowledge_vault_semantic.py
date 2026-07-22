@@ -46,10 +46,20 @@ class SemanticIndexStats:
         }
 
 
-def _embedding_client() -> EmbeddingClient:
+def _embedding_client(
+    *,
+    embedding_url: str | None = None,
+    embedding_model: str | None = None,
+) -> EmbeddingClient:
     return EmbeddingClient(
-        url=os.getenv("KNOWLEDGE_EMBEDDING_URL", DEFAULT_EMBEDDING_URL),
-        model=os.getenv("KNOWLEDGE_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        url=(
+            embedding_url
+            or os.getenv("KNOWLEDGE_EMBEDDING_URL", DEFAULT_EMBEDDING_URL)
+        ),
+        model=(
+            embedding_model
+            or os.getenv("KNOWLEDGE_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        ),
         api_key=os.getenv("KNOWLEDGE_EMBEDDING_API_KEY", ""),
     )
 
@@ -187,6 +197,9 @@ def build_semantic_vault_index(
     rebuild: bool = True,
     max_notes: int = 1000,
     batch_size: int = 16,
+    embedding_url: str | None = None,
+    embedding_model: str | None = None,
+    strict_reads: bool = False,
 ) -> SemanticIndexStats:
     index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
     adapter = adapter or ContextVaultReadAdapter(root_id=index_namespace)
@@ -208,7 +221,10 @@ def build_semantic_vault_index(
             cache_path=None,
         )
 
-    emb = _embedding_client()
+    emb = _embedding_client(
+        embedding_url=embedding_url,
+        embedding_model=embedding_model,
+    )
     # Force health/dimension probe early so failures are clear.
     emb.get_sentence_embedding_dimension()
 
@@ -226,13 +242,19 @@ def build_semantic_vault_index(
 
     notes = index.notes[:max_notes]
 
+    indexed_note_paths: set[str] = set()
+
     for note in notes:
         try:
             content = adapter.read_note(note.path)
         except ObsidianReadError:
+            if strict_reads:
+                raise
             continue
 
         chunks = chunk_markdown_note(note.path, note.title, content)
+        if chunks:
+            indexed_note_paths.add(note.path)
         for ch in chunks:
             chunk_text = ch["text"]
             chunk_id = _chunk_id(
@@ -291,7 +313,7 @@ def build_semantic_vault_index(
     return SemanticIndexStats(
         collection_name=COLLECTION_NAME,
         embedding_model=emb.model,
-        note_count=len(notes),
+        note_count=len(indexed_note_paths),
         chunk_count=len(all_docs),
         indexed_at=time.time(),
         rebuilt=rebuild,
@@ -303,13 +325,18 @@ def search_semantic_vault_index(
     *,
     k: int = 8,
     index_namespace: str = DEFAULT_INDEX_NAMESPACE,
+    embedding_url: str | None = None,
+    embedding_model: str | None = None,
 ) -> list[dict[str, Any]]:
     index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
     query = str(query or "").strip()
     if not query:
         return []
 
-    emb = _embedding_client()
+    emb = _embedding_client(
+        embedding_url=embedding_url,
+        embedding_model=embedding_model,
+    )
     emb.get_sentence_embedding_dimension()
 
     col = _collection()
@@ -356,6 +383,8 @@ def search_semantic_vault_index(
 def get_semantic_vault_stats(
     *,
     index_namespace: str = DEFAULT_INDEX_NAMESPACE,
+    embedding_url: str | None = None,
+    embedding_model: str | None = None,
 ) -> dict[str, Any]:
     index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
     col = _collection()
@@ -376,6 +405,12 @@ def get_semantic_vault_stats(
         "total_collection_count": total,
         "namespace_count": namespace_count,
         "index_namespace": index_namespace,
-        "embedding_model": os.getenv("KNOWLEDGE_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-        "embedding_url": os.getenv("KNOWLEDGE_EMBEDDING_URL", DEFAULT_EMBEDDING_URL),
+        "embedding_model": (
+            embedding_model
+            or os.getenv("KNOWLEDGE_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        ),
+        "embedding_url": (
+            embedding_url
+            or os.getenv("KNOWLEDGE_EMBEDDING_URL", DEFAULT_EMBEDDING_URL)
+        ),
     }

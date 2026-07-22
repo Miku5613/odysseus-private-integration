@@ -166,7 +166,7 @@ async def stream_general_supervisor_sse(
             "owner": owner,
             "workspace": workspace,
             "active_doc": active_document,
-            "root_id": kwargs.get("root_id") or "ideaverse_vault",
+            "root_id": kwargs.get("root_id"),
         },
     }
 

@@ -99,7 +99,12 @@ async def stream_contract_runtime_legacy_sse(
     so chat_routes/frontend can consume the same event shape as other streams.
     """
 
-    project_root = Path(workspace or os.getcwd())
+    if not workspace:
+        raise ValueError(
+            "Contract runtime requires an explicit workspace."
+        )
+
+    project_root = Path(workspace).resolve()
 
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -110,6 +115,8 @@ async def stream_contract_runtime_legacy_sse(
         "-m",
         "src.agent_runtime.contract_runner",
         "--legacy-wrapper",
+        "--workspace",
+        str(project_root),
         question,
         cwd=str(project_root),
         stdout=asyncio.subprocess.PIPE,

@@ -69,12 +69,7 @@ def _normalize_file_path(value: str | None) -> str:
 
     try:
         p = Path(raw)
-        parts = list(p.parts)
-
-        if "odysseus-upstream-test" in parts:
-            idx = parts.index("odysseus-upstream-test")
-            return str(Path(*parts[idx + 1 :]))
-
+        _ = p
         return raw
     except Exception:
         return raw

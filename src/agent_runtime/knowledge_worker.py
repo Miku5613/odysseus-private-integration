@@ -5,6 +5,7 @@ import inspect
 from typing import Any
 
 from src.agent_runtime.knowledge_vault_semantic import search_semantic_vault_index
+from src.agent_runtime.workspace_index_manager import find_root_by_path, search_root
 from src.agent_runtime.supervisor_contracts import WorkerHandoff, WorkerResult
 
 
@@ -60,10 +61,120 @@ def run_knowledge_worker(
             missing_information=("knowledge query",),
         )
 
-    root_id = str(
-        handoff.context.get("root_id")
-        or "ideaverse_vault"
+    workspace = str(
+        handoff.context.get("workspace") or ""
     ).strip()
+
+    explicit_root_id = str(
+        handoff.context.get("root_id") or ""
+    ).strip()
+
+    # Source authority invariant:
+    # 1. An explicit validated workspace is authoritative.
+    # 2. An explicit root_id is a separate authorized source selector.
+    # 3. There is no implicit global/default root.
+    #
+    # A workspace path is not automatically interchangeable with a
+    # Chroma root_id. Until that workspace has a scoped index, the
+    # worker must fail honestly rather than silently query another root.
+    if workspace:
+        root = find_root_by_path(workspace)
+
+        if root is None:
+            return WorkerResult(
+                capability=KNOWLEDGE_WORKER_CAPABILITY,
+                status="partial",
+                summary=(
+                    "The active workspace is not indexed yet."
+                ),
+                data={
+                    "query": query,
+                    "workspace": workspace,
+                    "root_id": None,
+                    "result_count": 0,
+                    "session_id": session_id,
+                    "index_required": True,
+                },
+                missing_information=(
+                    "workspace-scoped index",
+                ),
+            )
+
+        root_id = str(root.get("root_id") or "").strip()
+
+        try:
+            results = search_root(
+                root_id,
+                query,
+                k=8,
+            )
+        except Exception as exc:
+            return WorkerResult(
+                capability=KNOWLEDGE_WORKER_CAPABILITY,
+                status="failed",
+                summary="Workspace knowledge retrieval failed.",
+                data={
+                    "query": query,
+                    "workspace": workspace,
+                    "root_id": root_id,
+                    "session_id": session_id,
+                },
+                error=str(exc),
+            )
+
+        evidence = _result_evidence(results)
+
+        if not results:
+            return WorkerResult(
+                capability=KNOWLEDGE_WORKER_CAPABILITY,
+                status="partial",
+                summary=(
+                    "No matching information was found in the active workspace."
+                ),
+                data={
+                    "query": query,
+                    "workspace": workspace,
+                    "root_id": root_id,
+                    "result_count": 0,
+                    "session_id": session_id,
+                },
+            )
+
+        return WorkerResult(
+            capability=KNOWLEDGE_WORKER_CAPABILITY,
+            status="completed",
+            summary=(
+                f"Retrieved {len(results)} relevant workspace result(s)."
+            ),
+            data={
+                "query": query,
+                "workspace": workspace,
+                "root_id": root_id,
+                "result_count": len(results),
+                "results": results,
+                "session_id": session_id,
+            },
+            evidence=evidence,
+        )
+
+    if not explicit_root_id:
+        return WorkerResult(
+            capability=KNOWLEDGE_WORKER_CAPABILITY,
+            status="partial",
+            summary=(
+                "No explicit knowledge root is active. "
+                "Global knowledge fallback is disabled."
+            ),
+            data={
+                "query": query,
+                "workspace": None,
+                "root_id": None,
+                "result_count": 0,
+                "session_id": session_id,
+            },
+        )
+
+    root_id = explicit_root_id
 
     try:
         parameters = inspect.signature(retriever).parameters

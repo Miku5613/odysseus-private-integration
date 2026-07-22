@@ -37,12 +37,6 @@ def normalize_path(path: str | None) -> str:
         return ""
 
     raw = raw.replace("/", "\\")
-    parts = [p for p in raw.split("\\") if p]
-
-    if "odysseus-upstream-test" in parts:
-        idx = parts.index("odysseus-upstream-test")
-        return "\\".join(parts[idx + 1 :])
-
     return raw
 
 

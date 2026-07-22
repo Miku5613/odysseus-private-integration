@@ -182,6 +182,8 @@ _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/upload",          # large files
     "/api/image",           # diffusion proxies (inpaint/harmonize/upscale/etc.) — own 120s httpx timeout
     "/api/memory/audit",    # retains own 120s LLM inactivity timeout
+    "/api/indexes/index",   # large vault embedding can legitimately take minutes
+    "/api/indexes/reindex", # full namespace rebuilds can legitimately take minutes
 )
 
 
@@ -786,6 +788,8 @@ app.include_router(setup_cookbook_routes())
 from routes.workspace_routes import setup_workspace_routes
 app.include_router(setup_workspace_routes())
 
+from routes.index_routes import setup_index_routes
+app.include_router(setup_index_routes())
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes
 app.include_router(setup_hwfit_routes())

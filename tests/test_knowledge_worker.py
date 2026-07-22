@@ -25,7 +25,10 @@ def test_knowledge_worker_uses_context_query_when_present():
     handoff = WorkerHandoff(
         capability="knowledge_search",
         objective="Find relevant project knowledge.",
-        context={"query": "Atlas write mode decisions"},
+        context={
+            "query": "Atlas write mode decisions",
+            "root_id": "example",
+        },
     )
 
     run_knowledge_worker(handoff, retriever=fake_retriever)
@@ -44,6 +47,7 @@ def test_knowledge_worker_falls_back_to_objective_as_query():
     handoff = WorkerHandoff(
         capability="knowledge_search",
         objective="What did I decide about Atlas write mode?",
+        context={"root_id": "example"},
     )
 
     run_knowledge_worker(handoff, retriever=fake_retriever)
@@ -67,6 +71,7 @@ def test_knowledge_worker_returns_semantic_results_and_evidence():
     handoff = WorkerHandoff(
         capability="knowledge_search",
         objective="Find Atlas write mode decisions.",
+        context={"root_id": "example"},
     )
 
     result = run_knowledge_worker(
@@ -86,6 +91,7 @@ def test_knowledge_worker_returns_partial_for_no_results():
     handoff = WorkerHandoff(
         capability="knowledge_search",
         objective="Find something absent.",
+        context={"root_id": "example"},
     )
 
     result = run_knowledge_worker(
@@ -104,6 +110,7 @@ def test_knowledge_worker_converts_backend_failure_to_worker_result():
     handoff = WorkerHandoff(
         capability="knowledge_search",
         objective="Search project knowledge.",
+        context={"root_id": "example"},
     )
 
     result = run_knowledge_worker(
@@ -113,3 +120,25 @@ def test_knowledge_worker_converts_backend_failure_to_worker_result():
 
     assert result.status == "failed"
     assert result.error == "Chroma unavailable"
+
+
+def test_knowledge_worker_does_not_use_an_implicit_global_root():
+    called = False
+
+    def fake_retriever(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    result = run_knowledge_worker(
+        WorkerHandoff(
+            capability="knowledge_search",
+            objective="Search my notes.",
+        ),
+        retriever=fake_retriever,
+    )
+
+    assert result.status == "partial"
+    assert result.data["root_id"] is None
+    assert "fallback is disabled" in result.summary
+    assert called is False
