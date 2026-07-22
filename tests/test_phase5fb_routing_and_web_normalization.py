@@ -623,3 +623,194 @@ def test_phase5fq_path_relevance_beats_incidental_mentions(
     assert "session_routes.py" in state.final_answer
     assert "chat_routes.py" in state.final_answer
     assert "admin_wipe_routes.py" not in state.final_answer
+
+
+
+def test_phase5fs_contextual_source_retrieval(
+    monkeypatch,
+) -> None:
+    from src.agent_runtime import general_graph
+    from src.agent_runtime.general_graph import (
+        GeneralState,
+        execute_readonly_plan,
+        plan_task,
+    )
+
+    query = (
+        "Inspect backend route code related to chat sessions "
+        "and summarize what you find. Read only."
+    )
+
+    task = plan_task(query)
+
+    files = "\n".join(
+        [
+            "Exclusions/Backups/routes/chat_routes.py.before_patch",
+            "Exclusions/Scripts/test_prompt_harness.py",
+            "routes/chat_routes.py",
+            "routes/session_routes.py",
+        ]
+    )
+
+    def fake_glob(
+        workspace,
+        pattern,
+        max_results=120,
+    ):
+        return (
+            files
+            if pattern.startswith("routes/")
+            else ""
+        )
+
+    # Phase 5FS must not require real Git metadata in unit tests.
+    def fake_context(workspace, path, repository_context=None):
+        if path.startswith("Exclusions/Backups/"):
+            return {
+                "path": path,
+                "role": "historical_backup",
+                "tracked": False,
+                "ignored": True,
+                "modified": False,
+                "mtime": 10,
+                "caveats": [
+                    "appears to be a backup or historical copy",
+                    "not tracked by the current Git index",
+                ],
+            }
+
+        if path.startswith("Exclusions/Scripts/"):
+            return {
+                "path": path,
+                "role": "local_script",
+                "tracked": False,
+                "ignored": True,
+                "modified": False,
+                "mtime": 30,
+                "caveats": [
+                    "appears to be a local script or harness",
+                ],
+            }
+
+        return {
+            "path": path,
+            "role": "source",
+            "tracked": True,
+            "ignored": False,
+            "modified": False,
+            "mtime": 20,
+            "caveats": [],
+        }
+
+    def fake_grep(
+        workspace,
+        pattern,
+        path="",
+        max_results=12,
+    ):
+        data = {
+            "Exclusions/Backups/routes/chat_routes.py.before_patch": (
+                "Exclusions/Backups/routes/chat_routes.py.before_patch:"
+                "10: chat session handler"
+            ),
+            "Exclusions/Scripts/test_prompt_harness.py": (
+                "Exclusions/Scripts/test_prompt_harness.py:"
+                "1: Inspect backend route code related to chat sessions"
+            ),
+            "routes/chat_routes.py": (
+                "routes/chat_routes.py:"
+                "643: @router.post('/api/chat_stream')\n"
+                "routes/chat_routes.py:"
+                "700: session_manager.get_session(session_id)"
+            ),
+            "routes/session_routes.py": (
+                "routes/session_routes.py:"
+                "10: from core.session_manager import SessionManager"
+            ),
+        }
+
+        return data.get(path, "")
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "get_workspace",
+        lambda workspace: workspace,
+    )
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "glob_files",
+        fake_glob,
+    )
+
+    monkeypatch.setattr(
+        general_graph.tools,
+        "grep",
+        fake_grep,
+    )
+
+    monkeypatch.setattr(
+        general_graph,
+        "_source_provenance_context",
+        fake_context,
+    )
+
+    state = GeneralState(
+        raw_query=query,
+        workspace=r"D:\AI\odysseus",
+    )
+    state.task = task
+
+    execute_readonly_plan(state)
+
+    answer = state.final_answer
+
+    assert "routes/chat_routes.py" in answer
+    assert "routes/session_routes.py" in answer
+
+    # The test-harness literal match must not beat live semantic source.
+    first_source = next(
+        line
+        for line in answer.splitlines()
+        if line.startswith("- ")
+    )
+
+    assert "Exclusions/Scripts" not in first_source
+
+
+def test_phase5fs_unusual_sources_are_not_blocked() -> None:
+    from src.agent_runtime.general_graph import (
+        _contextual_source_score,
+    )
+
+    provenance = {
+        "role": "historical_backup",
+        "tracked": False,
+        "ignored": True,
+        "modified": False,
+        "mtime": 1,
+        "caveats": [
+            "appears to be a backup or historical copy",
+        ],
+    }
+
+    score, details = _contextual_source_score(
+        path=(
+            "Exclusions/Backups/routes/"
+            "chat_routes.py.before_patch"
+        ),
+        output=(
+            "tool_output chat session route"
+        ),
+        terms=["chat", "session"],
+        raw_query=(
+            "Inspect backend route code related "
+            "to chat sessions"
+        ),
+        provenance=provenance,
+    )
+
+    # It receives a real score rather than being excluded.
+    assert isinstance(score, int)
+    assert score > 0
+    assert details["coverage"] >= 1

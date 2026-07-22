@@ -680,6 +680,309 @@ def _inspection_file_patterns(query: str, task_kind: str) -> list[str]:
     ]
 
 
+
+def _build_repository_context(workspace: str) -> dict:
+    """Collect soft Git provenance once per retrieval pass."""
+    import subprocess
+
+    tracked = set()
+    ignored = set()
+    modified = set()
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", workspace, "ls-files"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0:
+            tracked = {
+                line.strip().replace("\\", "/")
+                for line in proc.stdout.splitlines()
+                if line.strip()
+            }
+
+        proc = subprocess.run(
+            [
+                "git", "-C", workspace,
+                "ls-files", "--others", "--ignored", "--exclude-standard",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0:
+            ignored = {
+                line.strip().replace("\\", "/")
+                for line in proc.stdout.splitlines()
+                if line.strip()
+            }
+
+        proc = subprocess.run(
+            ["git", "-C", workspace, "status", "--porcelain", "-uall"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                if len(line) < 4:
+                    continue
+
+                path = line[3:].strip()
+
+                if " -> " in path:
+                    path = path.split(" -> ", 1)[1]
+
+                path = path.strip('"').replace("\\", "/")
+
+                if path:
+                    modified.add(path)
+
+    except Exception:
+        pass
+
+    return {
+        "tracked": tracked,
+        "ignored": ignored,
+        "modified": modified,
+    }
+
+
+def _source_provenance_context(
+    workspace: str,
+    path: str,
+    repository_context: dict | None = None,
+) -> dict:
+    """Return soft contextual metadata; never acts as an allow/deny gate."""
+    normalized = path.replace("\\", "/").lstrip("./")
+    low = normalized.lower()
+
+    role = "source"
+    caveats = []
+
+    if "/backup" in f"/{low}" or "/backups/" in f"/{low}":
+        role = "historical_backup"
+        caveats.append("appears to be a backup or historical copy")
+    elif low.startswith("exclusions/reports/"):
+        role = "generated_report"
+        caveats.append("appears to be a generated/audit report")
+    elif low.startswith("exclusions/scripts/"):
+        role = "local_script"
+        caveats.append("appears to be a local script or harness")
+    elif low.startswith("tests/") or "/tests/" in f"/{low}":
+        role = "test"
+        caveats.append("appears to be test or fixture evidence")
+    elif low.endswith((".md", ".txt", ".log")):
+        role = "documentation_or_report"
+
+    context = repository_context or {}
+
+    tracked = (
+        normalized in context.get("tracked", set())
+        if repository_context is not None
+        else None
+    )
+    ignored = (
+        normalized in context.get("ignored", set())
+        if repository_context is not None
+        else None
+    )
+    modified = (
+        normalized in context.get("modified", set())
+        if repository_context is not None
+        else None
+    )
+
+    mtime = None
+
+    try:
+        candidate = Path(workspace) / normalized
+        if candidate.exists():
+            mtime = candidate.stat().st_mtime
+    except Exception:
+        pass
+
+    if tracked is False:
+        caveats.append("not tracked by the current Git index")
+
+    if ignored is True:
+        caveats.append("matched by Git ignore rules")
+
+    if modified is True:
+        caveats.append("has current working-tree changes")
+
+    return {
+        "path": normalized,
+        "role": role,
+        "tracked": tracked,
+        "ignored": ignored,
+        "modified": modified,
+        "mtime": mtime,
+        "caveats": caveats,
+    }
+
+
+def _contextual_source_score(
+    *,
+    path: str,
+    output: str,
+    terms: list[str],
+    raw_query: str,
+    provenance: dict,
+) -> tuple[int, dict]:
+    """Hybrid contextual score for authorized source candidates."""
+    low_path = path.lower().replace("\\", "/")
+    low_output = output.lower()
+    raw = raw_query.lower()
+
+    path_hits = sum(
+        1
+        for term in terms
+        if term in low_path
+    )
+
+    content_hits = sum(
+        1
+        for term in terms
+        if term in low_output
+    )
+
+    coverage = len(
+        {
+            term
+            for term in terms
+            if term in low_path or term in low_output
+        }
+    )
+
+    scope_score = 0
+
+    if "frontend" in raw:
+        if low_path.startswith("static/js/"):
+            scope_score += 90
+        elif low_path.startswith(("routes/", "services/", "src/", "core/")):
+            scope_score -= 15
+
+    elif "backend" in raw or "server" in raw:
+        if low_path.startswith(("routes/", "services/", "src/", "core/", "mcp_servers/")):
+            scope_score += 60
+        elif low_path.startswith("static/js/"):
+            scope_score -= 15
+
+    if "route" in raw and low_path.startswith("routes/"):
+        scope_score += 80
+
+    role = provenance.get("role", "source")
+
+    role_adjustment = {
+        "source": 35,
+        "test": -5,
+        "documentation_or_report": -10,
+        "historical_backup": -20,
+        "generated_report": -30,
+        "local_script": -35,
+    }.get(role, 0)
+
+    git_adjustment = 0
+
+    if provenance.get("tracked") is True:
+        git_adjustment += 25
+
+    if provenance.get("modified") is True:
+        # Current local work can be more relevant than HEAD.
+        git_adjustment += 8
+
+    if provenance.get("ignored") is True:
+        # Soft provenance signal only â€” never exclusion.
+        git_adjustment -= 4
+
+    score = (
+        coverage * 50
+        + path_hits * 125
+        + content_hits * 15
+        + scope_score
+        + role_adjustment
+        + git_adjustment
+    )
+
+    details = {
+        "coverage": coverage,
+        "path_hits": path_hits,
+        "content_hits": content_hits,
+        "scope_score": scope_score,
+        "role_adjustment": role_adjustment,
+        "git_adjustment": git_adjustment,
+    }
+
+    return score, details
+
+
+def _apply_freshness_rerank(
+    ranked: list[tuple],
+) -> list[tuple]:
+    """Use freshness as a weak tie-breaker, never as truth authority."""
+    mtimes = [
+        item[5].get("mtime")
+        for item in ranked
+        if item[5].get("mtime") is not None
+    ]
+
+    if not mtimes:
+        return ranked
+
+    newest = max(mtimes)
+    oldest = min(mtimes)
+    span = max(newest - oldest, 1.0)
+
+    reranked = []
+
+    for item in ranked:
+        (
+            score,
+            coverage,
+            path_hits,
+            path,
+            output,
+            provenance,
+            details,
+        ) = item
+
+        mtime = provenance.get("mtime")
+        freshness_bonus = 0
+
+        if mtime is not None:
+            normalized = (mtime - oldest) / span
+            freshness_bonus = round(normalized * 8)
+
+        details = dict(details)
+        details["freshness_bonus"] = freshness_bonus
+
+        reranked.append(
+            (
+                score + freshness_bonus,
+                coverage,
+                path_hits,
+                path,
+                output,
+                provenance,
+                details,
+            )
+        )
+
+    reranked.sort(
+        key=lambda item: (
+            item[0],
+            item[1],
+            item[2],
+        ),
+        reverse=True,
+    )
+
+    return reranked
+
+
 def _execute_broad_source_inspection(state: GeneralState) -> str | None:
     assert state.task is not None
 
@@ -723,6 +1026,10 @@ def _execute_broad_source_inspection(state: GeneralState) -> str | None:
         for term in terms
     )
 
+    repository_context = _build_repository_context(
+        state.workspace,
+    )
+
     ranked = []
 
     for path in files[:240]:
@@ -736,27 +1043,30 @@ def _execute_broad_source_inspection(state: GeneralState) -> str | None:
         if not out.strip():
             continue
 
-        low_path = path.lower()
-        low_output = out.lower()
+        provenance = _source_provenance_context(
+            state.workspace,
+            path,
+            repository_context,
+        )
+
+        score, score_details = _contextual_source_score(
+            path=path,
+            output=out,
+            terms=terms,
+            raw_query=state.raw_query,
+            provenance=provenance,
+        )
 
         matched_terms = {
             term
             for term in terms
-            if term in low_path or term in low_output
+            if term in path.lower() or term in out.lower()
         }
 
         filename_hits = sum(
             1
             for term in terms
-            if term in low_path
-        )
-
-        result_lines = out.splitlines()
-
-        score = (
-            len(matched_terms) * 40
-            + filename_hits * 120
-            + min(len(result_lines), 12)
+            if term in path.lower()
         )
 
         ranked.append(
@@ -766,6 +1076,8 @@ def _execute_broad_source_inspection(state: GeneralState) -> str | None:
                 filename_hits,
                 path,
                 out,
+                provenance,
+                score_details,
             )
         )
 
@@ -781,21 +1093,43 @@ def _execute_broad_source_inspection(state: GeneralState) -> str | None:
         reverse=True,
     )
 
-    # Prefer files whose own path/name carries the requested topic.
-    # Incidental mentions should not outrank canonical topic files.
-    path_relevant = [
+    ranked = _apply_freshness_rerank(ranked)
+
+    # Prefer a coherent primary evidence set when several candidates have
+    # direct topic support in their own path/name. Content-only candidates
+    # remain eligible and are used when path-supported evidence is sparse.
+    #
+    # This is a ranking preference, not a path allow/deny rule.
+    path_supported = [
         item
         for item in ranked
         if item[2] > 0
     ]
 
-    selected = (
-        path_relevant[:4]
-        if path_relevant
-        else ranked[:4]
-    )
+    if len(path_supported) >= 2:
+        selected = path_supported[:4]
 
-    for _, _, _, path, out in selected:
+        # Keep evidence diversity when topic-native files do not fill the
+        # evidence budget. Supplement from the remaining contextual ranking.
+        if len(selected) < 3:
+            selected_paths = {
+                item[3]
+                for item in selected
+            }
+
+            for item in ranked:
+                if item[3] in selected_paths:
+                    continue
+
+                selected.append(item)
+                selected_paths.add(item[3])
+
+                if len(selected) >= 4:
+                    break
+    else:
+        selected = ranked[:4]
+
+    for _, _, _, path, out, provenance, score_details in selected:
         _record(
             state,
             "grep",
@@ -813,10 +1147,19 @@ def _execute_broad_source_inspection(state: GeneralState) -> str | None:
         "",
     ]
 
-    for _, _, _, path, out in selected:
+    for _, _, _, path, out, provenance, score_details in selected:
         evidence = out.splitlines()[:3]
 
         lines.append(f"- {path}")
+
+        caveats = provenance.get("caveats") or []
+
+        if caveats:
+            lines.append(
+                "  - Context: "
+                + "; ".join(caveats)
+                + "."
+            )
 
         for row in evidence:
             match = re.match(
