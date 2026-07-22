@@ -14,18 +14,17 @@ def _read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_panel_drag_is_frame_batched_and_compositor_driven():
+def test_panel_drag_matches_original_pre_optimization_logic():
     source = _read("static/js/windowDrag.js")
 
-    assert "requestAnimationFrame(_paintDragTransform)" in source
-    assert "translate3d(${dragDx}px, ${dragDy}px, 0)" in source
-    assert "content.style.willChange = 'transform'" in source
-    assert "_commitDragTransform();" in source
+    assert "requestAnimationFrame(_paintDragTransform)" not in source
+    assert "translate3d(${dragDx}px, ${dragDy}px, 0)" not in source
+    assert "content.style.willChange = 'transform'" not in source
     windowed_move = source.split("// Windowed: just follow the cursor.", 1)[1].split(
         "// Corner guard:", 1
     )[0]
-    assert "content.style.left" not in windowed_move
-    assert "content.style.top" not in windowed_move
+    assert "content.style.left = (startLeft + cx - startX) + 'px'" in windowed_move
+    assert "content.style.top = (startTop + cy - startY) + 'px'" in windowed_move
 
 
 def test_saved_roots_and_atlas_index_affordances_are_present():
@@ -47,8 +46,13 @@ def test_saved_roots_and_atlas_index_affordances_are_present():
     assert "data-menu-trigger=\"more\"" in atlas
     assert "data-el=\"workspace-tree\"" in atlas
     assert "openWorkspaceNote(entry.path)" in atlas
-    assert "data-el=\"workspace-tree-resizer\"" in atlas
-    assert "WORKSPACE_TREE_HEIGHT_KEY" in atlas
+    assert "data-el=\"workspace-tree-resizer\"" not in atlas
+    assert "WORKSPACE_TREE_HEIGHT_KEY" not in atlas
+    assert ".atlas-root-section { flex:1 1 auto; min-height:0; display:flex" in atlas
+    assert ".atlas-worktree { margin-top:7px; flex:1 1 auto; min-height:0" in atlas
+    assert ".atlas-editor { display:flex; flex-direction:column; overflow:hidden" in atlas
+    assert "height:100%; min-height:0; box-sizing:border-box; overflow:auto" in atlas
+    assert "_setAtlasPane('edit');" not in atlas
     assert "workspaceApiGet('/graph', { root })" in atlas
     assert "_loadWorkspaceBacklinks(_currentWorkspaceRoot, data.path)" in atlas
     assert "Session ${sessionCount} · Root ${rootCount}" in atlas

@@ -103,8 +103,6 @@ export function makeWindowDraggable(modal, options = {}) {
   let dragging = false;
   let startX = 0, startY = 0;
   let startLeft = 0, startTop = 0;
-  let dragDx = 0, dragDy = 0;
-  let dragFrame = 0;
   let snapHint = null;
   // Whether the pointer actually moved beyond a small threshold this drag.
   // Used to suppress the synthetic click the browser fires on mouseup —
@@ -112,35 +110,6 @@ export function makeWindowDraggable(modal, options = {}) {
   // would otherwise fire after a drag and collapse the modal contents.
   let movedDuringDrag = false;
   const MOVE_THRESHOLD = 4;
-
-  // Pointer events can arrive much faster than the browser can paint. Moving
-  // a large panel with left/top on every event forces layout for the whole
-  // panel and made dragging visibly stutter. Keep movement on the compositor
-  // during the gesture, capped to one transform update per animation frame,
-  // then commit the final coordinates once when the gesture ends.
-  const _paintDragTransform = () => {
-    dragFrame = 0;
-    content.style.transform = `translate3d(${dragDx}px, ${dragDy}px, 0)`;
-  };
-
-  const _scheduleDragTransform = (dx, dy) => {
-    dragDx = dx;
-    dragDy = dy;
-    if (!dragFrame) dragFrame = requestAnimationFrame(_paintDragTransform);
-  };
-
-  const _commitDragTransform = () => {
-    if (dragFrame) {
-      cancelAnimationFrame(dragFrame);
-      dragFrame = 0;
-    }
-    content.style.left = (startLeft + dragDx) + 'px';
-    content.style.top = (startTop + dragDy) + 'px';
-    content.style.transform = 'none';
-    content.style.willChange = '';
-    dragDx = 0;
-    dragDy = 0;
-  };
 
   const _showSnapHint = (on) => {
     // Top-edge fullscreen hint. Side hints come from the dock controllers.
@@ -193,7 +162,6 @@ export function makeWindowDraggable(modal, options = {}) {
     }
     startX = cx; startY = cy;
     startLeft = rect.left; startTop = rect.top;
-    dragDx = 0; dragDy = 0;
     // Pin position so the drag follows the cursor instead of fighting a
     // centering transform / margin. Inline styles win unless CSS uses
     // !important (the fullscreen rules do, by design).
@@ -201,7 +169,6 @@ export function makeWindowDraggable(modal, options = {}) {
     content.style.left = startLeft + 'px';
     content.style.top = startTop + 'px';
     content.style.transform = 'none';
-    content.style.willChange = 'transform';
     content.style.margin = '0';
   };
 
@@ -264,7 +231,8 @@ export function makeWindowDraggable(modal, options = {}) {
     if (Math.abs(cx - startX) > MOVE_THRESHOLD || Math.abs(cy - startY) > MOVE_THRESHOLD) {
       movedDuringDrag = true;
     }
-    _scheduleDragTransform(cx - startX, cy - startY);
+    content.style.left = (startLeft + cx - startX) + 'px';
+    content.style.top = (startTop + cy - startY) + 'px';
     // Corner guard: in the top fullscreen band the side docks stay OFF, so a
     // top corner only ever snaps to fullscreen — never the corner hybrid.
     const inTopBand = cy <= SNAP_PX;
@@ -283,11 +251,6 @@ export function makeWindowDraggable(modal, options = {}) {
     dragging = false;
     if (modal) modal.classList.remove('modal-dragging');
     _showSnapHint(false);
-    if (typeof cx === 'number' && typeof cy === 'number' && !_isFullscreen()) {
-      dragDx = cx - startX;
-      dragDy = cy - startY;
-    }
-    _commitDragTransform();
     // Top edge wins over side edges — fullscreen is the more common gesture.
     if (enableFullscreen && typeof cy === 'number' && cy <= SNAP_PX) {
       if (rightDock) rightDock.release();

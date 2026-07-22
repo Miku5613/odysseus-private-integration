@@ -26,7 +26,6 @@ const GRAPH_PANEL_W = 340;
 const TEMPLATE_DIR = 'templates/';
 
 const API = '/api/atlas';
-const WORKSPACE_TREE_HEIGHT_KEY = 'odysseus.atlas.workspaceTreeHeight';
 
 function _atlasEsc(v) {
   const div = document.createElement('div');
@@ -136,46 +135,10 @@ function _renderRootSection(container) {
         <div class="atlas-root-path">${_atlasEsc(root)}</div>
         <div class="atlas-root-note">Workspace is linked. Open Markdown or text notes below to view and edit them in Atlas; clear Workspace to switch Atlas roots or import.</div>
       </div>
-      <div class="atlas-worktree-resizer" data-el="workspace-tree-resizer" role="separator" aria-orientation="horizontal" title="Drag to resize the root file explorer"></div>
       <div class="atlas-worktree" data-el="workspace-tree"></div>
     </div>`;
   _renderWorkspaceTreeLevel(section.querySelector('[data-el="workspace-tree"]'));
-  _wireWorkspaceTreeResizer(section);
   container.appendChild(section);
-}
-
-function _wireWorkspaceTreeResizer(section) {
-  const tree = section?.querySelector('[data-el="workspace-tree"]');
-  const handle = section?.querySelector('[data-el="workspace-tree-resizer"]');
-  if (!tree || !handle) return;
-
-  handle.addEventListener('pointerdown', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const startY = event.clientY;
-    const startHeight = tree.getBoundingClientRect().height;
-    handle.classList.add('dragging');
-    handle.setPointerCapture?.(event.pointerId);
-
-    const onMove = (moveEvent) => {
-      const maxHeight = Math.max(240, Math.min(window.innerHeight * 0.75, 720));
-      const height = _clamp(startHeight + moveEvent.clientY - startY, 120, maxHeight);
-      _modal?.style.setProperty('--atlas-worktree-h', Math.round(height) + 'px');
-    };
-    const onEnd = () => {
-      handle.classList.remove('dragging');
-      try { handle.releasePointerCapture?.(event.pointerId); } catch (_) {}
-      document.removeEventListener('pointermove', onMove);
-      document.removeEventListener('pointerup', onEnd);
-      document.removeEventListener('pointercancel', onEnd);
-      const height = Math.round(tree.getBoundingClientRect().height);
-      try { localStorage.setItem(WORKSPACE_TREE_HEIGHT_KEY, String(height)); } catch (_) {}
-    };
-
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onEnd, { once: true });
-    document.addEventListener('pointercancel', onEnd, { once: true });
-  });
 }
 
 function _wireFilesPanelActions() {
@@ -482,8 +445,11 @@ function _buildModal() {
       #atlas-modal[data-side="backlinks"] .atlas-right { display:block; }
       #atlas-modal[data-side="graph"] .atlas-graph-wrap { display:flex !important; }
       #atlas-modal .atlas-left { width:var(--atlas-left-w,260px); flex:0 0 var(--atlas-left-w,260px); border-right:1px solid var(--bubble-border,#333); display:flex; flex-direction:column; min-height:0; }
-      #atlas-modal .atlas-list { overflow:auto; flex:1; padding:2px 0; }
+      #atlas-modal .atlas-list { overflow:hidden; flex:1; min-height:0; padding:2px 0 0; display:flex; flex-direction:column; }
       #atlas-modal .atlas-files-section { border-bottom:1px solid color-mix(in srgb,var(--bubble-border,#333) 72%,transparent); }
+      #atlas-modal .atlas-session-section { flex:0 1 auto; max-height:34%; overflow:auto; }
+      #atlas-modal .atlas-list:not(.has-workspace-root) .atlas-session-section { flex:1 1 auto; max-height:none; }
+      #atlas-modal .atlas-root-section { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; border-bottom:0; }
       #atlas-modal .atlas-files-section-head { display:flex; align-items:center; gap:8px; padding:8px 8px 6px; font-size:11px; text-transform:uppercase; letter-spacing:.055em; opacity:.68; }
       #atlas-modal .atlas-files-section-head .grow { flex:1; }
       #atlas-modal .atlas-reset-btn { border:1px solid var(--input-border,#444); background:transparent; color:inherit; border-radius:6px; padding:3px 7px; font-size:11px; cursor:pointer; text-transform:none; letter-spacing:0; opacity:.78; }
@@ -491,15 +457,12 @@ function _buildModal() {
       #atlas-modal .atlas-section-root-btn { border:0; background:transparent; color:inherit; padding:0; margin:0; font:inherit; text-transform:inherit; letter-spacing:inherit; cursor:pointer; opacity:1; }
 
       #atlas-modal .atlas-session-list { min-height:20px; }
-      #atlas-modal .atlas-root-placeholder { padding:2px 8px 10px; }
+      #atlas-modal .atlas-root-placeholder { padding:2px 8px 0; flex:1; min-height:0; display:flex; flex-direction:column; }
       #atlas-modal .atlas-root-card { border:1px solid color-mix(in srgb,var(--bubble-border,#333) 72%,transparent); border-radius:8px; padding:8px 9px; background:rgba(127,127,127,.06); }
       #atlas-modal .atlas-root-name { font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       #atlas-modal .atlas-root-path { font-size:10px; opacity:.56; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; }
       #atlas-modal .atlas-root-note { font-size:11px; opacity:.52; margin-top:6px; line-height:1.35; }
-      #atlas-modal .atlas-worktree { margin-top:7px; height:var(--atlas-worktree-h,min(42vh,420px)); min-height:120px; max-height:none; overflow:auto; overscroll-behavior:contain; border-top:1px solid color-mix(in srgb,var(--bubble-border,#333) 55%,transparent); padding-top:5px; }
-      #atlas-modal .atlas-worktree-resizer { height:9px; cursor:ns-resize; touch-action:none; position:relative; }
-      #atlas-modal .atlas-worktree-resizer::after { content:""; position:absolute; left:34%; right:34%; top:3px; height:2px; border-radius:2px; background:color-mix(in srgb,var(--brand-color,#f19ad7) 38%,transparent); opacity:.55; }
-      #atlas-modal .atlas-worktree-resizer:hover::after, #atlas-modal .atlas-worktree-resizer.dragging::after { opacity:1; }
+      #atlas-modal .atlas-worktree { margin-top:7px; flex:1 1 auto; min-height:0; overflow:auto; overscroll-behavior:contain; border-top:1px solid color-mix(in srgb,var(--bubble-border,#333) 55%,transparent); padding:5px 0 8px; }
       #atlas-modal .atlas-worktree-row { width:100%; min-width:0; display:flex; align-items:center; gap:4px; border:0; border-radius:5px; background:transparent; color:inherit; padding-top:4px; padding-right:8px; padding-bottom:4px; cursor:pointer; text-align:left; font-family:inherit; font-size:13px; line-height:1.25; }
       #atlas-modal .atlas-worktree-row:hover { background:rgba(127,127,127,.12); }
       #atlas-modal .atlas-worktree-row.active { background:var(--section-accent,rgba(120,140,255,.18)); }
@@ -526,10 +489,11 @@ function _buildModal() {
       .atlas-floating-menu div:hover { background:rgba(127,127,127,.18); }
       #atlas-modal .atlas-preview a.atlas-tag { color:var(--brand-color,#6cf); background:rgba(110,140,255,.14); border-radius:10px; padding:0 7px; font-size:.9em; text-decoration:none; white-space:nowrap; }
       #atlas-modal .atlas-preview a.atlas-tag:hover { background:rgba(110,140,255,.28); }
-      #atlas-modal .atlas-center { flex:1; display:flex; min-height:0; }
-      #atlas-modal .atlas-editor, #atlas-modal .atlas-preview { flex:1; overflow:auto; padding:14px; min-width:0; }
-      #atlas-modal .atlas-editor { display:flex; flex-direction:column; border-right:1px solid var(--bubble-border,#333); }
-      #atlas-modal .atlas-editor textarea { flex:1; width:100%; resize:none; border:0; background:transparent; color:inherit; font-family:var(--code-font,monospace); font-size:13px; line-height:1.55; outline:none; }
+      #atlas-modal .atlas-center { flex:1; display:flex; min-height:0; height:100%; overflow:hidden; }
+      #atlas-modal .atlas-editor, #atlas-modal .atlas-preview { flex:1; height:100%; min-height:0; min-width:0; box-sizing:border-box; padding:14px; }
+      #atlas-modal .atlas-editor { display:flex; flex-direction:column; overflow:hidden; border-right:1px solid var(--bubble-border,#333); }
+      #atlas-modal .atlas-preview { overflow:auto; }
+      #atlas-modal .atlas-editor textarea { flex:1 1 auto; width:100%; height:100%; min-height:0; box-sizing:border-box; overflow:auto; resize:none; border:0; background:transparent; color:inherit; font-family:var(--code-font,monospace); font-size:13px; line-height:1.55; outline:none; }
       #atlas-modal .atlas-preview a.atlas-wikilink { color:var(--brand-color,#6cf); text-decoration:none; border-bottom:1px dashed currentColor; cursor:pointer; }
       #atlas-modal .atlas-preview a.atlas-wikilink.missing { color:var(--accent-error,#e66); opacity:.8; }
       #atlas-modal .atlas-right { display:none; width:var(--atlas-right-w,260px); flex:0 0 var(--atlas-right-w,260px); border-left:1px solid var(--bubble-border,#333); overflow:auto; padding:10px; font-size:12px; }
@@ -614,12 +578,6 @@ function _buildModal() {
     </div>
   `;
   document.body.appendChild(_modal);
-  try {
-    const savedTreeHeight = parseInt(localStorage.getItem(WORKSPACE_TREE_HEIGHT_KEY) || '', 10);
-    if (Number.isFinite(savedTreeHeight)) {
-      _modal.style.setProperty('--atlas-worktree-h', _clamp(savedTreeHeight, 120, Math.max(180, window.innerHeight - 180)) + 'px');
-    }
-  } catch (_) {}
 
   // header actions
   _modal.querySelector('#atlas-close').onclick = closeAtlas;
@@ -940,6 +898,7 @@ function _buildTree(items) {
 function _renderList(items) {
   const list = _modal.querySelector('.atlas-list');
   list.innerHTML = '';
+  list.classList.toggle('has-workspace-root', !!_activeWorkspaceRoot());
 
   const sessionSection = document.createElement('section');
   sessionSection.className = 'atlas-files-section atlas-session-section';
@@ -1056,7 +1015,6 @@ async function openNote(path) {
     _currentWorkspaceRoot = '';
     _selectedFolder = data.path.includes('/') ? data.path.slice(0, data.path.lastIndexOf('/')) : '';
     _dirty = false;
-    _setAtlasPane('edit');
     _modal.querySelector('textarea').value = data.content || '';
     _modal.querySelector('[data-el="path"]').textContent = data.path;
     _renderPreview(data.content || '', data.outlinks);
@@ -1084,7 +1042,6 @@ async function openWorkspaceNote(path) {
     _currentSource = 'workspace';
     _currentWorkspaceRoot = data.root || root;
     _dirty = false;
-    _setAtlasPane('edit');
     _modal.querySelector('textarea').value = data.content || '';
     _modal.querySelector('[data-el="path"]').textContent = `Workspace · ${data.path}`;
     _renderPreview(data.content || '', []);
