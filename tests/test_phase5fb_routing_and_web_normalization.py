@@ -814,3 +814,41 @@ def test_phase5fs_unusual_sources_are_not_blocked() -> None:
     assert isinstance(score, int)
     assert score > 0
     assert details["coverage"] >= 1
+
+
+
+def test_phase5fsc_non_git_workspace_skips_git(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import subprocess
+
+    from src.agent_runtime.general_graph import (
+        _build_repository_context,
+    )
+
+    calls = []
+
+    def forbidden_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError(
+            "Git subprocess must not run for a non-Git workspace."
+        )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        forbidden_run,
+    )
+
+    context = _build_repository_context(
+        str(tmp_path),
+    )
+
+    assert context == {
+        "tracked": set(),
+        "ignored": set(),
+        "modified": set(),
+    }
+
+    assert calls == []

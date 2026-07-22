@@ -682,12 +682,34 @@ def _inspection_file_patterns(query: str, task_kind: str) -> list[str]:
 
 
 def _build_repository_context(workspace: str) -> dict:
-    """Collect soft Git provenance once per retrieval pass."""
-    import subprocess
+    """Collect soft Git provenance once per retrieval pass.
 
+    Non-Git workspaces take a filesystem-only fast path and launch no Git
+    subprocesses. Git is optional enrichment, never a retrieval requirement.
+    """
     tracked = set()
     ignored = set()
     modified = set()
+
+    empty_context = {
+        "tracked": tracked,
+        "ignored": ignored,
+        "modified": modified,
+    }
+
+    try:
+        workspace_path = Path(workspace).resolve()
+        candidates = (workspace_path, *workspace_path.parents)
+
+        if not any(
+            (candidate / ".git").exists()
+            for candidate in candidates
+        ):
+            return empty_context
+    except Exception:
+        return empty_context
+
+    import subprocess
 
     try:
         proc = subprocess.run(
