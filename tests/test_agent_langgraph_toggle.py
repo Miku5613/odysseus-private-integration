@@ -38,9 +38,10 @@ def test_agent_langgraph_toggle_is_request_level_bypass() -> None:
     assert "def _agent_langgraph_architecture_enabled_for_request" in chat
     assert "AGENT_LANGGRAPH_REQUEST_BYPASS_V1_START" in chat
     assert "_agent_langgraph_architecture_enabled = _agent_langgraph_architecture_enabled_for_request(chat_mode)" in chat
-    assert "_knowledge_intent_requested = (" in chat
-    assert "_agent_langgraph_architecture_enabled\n                and isinstance(message, str)" in chat
-    assert "_f3_runtime_probe = _route_agent_runtime_for_request(" in chat
+    assert "if user_requested_agent:" in chat
+    assert "assess_explicit_agent_admission(" in chat
+    assert "_agent_admission.use_normal_chat" in chat
+    assert "_clear_tool_or_runtime_intent" not in chat
     assert "_runtime_decision = _route_agent_runtime_for_request(" in chat
     assert "_agent_langgraph_enabled_for_knowledge" not in chat
 
@@ -50,8 +51,21 @@ def test_agent_langgraph_toggle_gates_direct_knowledge_runtime_branch() -> None:
 
     assert "_knowledge_intercept = (" in chat
     assert "should_intercept_workspace_knowledge(message)" in chat
-    assert 'if _agent_langgraph_architecture_enabled and chat_mode == "agent" and _knowledge_runtime_enabled and _knowledge_intercept:' in chat
+    assert "and _knowledge_runtime_enabled" in chat
+    assert "and _knowledge_intercept" in chat
+    assert "and not _explicit_agent_single_graph" in chat
     assert 'if chat_mode == "agent" and _knowledge_runtime_enabled and _knowledge_intercept:' not in chat
+
+
+def test_explicit_single_graph_admission_owns_native_supervisor_boundary() -> None:
+    chat = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
+
+    assert "P3_C5_EXPLICIT_SINGLE_GRAPH_ROUTE_START" in chat
+    assert "_explicit_agent_single_graph = bool(" in chat
+    assert "_agent_admission.use_single_graph" in chat
+    assert "_explicit_agent_single_graph\n                            or (" in chat
+    assert "and not _explicit_agent_single_graph" in chat
+    assert "_stream_langgraph_first_with_legacy_fallback" in chat
 
 
 def test_agent_langgraph_toggle_has_default_setting() -> None:
@@ -68,15 +82,20 @@ def test_agent_langgraph_toggle_is_accepted_by_settings_endpoint() -> None:
     assert 'current["agent_langgraph_enabled"] = _coerce_bool_setting(body.get("agent_langgraph_enabled"))' in auth_routes
 
 
-def test_langgraph_toggle_quarantines_daily_driver_downgrade_and_auto_escalation() -> None:
+def test_model_backed_explicit_agent_admission_preserves_upstream_auto_escalation() -> None:
     chat = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
 
-    assert 'if str(chat_mode or "").strip().lower() != "agent":\n        return True' not in chat
+    assert "_clear_tool_or_runtime_intent" not in chat
+    assert "assess_explicit_agent_admission(" in chat
+    assert "if user_requested_agent:" in chat
 
-    assert 'if (\n            _agent_langgraph_architecture_enabled\n            and chat_mode == "agent"\n            and not _clear_tool_or_runtime_intent' in chat
-
+    assert "# Intent auto-escalation:" in chat
     assert 'if _agent_langgraph_architecture_enabled and chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:' in chat
-    assert 'if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:' not in chat
+    assert 'chat_mode = "agent"' in chat
+    assert "auto_escalated = True" in chat
+    assert "chat→agent auto-escalation:" in chat
+    assert "if auto_escalated:" in chat
+    assert '"bash", "python", "read_file", "write_file", "builtin_browser"' in chat
 
 
 def test_langgraph_toggle_off_allows_none_runtime_decision_without_router_crash() -> None:
