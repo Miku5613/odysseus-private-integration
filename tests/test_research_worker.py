@@ -64,17 +64,82 @@ async def test_research_worker_reads_existing_report():
 
 
 @pytest.mark.asyncio
-async def test_research_worker_requires_id_for_read():
+async def test_research_worker_resolves_latest_report_when_read_has_no_id():
+    requests = []
+
+    async def fake_manage(content, owner=None):
+        request = json.loads(content)
+        requests.append(request)
+
+        if request == {"action": "list"}:
+            return {
+                "output": (
+                    "[Latest report](#research-rp-latest)"
+                ),
+                "exit_code": 0,
+            }
+
+        if request == {
+            "action": "read",
+            "id": "rp-latest",
+        }:
+            return {
+                "output": "Latest saved report text.",
+                "exit_code": 0,
+            }
+
+        raise AssertionError(
+            f"Unexpected research request: {request}"
+        )
+
     handoff = WorkerHandoff(
         capability="deep_research",
-        objective="Read that report.",
+        objective="Read the latest saved report.",
         context={"action": "read"},
     )
 
-    result = await run_research_worker(handoff)
+    result = await run_research_worker(
+        handoff,
+        manage_backend=fake_manage,
+    )
+
+    assert requests == [
+        {"action": "list"},
+        {
+            "action": "read",
+            "id": "rp-latest",
+        },
+    ]
+    assert result.status == "completed"
+    assert result.summary == "Latest saved report text."
+
+
+@pytest.mark.asyncio
+async def test_research_worker_clarifies_when_no_completed_report_can_be_resolved():
+    async def fake_manage(content, owner=None):
+        assert json.loads(content) == {
+            "action": "list",
+        }
+        return {
+            "output": "No completed reports.",
+            "exit_code": 0,
+        }
+
+    handoff = WorkerHandoff(
+        capability="deep_research",
+        objective="Read the latest saved report.",
+        context={"action": "read"},
+    )
+
+    result = await run_research_worker(
+        handoff,
+        manage_backend=fake_manage,
+    )
 
     assert result.status == "needs_clarification"
-    assert result.missing_information == ("research_id",)
+    assert result.missing_information == (
+        "completed research report",
+    )
 
 
 @pytest.mark.asyncio
