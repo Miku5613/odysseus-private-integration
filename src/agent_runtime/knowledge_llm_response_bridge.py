@@ -70,7 +70,12 @@ def knowledge_llm_config_from_runtime_locals(scope: dict[str, Any]) -> dict[str,
         model = model or str(pick_attr(sess, ("model", "selected_model", "model_name")) or "").strip()
         headers = headers or pick_attr(sess, ("headers", "auth_headers"))
 
-    candidates = scope.get("candidates") or scope.get("fallback_candidates")
+    candidates = (
+        scope.get("candidates")
+        or scope.get("fallback_candidates")
+        or scope.get("fallbacks")
+        or scope.get("_fallback_candidates")
+    )
     if not url and not model and isinstance(candidates, (list, tuple)) and candidates:
         first = candidates[0]
         if isinstance(first, (list, tuple)) and len(first) >= 2:
@@ -83,6 +88,11 @@ def knowledge_llm_config_from_runtime_locals(scope: dict[str, Any]) -> dict[str,
         "url": url,
         "model": model,
         "headers": headers if isinstance(headers, dict) else None,
+        "fallback_candidates": (
+            list(candidates)
+            if isinstance(candidates, (list, tuple))
+            else []
+        ),
     }
 
 
@@ -161,16 +171,28 @@ def try_knowledge_llm_response(
 
     try:
         if llm_call_func is None:
-            from src.llm_core import llm_call as llm_call_func
+            from src.llm_core import llm_call_with_fallback
 
-        response = llm_call_func(
-            url,
-            model,
-            messages,
-            temperature=0.2,
-            max_tokens=1200,
-            headers=headers,
-        )
+            runtime_llm_candidates = [
+                (url, model, headers),
+                *list(config.get("fallback_candidates") or ()),
+            ]
+
+            response = llm_call_with_fallback(
+                runtime_llm_candidates,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=1200,
+            )
+        else:
+            response = llm_call_func(
+                url,
+                model,
+                messages,
+                temperature=0.2,
+                max_tokens=1200,
+                headers=headers,
+            )
         text = str(response or "").strip()
         if not text:
             result["status"] = "empty_llm_response"
