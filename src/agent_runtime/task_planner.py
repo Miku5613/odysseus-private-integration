@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import json
-from typing import Any, Protocol
+from typing import Any, Awaitable, Protocol
 
 from src.agent_runtime.intent_complexity import (
     IntentComplexityAssessment,
@@ -13,9 +14,14 @@ from src.agent_runtime.task_plan import (
 
 
 class TaskPlannerModel(Protocol):
-    """Minimal model seam for semantic task planning."""
+    """Minimal model seam for semantic task planning.
 
-    def invoke(self, prompt: str) -> Any:
+    Production adapters may return either an immediate model response or an
+    awaitable response. The synchronous and asynchronous planner entry points
+    enforce the matching invocation contract.
+    """
+
+    def invoke(self, prompt: str) -> Any | Awaitable[Any]:
         ...
 
 
@@ -231,16 +237,28 @@ def parse_task_plan_response(response: Any) -> TaskPlan:
     return validate_task_plan_payload(payload)
 
 
+def _validate_multi_graph_plan(
+    plan: TaskPlan,
+) -> TaskPlan:
+    if len(plan.steps) < 2:
+        raise ValueError(
+            "multi_graph TaskPlan must contain at least two "
+            "semantic steps"
+        )
+    return plan
+
+
 def plan_task_from_assessment(
     query: str,
     assessment: IntentComplexityAssessment,
     *,
     model: TaskPlannerModel,
 ) -> TaskPlan:
-    """Create a validated semantic plan from a multi-graph assessment.
+    """Create a validated semantic plan through a synchronous model seam.
 
-    The caller owns model/provider resolution. This function neither chooses
-    nor knows the execution backend for any resulting PlanStep.
+    The caller owns model/provider resolution. Async production adapters must
+    use :func:`plan_task_from_assessment_async` so the event loop is never
+    blocked by a synchronous compatibility shim.
     """
 
     prompt = build_task_planner_prompt(
@@ -248,15 +266,40 @@ def plan_task_from_assessment(
         assessment,
     )
     response = model.invoke(prompt)
-    plan = parse_task_plan_response(response)
 
-    if len(plan.steps) < 2:
-        raise ValueError(
-            "multi_graph TaskPlan must contain at least two "
-            "semantic steps"
+    if inspect.isawaitable(response):
+        if inspect.iscoroutine(response):
+            response.close()
+        raise TypeError(
+            "TaskPlannerModel returned an awaitable; use "
+            "plan_task_from_assessment_async"
         )
 
-    return plan
+    return _validate_multi_graph_plan(
+        parse_task_plan_response(response)
+    )
+
+
+async def plan_task_from_assessment_async(
+    query: str,
+    assessment: IntentComplexityAssessment,
+    *,
+    model: TaskPlannerModel,
+) -> TaskPlan:
+    """Create a validated semantic plan without blocking async runtimes."""
+
+    prompt = build_task_planner_prompt(
+        query,
+        assessment,
+    )
+    response = model.invoke(prompt)
+
+    if inspect.isawaitable(response):
+        response = await response
+
+    return _validate_multi_graph_plan(
+        parse_task_plan_response(response)
+    )
 
 
 __all__ = [
@@ -264,4 +307,5 @@ __all__ = [
     "build_task_planner_prompt",
     "parse_task_plan_response",
     "plan_task_from_assessment",
+    "plan_task_from_assessment_async",
 ]

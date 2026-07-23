@@ -326,7 +326,7 @@ def replan_task_from_request(
     replan_context: str,
     model: TaskPlannerModel,
 ) -> TaskPlan:
-    """Produce one validated semantic TaskPlan revision."""
+    """Produce one validated revision through a synchronous model seam."""
 
     prompt = build_task_replanner_prompt(
         query,
@@ -337,6 +337,43 @@ def replan_task_from_request(
     response = model.invoke(
         prompt
     )
+
+    if inspect.isawaitable(response):
+        if inspect.iscoroutine(response):
+            response.close()
+        raise TypeError(
+            "TaskPlannerModel returned an awaitable; use "
+            "replan_task_from_request_async"
+        )
+
+    return parse_task_plan_response(
+        response
+    )
+
+
+async def replan_task_from_request_async(
+    query: str,
+    state: PlanExecutionState,
+    request: ReplanRequest,
+    *,
+    replan_context: str,
+    model: TaskPlannerModel,
+) -> TaskPlan:
+    """Produce one validated revision without blocking async runtimes."""
+
+    prompt = build_task_replanner_prompt(
+        query,
+        state,
+        request,
+        replan_context=replan_context,
+    )
+    response = model.invoke(
+        prompt
+    )
+
+    if inspect.isawaitable(response):
+        response = await response
+
     return parse_task_plan_response(
         response
     )
@@ -565,7 +602,7 @@ async def run_task_plan_with_replanning(
                 ),
             )
 
-        revised_plan = replan_task_from_request(
+        revised_plan = await replan_task_from_request_async(
             query,
             orchestration.state,
             request,
@@ -602,5 +639,6 @@ __all__ = [
     "build_task_replanner_prompt",
     "exact_reusable_completed_step_ids",
     "replan_task_from_request",
+    "replan_task_from_request_async",
     "run_task_plan_with_replanning",
 ]

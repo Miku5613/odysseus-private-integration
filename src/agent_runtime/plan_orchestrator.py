@@ -6,7 +6,7 @@ from typing import Literal, Mapping
 from src.agent_runtime.execution_resolver import (
     ExecutionResolverModel,
     ExecutionSurfaceDescriptor,
-    resolve_plan_step,
+    resolve_plan_step_async,
 )
 from src.agent_runtime.plan_execution import (
     PlanExecutionState,
@@ -98,6 +98,80 @@ def _unsupported_reason(
         resolution.reasoning_summary
         or "No compatible execution surface is available for this PlanStep."
     ).strip()
+
+
+def _worker_result_payload(
+    value,
+):
+    if not isinstance(
+        value,
+        WorkerResult,
+    ):
+        return value
+
+    return {
+        "capability": value.capability,
+        "status": value.status,
+        "summary": value.summary,
+        "data": value.data,
+        "evidence": list(value.evidence),
+        "missing_information": list(
+            value.missing_information
+        ),
+        "error": value.error,
+    }
+
+
+def _context_for_plan_step(
+    base: StepExecutionContext | None,
+    state: PlanExecutionState,
+    step,
+) -> StepExecutionContext:
+    """Propagate completed dependency outputs into the next step handoff."""
+
+    base_context = (
+        base
+        if base is not None
+        else StepExecutionContext()
+    )
+    supervisor_state = dict(
+        base_context.supervisor_state
+        or {}
+    )
+    worker_context = dict(
+        supervisor_state.get(
+            "worker_context",
+            {},
+        )
+    )
+
+    dependency_outputs = {}
+    for dependency_id in step.depends_on:
+        dependency_state = step_execution(
+            state,
+            dependency_id,
+        )
+        if dependency_state.output is not None:
+            dependency_outputs[
+                dependency_id
+            ] = _worker_result_payload(
+                dependency_state.output
+            )
+
+    worker_context[
+        "plan_step_id"
+    ] = step.id
+    worker_context[
+        "dependency_outputs"
+    ] = dependency_outputs
+    supervisor_state[
+        "worker_context"
+    ] = worker_context
+
+    return StepExecutionContext(
+        supervisor_state=supervisor_state,
+        session_id=base_context.session_id,
+    )
 
 
 async def run_task_plan(
@@ -219,7 +293,7 @@ async def run_task_plan(
 
             step = plan.step_by_id(step_id)
 
-            resolution = resolve_plan_step(
+            resolution = await resolve_plan_step_async(
                 step,
                 model=resolver_model,
                 surfaces=surfaces,
@@ -274,7 +348,11 @@ async def run_task_plan(
                     started_state,
                     step,
                     resolution,
-                    context=context,
+                    context=_context_for_plan_step(
+                        context,
+                        pre_step_state,
+                        step,
+                    ),
                     worker_runners=worker_runners,
                     surface_executors=surface_executors,
                 )

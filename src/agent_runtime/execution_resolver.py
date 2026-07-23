@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal, Protocol
+from typing import Any, Awaitable, Iterable, Literal, Protocol
 
 from src.agent_runtime.capability_registry import (
     build_capability_registry,
@@ -72,7 +73,7 @@ class ExecutionResolution:
 class ExecutionResolverModel(Protocol):
     """Minimal model seam for semantic surface compatibility."""
 
-    def invoke(self, prompt: str) -> Any:
+    def invoke(self, prompt: str) -> Any | Awaitable[Any]:
         ...
 
 
@@ -634,6 +635,14 @@ def resolve_plan_step(
     )
     response = model.invoke(prompt)
 
+    if inspect.isawaitable(response):
+        if inspect.iscoroutine(response):
+            response.close()
+        raise TypeError(
+            "ExecutionResolverModel returned an awaitable; use "
+            "resolve_plan_step_async"
+        )
+
     assessment = (
         parse_execution_compatibility_response(
             response,
@@ -751,6 +760,82 @@ def resolve_plan_step(
     )
 
 
+class _StaticExecutionResolverModel:
+    """Replay one already-awaited compatibility response through validation."""
+
+    def __init__(
+        self,
+        response: Any,
+    ) -> None:
+        self._response = response
+
+    def invoke(
+        self,
+        prompt: str,
+    ) -> Any:
+        return self._response
+
+
+async def resolve_plan_step_async(
+    step: PlanStep,
+    *,
+    model: ExecutionResolverModel,
+    surfaces: tuple[
+        ExecutionSurfaceDescriptor,
+        ...,
+    ] | None = None,
+) -> ExecutionResolution:
+    """Resolve one PlanStep while supporting async production model adapters.
+
+    Deterministic catalog validation and final priority selection remain owned
+    by :func:`resolve_plan_step`; only the model invocation is awaited here.
+    """
+
+    catalog = (
+        build_execution_surface_catalog()
+        if surfaces is None
+        else tuple(
+            _validate_surface(surface)
+            for surface in surfaces
+        )
+    )
+
+    if not catalog:
+        return resolve_plan_step(
+            step,
+            model=_StaticExecutionResolverModel(
+                {}
+            ),
+            surfaces=catalog,
+        )
+
+    ids = [
+        surface.id
+        for surface in catalog
+    ]
+    if len(ids) != len(set(ids)):
+        raise ValueError(
+            "Execution Resolver surface ids must be unique"
+        )
+
+    prompt = build_execution_resolver_prompt(
+        step,
+        catalog,
+    )
+    response = model.invoke(prompt)
+
+    if inspect.isawaitable(response):
+        response = await response
+
+    return resolve_plan_step(
+        step,
+        model=_StaticExecutionResolverModel(
+            response
+        ),
+        surfaces=catalog,
+    )
+
+
 __all__ = [
     "ExecutionCompatibilityAssessment",
     "ExecutionResolution",
@@ -762,4 +847,5 @@ __all__ = [
     "build_execution_surface_catalog",
     "parse_execution_compatibility_response",
     "resolve_plan_step",
+    "resolve_plan_step_async",
 ]
