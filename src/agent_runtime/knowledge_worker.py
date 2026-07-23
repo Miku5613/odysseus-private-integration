@@ -5,13 +5,77 @@ import inspect
 from typing import Any
 
 from src.agent_runtime.knowledge_vault_semantic import search_semantic_vault_index
-from src.agent_runtime.workspace_index_manager import find_root_by_path, search_root
+from src.agent_runtime.workspace_index_manager import (
+    find_root_by_path,
+    search_root,
+    search_root_queries,
+)
 from src.agent_runtime.supervisor_contracts import WorkerHandoff, WorkerResult
 
 
 KNOWLEDGE_WORKER_CAPABILITY = "knowledge_search"
 
 SemanticRetriever = Callable[..., list[dict[str, Any]]]
+
+
+def _retrieval_queries(
+    primary_query: str,
+    context: dict[str, Any],
+) -> list[str]:
+    """Return a bounded, de-duplicated set of runtime-provided queries."""
+
+    out = [primary_query]
+    expansions = context.get("retrieval_queries")
+    if isinstance(expansions, (list, tuple)):
+        for value in expansions:
+            clean = str(value or "").strip()
+            if clean and clean.casefold() not in {item.casefold() for item in out}:
+                out.append(clean)
+            if len(out) >= 6:
+                break
+    return out
+
+
+def _merge_query_results(
+    batches: list[tuple[str, list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    """Merge multi-query evidence while preserving its strongest score."""
+
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str, str]] = []
+
+    for retrieval_query, results in batches:
+        for raw in results:
+            item = dict(raw)
+            key = (
+                str(item.get("path") or item.get("id") or ""),
+                str(item.get("heading") or ""),
+                str(item.get("title") or ""),
+            )
+            if not any(key):
+                continue
+
+            current = merged.get(key)
+            current_score = float((current or {}).get("similarity") or -1.0)
+            candidate_score = float(item.get("similarity") or -1.0)
+            matched_queries = list((current or {}).get("matched_queries") or [])
+            if retrieval_query not in matched_queries:
+                matched_queries.append(retrieval_query)
+
+            if current is None or candidate_score > current_score:
+                item["retrieval_query"] = retrieval_query
+                item["matched_queries"] = matched_queries
+                merged[key] = item
+                if current is None:
+                    order.append(key)
+            else:
+                current["matched_queries"] = matched_queries
+
+    return sorted(
+        (merged[key] for key in order),
+        key=lambda item: float(item.get("similarity") or -1.0),
+        reverse=True,
+    )
 
 
 def _result_evidence(results: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
@@ -68,6 +132,7 @@ def run_knowledge_worker(
     explicit_root_id = str(
         handoff.context.get("root_id") or ""
     ).strip()
+    retrieval_queries = _retrieval_queries(query, dict(handoff.context))
 
     # Source authority invariant:
     # 1. An explicit validated workspace is authoritative.
@@ -103,11 +168,20 @@ def run_knowledge_worker(
         root_id = str(root.get("root_id") or "").strip()
 
         try:
-            results = search_root(
-                root_id,
-                query,
-                k=8,
-            )
+            if len(retrieval_queries) > 1:
+                query_batches = search_root_queries(
+                    root_id,
+                    retrieval_queries,
+                    k=8,
+                )
+            else:
+                query_batches = [
+                    search_root(root_id, retrieval_queries[0], k=8)
+                ]
+            results = _merge_query_results(list(zip(
+                retrieval_queries,
+                query_batches,
+            )))
         except Exception as exc:
             return WorkerResult(
                 capability=KNOWLEDGE_WORKER_CAPABILITY,
@@ -152,6 +226,7 @@ def run_knowledge_worker(
                 "root_id": root_id,
                 "result_count": len(results),
                 "results": results,
+                "retrieval_queries": retrieval_queries,
                 "session_id": session_id,
             },
             evidence=evidence,
@@ -187,13 +262,22 @@ def run_knowledge_worker(
         )
 
         if supports_namespace:
-            results = retriever(
-                query,
-                k=8,
-                index_namespace=root_id,
-            )
+            results = _merge_query_results([
+                (
+                    retrieval_query,
+                    retriever(
+                        retrieval_query,
+                        k=8,
+                        index_namespace=root_id,
+                    ),
+                )
+                for retrieval_query in retrieval_queries
+            ])
         else:
-            results = retriever(query, k=8)
+            results = _merge_query_results([
+                (retrieval_query, retriever(retrieval_query, k=8))
+                for retrieval_query in retrieval_queries
+            ])
     except Exception as exc:
         return WorkerResult(
             capability=KNOWLEDGE_WORKER_CAPABILITY,
@@ -231,6 +315,7 @@ def run_knowledge_worker(
             "root_id": root_id,
             "result_count": len(results),
             "results": results,
+            "retrieval_queries": retrieval_queries,
             "session_id": session_id,
         },
         evidence=evidence,

@@ -122,6 +122,17 @@ def _agent_langgraph_architecture_enabled_for_request(chat_mode: str | None) -> 
         return True
 
 
+def _route_agent_runtime_for_request(message: str, enabled: bool):
+    """Return no LangGraph decision when the request-level kill switch is off.
+
+    This narrow seam makes Legacy isolation executable and testable: the
+    router itself is never invoked for a disabled request.
+    """
+    if not enabled:
+        return None
+    return route_agent_runtime(message)
+
+
 async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
     """Run native LangGraph first, preserving Legacy as failure fallback."""
     import inspect
@@ -739,7 +750,10 @@ def setup_chat_routes(
 
         _runtime_intent_requested = False
         try:
-            _f3_runtime_probe = route_agent_runtime(message) if _agent_langgraph_architecture_enabled else None
+            _f3_runtime_probe = _route_agent_runtime_for_request(
+                message,
+                _agent_langgraph_architecture_enabled,
+            )
             _runtime_intent_requested = (
                 _agent_langgraph_architecture_enabled
                 and _f3_runtime_probe is not None
@@ -1553,7 +1567,10 @@ def setup_chat_routes(
                         _forced_tools = {"web_search", "web_fetch"}
 
                     # RUNTIME_ROUTER_V013D_DECISION_START
-                    _runtime_decision = route_agent_runtime(message) if _agent_langgraph_architecture_enabled else None
+                    _runtime_decision = _route_agent_runtime_for_request(
+                        message,
+                        _agent_langgraph_architecture_enabled,
+                    )
 
                     _router_agent_runtime_requested = (
                         _agent_langgraph_architecture_enabled

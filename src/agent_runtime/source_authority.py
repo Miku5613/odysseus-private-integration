@@ -98,6 +98,11 @@ def authority_score(authority: str) -> int:
 
 
 def should_skip_source(path: str | None) -> bool:
-    authority = classify_source(path)
-    return authority == "generated_artifact"
+    """Compatibility hook: source-like artifacts are no longer hard-filtered.
 
+    ACTIVE COMPATIBILITY SEAM: evidence-ledger callers still invoke this
+    function. Returning False is intentional; ``authority_score`` supplies the
+    negative provenance weight and lets unusual/backup-only evidence remain
+    available when no stronger source exists.
+    """
+    return False

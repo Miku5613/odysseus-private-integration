@@ -182,6 +182,25 @@ async def stream_general_supervisor_sse(
     )
 
     evidence_payload = _dispatch_payload(dispatch)
+    for index, result in enumerate(dispatch.worker_results, start=1):
+        call_id = f"supervisor_{result.capability}_{index}"
+        yield _frame({
+            "type": "tool_start",
+            "id": call_id,
+            "call_id": call_id,
+            "tool": result.capability,
+            "command": query,
+        })
+        yield _frame({
+            "type": "tool_output",
+            "id": call_id,
+            "call_id": call_id,
+            "tool": result.capability,
+            "command": query,
+            "output": str(result.summary or result.error or "")[:8000],
+            "success": result.status == "completed",
+            "status": result.status,
+        })
 
     synthesis_prompt = "\n".join([
         "You are the final-response stage of the Odysseus General Supervisor.",

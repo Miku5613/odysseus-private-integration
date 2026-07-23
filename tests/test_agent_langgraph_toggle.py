@@ -26,7 +26,7 @@ def test_chat_route_skips_runtime_router_when_agent_langgraph_disabled() -> None
     chat = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
 
     assert 'get_setting("agent_langgraph_enabled", True)' in chat
-    assert "_runtime_decision = route_agent_runtime(message) if _agent_langgraph_architecture_enabled else None" in chat
+    assert "_runtime_decision = _route_agent_runtime_for_request(" in chat
     assert "_agent_langgraph_architecture_enabled" in chat
     assert "_runtime_decision is not None" in chat
     assert "_agent_langgraph_enabled_for_knowledge" not in chat
@@ -40,8 +40,8 @@ def test_agent_langgraph_toggle_is_request_level_bypass() -> None:
     assert "_agent_langgraph_architecture_enabled = _agent_langgraph_architecture_enabled_for_request(chat_mode)" in chat
     assert "_knowledge_intent_requested = (" in chat
     assert "_agent_langgraph_architecture_enabled\n                and isinstance(message, str)" in chat
-    assert "_f3_runtime_probe = route_agent_runtime(message) if _agent_langgraph_architecture_enabled else None" in chat
-    assert "_runtime_decision = route_agent_runtime(message) if _agent_langgraph_architecture_enabled else None" in chat
+    assert "_f3_runtime_probe = _route_agent_runtime_for_request(" in chat
+    assert "_runtime_decision = _route_agent_runtime_for_request(" in chat
     assert "_agent_langgraph_enabled_for_knowledge" not in chat
 
 
@@ -86,3 +86,18 @@ def test_langgraph_toggle_off_allows_none_runtime_decision_without_router_crash(
     assert "[odysseus-router] skipped because Agent LangGraph architecture is disabled" in chat
     assert "and _runtime_decision is not None\n                        and _runtime_decision.target_runtime == \"contract\"" in chat
     assert "and _runtime_decision is not None\n                        and _runtime_decision.target_runtime == \"general\"" in chat
+
+
+def test_langgraph_request_bypass_never_calls_runtime_router(monkeypatch) -> None:
+    from routes import chat_routes
+
+    calls = []
+
+    def forbidden_router(message):
+        calls.append(message)
+        raise AssertionError("LangGraph router leaked into Legacy request")
+
+    monkeypatch.setattr(chat_routes, "route_agent_runtime", forbidden_router)
+
+    assert chat_routes._route_agent_runtime_for_request("Find doc_stream", False) is None
+    assert calls == []

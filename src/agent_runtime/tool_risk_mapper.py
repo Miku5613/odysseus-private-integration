@@ -280,11 +280,10 @@ def decide_tool_policy_action(
     tool_name: str,
     schema: Mapping[str, object] | None = None,
 ) -> ToolRiskDecision:
-    """Convert a risk classification into a runtime policy action.
+    """Convert a risk classification into an active runtime policy action.
 
-    This is still not wired into execution. It is the stable seam future runtime
-    patches can call when deciding whether a tool may run directly, needs user
-    confirmation, or should only produce a proposal/copy.
+    ACTIVE RUNTIME SEAM: graph execution, MCP workers, shared workers, and the
+    central mutation-request policy all consume this decision path.
     """
 
     risk = classify_tool_risk(tool_name, schema=schema)
@@ -337,7 +336,7 @@ def summarize_tool_policy_actions(
 class ToolExecutionGate:
     """Direct execution decision for a tool.
 
-    This is the narrow runtime seam for future integration:
+    ACTIVE RUNTIME SEAM:
     - allowed=True only for safe_read tools
     - confirm/propose_only tools are blocked from direct execution until the
       confirmation/proposal layer handles them.

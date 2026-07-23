@@ -320,50 +320,27 @@ def build_semantic_vault_index(
     )
 
 
-def search_semantic_vault_index(
-    query: str,
-    *,
-    k: int = 8,
-    index_namespace: str = DEFAULT_INDEX_NAMESPACE,
-    embedding_url: str | None = None,
-    embedding_model: str | None = None,
+def _decode_search_results(
+    results: dict[str, Any],
+    query_index: int,
 ) -> list[dict[str, Any]]:
-    index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
-    query = str(query or "").strip()
-    if not query:
-        return []
-
-    emb = _embedding_client(
-        embedding_url=embedding_url,
-        embedding_model=embedding_model,
-    )
-    emb.get_sentence_embedding_dimension()
-
-    col = _collection()
-    qvec = emb.encode([query]).tolist()[0]
-
-    results = col.query(
-        query_embeddings=[qvec],
-        n_results=max(1, int(k)),
-        where={"index_namespace": index_namespace},
-        include=["documents", "metadatas", "distances"],
-    )
-
     out: list[dict[str, Any]] = []
-    ids = (results.get("ids") or [[]])[0]
-    docs = (results.get("documents") or [[]])[0]
-    metas = (results.get("metadatas") or [[]])[0]
-    distances = (results.get("distances") or [[]])[0]
+    ids_rows = results.get("ids") or []
+    docs_rows = results.get("documents") or []
+    metas_rows = results.get("metadatas") or []
+    distance_rows = results.get("distances") or []
+    ids = ids_rows[query_index] if query_index < len(ids_rows) else []
+    docs = docs_rows[query_index] if query_index < len(docs_rows) else []
+    metas = metas_rows[query_index] if query_index < len(metas_rows) else []
+    distances = distance_rows[query_index] if query_index < len(distance_rows) else []
 
     for idx, doc_id in enumerate(ids):
         meta = metas[idx] if idx < len(metas) else {}
         distance = distances[idx] if idx < len(distances) else None
         doc = docs[idx] if idx < len(docs) else ""
-
         similarity = None
         if isinstance(distance, (int, float)):
             similarity = round(1.0 - float(distance), 4)
-
         out.append({
             "id": doc_id,
             "path": meta.get("path", ""),
@@ -376,8 +353,61 @@ def search_semantic_vault_index(
             "preview": str(doc or "")[:500],
             "metadata": meta,
         })
-
     return out
+
+
+def search_semantic_vault_index_many(
+    queries: list[str],
+    *,
+    k: int = 8,
+    index_namespace: str = DEFAULT_INDEX_NAMESPACE,
+    embedding_url: str | None = None,
+    embedding_model: str | None = None,
+) -> list[list[dict[str, Any]]]:
+    index_namespace = str(index_namespace or DEFAULT_INDEX_NAMESPACE).strip()
+    clean_queries = [str(query or "").strip() for query in queries]
+    clean_queries = [query for query in clean_queries if query]
+    if not clean_queries:
+        return []
+
+    emb = _embedding_client(
+        embedding_url=embedding_url,
+        embedding_model=embedding_model,
+    )
+    emb.get_sentence_embedding_dimension()
+
+    col = _collection()
+    qvecs = emb.encode(clean_queries).tolist()
+
+    results = col.query(
+        query_embeddings=qvecs,
+        n_results=max(1, int(k)),
+        where={"index_namespace": index_namespace},
+        include=["documents", "metadatas", "distances"],
+    )
+
+    return [
+        _decode_search_results(results, query_index)
+        for query_index in range(len(clean_queries))
+    ]
+
+
+def search_semantic_vault_index(
+    query: str,
+    *,
+    k: int = 8,
+    index_namespace: str = DEFAULT_INDEX_NAMESPACE,
+    embedding_url: str | None = None,
+    embedding_model: str | None = None,
+) -> list[dict[str, Any]]:
+    batches = search_semantic_vault_index_many(
+        [query],
+        k=k,
+        index_namespace=index_namespace,
+        embedding_url=embedding_url,
+        embedding_model=embedding_model,
+    )
+    return batches[0] if batches else []
 
 
 def get_semantic_vault_stats(

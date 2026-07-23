@@ -16,6 +16,7 @@ from src.agent_runtime.knowledge_vault_semantic import (
     build_semantic_vault_index,
     get_semantic_vault_stats,
     search_semantic_vault_index,
+    search_semantic_vault_index_many,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -443,6 +444,41 @@ def search_root(
     return results
 
 
+def search_root_queries(
+    root_id: str,
+    queries: list[str],
+    *,
+    k: int = 8,
+) -> list[list[dict[str, Any]]]:
+    """Batch several semantic queries with one embedding request."""
+
+    root_id = normalize_root_id(root_id)
+    if not get_root(root_id):
+        raise ValueError(f"Unknown root_id: {root_id}")
+
+    clean_queries = [str(query or "").strip() for query in queries]
+    clean_queries = [query for query in clean_queries if query][:6]
+    if not clean_queries:
+        raise ValueError("At least one non-empty search query is required.")
+
+    batches = search_semantic_vault_index_many(
+        clean_queries,
+        k=k,
+        index_namespace=root_id,
+        embedding_url=WORKSPACE_EMBEDDING_URL,
+        embedding_model=WORKSPACE_EMBEDDING_MODEL,
+    )
+
+    data = _load_registry()
+    for item in data.get("roots", []):
+        if isinstance(item, dict) and str(item.get("root_id") or "") == root_id:
+            item["last_queried"] = _now_iso()
+    if "local_roots" in data:
+        data["local_roots"] = data["roots"]
+    _save_registry(data)
+    return batches
+
+
 def flush_root_index(root_id: str) -> dict[str, Any]:
     root_id = normalize_root_id(root_id)
     if not get_root(root_id):
@@ -594,6 +630,7 @@ __all__ = [
     "register_root",
     "index_root",
     "search_root",
+    "search_root_queries",
     "flush_root_index",
     "remove_root",
     "root_stats",

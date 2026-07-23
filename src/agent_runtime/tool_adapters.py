@@ -48,7 +48,7 @@ def active_workspace() -> Path:
 
 
 
-SKIP_DIRS = {
+HARD_SKIP_DIRS = {
     ".git",
     "venv",
     "__pycache__",
@@ -58,18 +58,19 @@ SKIP_DIRS = {
     "build",
     "logs",
     "data",
-    # Contract/source lookup must inspect the live implementation, not local
-    # repair artifacts, generated reports, or historical copies.
+    ".agents",
+    ".codex",
+}
+
+LOW_AUTHORITY_DIRS = {
     "exclusions",
     "backups",
     "backup",
     "archives",
     "archive",
-    ".agents",
-    ".codex",
 }
 
-GENERATED_SKIP_PATTERNS = {
+LOW_AUTHORITY_PATTERNS = {
     "langgraph_*_inspect.txt",
     "Pasted text*.txt",
     "patch_runtime_*.py",
@@ -80,6 +81,12 @@ GENERATED_SKIP_PATTERNS = {
     "*.backup",
     "*_backup.*",
 }
+
+# DORMANT COMPATIBILITY ALIASES (not read by the current runtime).
+# Kept temporarily for external imports and old diagnostics; runtime filtering
+# now uses HARD_SKIP_DIRS and LOW_AUTHORITY_* explicitly.
+SKIP_DIRS = HARD_SKIP_DIRS
+GENERATED_SKIP_PATTERNS = LOW_AUTHORITY_PATTERNS
 
 
 def _safe_path(path: str | None = None, workspace: str | None = None) -> Path:
@@ -103,12 +110,23 @@ def _safe_path(path: str | None = None, workspace: str | None = None) -> Path:
 
 
 def _is_skipped(path: Path) -> bool:
-    if any(part.lower() in SKIP_DIRS for part in path.parts):
+    """Hard-skip only non-source structural trees.
+
+    Backups, Exclusions, and generated source-like artifacts deliberately stay
+    searchable. Contract provenance ranks them below live/tracked source rather
+    than treating their directory name as a source-of-truth decision.
+    """
+    return any(part.lower() in HARD_SKIP_DIRS for part in path.parts)
+
+
+def _is_low_authority(path: Path) -> bool:
+    """Identify source-like artifacts that must be scored, not discarded."""
+    if any(part.lower() in LOW_AUTHORITY_DIRS for part in path.parts):
         return True
     name = path.name.lower()
     return any(
         fnmatch.fnmatch(name, pattern.lower())
-        for pattern in GENERATED_SKIP_PATTERNS
+        for pattern in LOW_AUTHORITY_PATTERNS
     )
 
 
@@ -189,7 +207,12 @@ def glob_files(pattern: str) -> str:
 
 
 @tool
-def grep(pattern: str, path: str = ".", max_matches: int = 80) -> str:
+def grep(
+    pattern: str,
+    path: str = ".",
+    max_matches: int = 80,
+    include_low_authority: bool = False,
+) -> str:
     """Search text files for a regex/text pattern under a workspace path. Returns file:line evidence."""
     try:
         target = _safe_path(path)
@@ -200,11 +223,10 @@ def grep(pattern: str, path: str = ".", max_matches: int = 80) -> str:
             rx = re.compile(re.escape(pattern), re.IGNORECASE)
 
         files = [target] if target.is_file() else list(target.rglob("*"))
-        rows = []
+        primary_rows = []
+        low_authority_rows = []
 
         for file in files:
-            if len(rows) >= max_matches:
-                break
             if not file.is_file() or _is_skipped(file):
                 continue
 
@@ -216,9 +238,28 @@ def grep(pattern: str, path: str = ".", max_matches: int = 80) -> str:
             for i, line in enumerate(text.splitlines(), start=1):
                 if rx.search(line):
                     rel = file.relative_to(active_workspace())
-                    rows.append(f"{rel}:{i}: {line.strip()[:260]}")
-                    if len(rows) >= max_matches:
+                    row = f"{rel}:{i}: {line.strip()[:260]}"
+                    bucket = (
+                        low_authority_rows
+                        if _is_low_authority(file)
+                        else primary_rows
+                    )
+                    bucket.append(row)
+                    if len(bucket) >= max_matches:
                         break
+
+        if include_low_authority and low_authority_rows:
+            # Keep a bounded minority of low-authority candidates so the
+            # Contract provenance ranker can compare them with live source.
+            # If no primary source matched, unusual evidence remains eligible.
+            if primary_rows:
+                low_budget = max(1, min(len(low_authority_rows), max_matches // 3))
+                primary_budget = max(1, max_matches - low_budget)
+                rows = primary_rows[:primary_budget] + low_authority_rows[:low_budget]
+            else:
+                rows = low_authority_rows[:max_matches]
+        else:
+            rows = primary_rows[:max_matches]
 
         return "\n".join(rows) or "No matches."
     except Exception as e:

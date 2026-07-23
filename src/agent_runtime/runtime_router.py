@@ -121,6 +121,7 @@ FILE_LOOKUP_PATTERNS = [
     r"\binspect\s+the\s+structure\b",
     r"\bfiles\s+involved\b",
     r"\bcode\s+involved\b",
+    r"\b(?:find|show|list)\b.{0,80}\bfiles?\b",
 ]
 
 EXACT_LOOKUP_PATTERNS = [

@@ -550,50 +550,109 @@ def _first_match(
     task: SubTask | None = None,
     workspace: str | None = None,
 ) -> tuple[str, int] | None:
-    matches = _all_matches(output)
-    if not matches:
+    """DORMANT COMPATIBILITY WRAPPER; production uses the audited ranker.
+
+    Older evals and external diagnostics import this helper directly. The live
+    Contract execution path calls ``_rank_matches_with_provenance`` so it can
+    retain the complete score/provenance audit.
+    """
+    ranked = _rank_matches_with_provenance(
+        output,
+        task,
+        workspace,
+    )
+    if not ranked:
         return None
 
+    return ranked[0]["path"], ranked[0]["line"]
+
+
+def _rank_matches_with_provenance(
+    output: str,
+    task: SubTask | None = None,
+    workspace: str | None = None,
+) -> list[dict[str, Any]]:
+    """Rank lexical matches and retain an auditable score breakdown.
+
+    Low-authority locations remain eligible. Their path role and Git context
+    influence ranking only after the candidate has satisfied the lexical
+    Contract lookup.
+    """
+    matches = _all_matches(output)
+    if not matches:
+        return []
+
     if task is None:
-        path, line, _content = matches[0]
-        return path, line
+        return [
+            {
+                "path": path,
+                "line": line,
+                "content": content,
+                "task_score": 0,
+                "provenance_score": 0.0,
+                "total_score": 0.0,
+                "provenance": {},
+            }
+            for path, line, content in matches
+        ]
 
     repository_context = None
+    provenance_resolver = None
 
     if workspace:
         try:
             from src.agent_runtime.general_graph import (
                 _build_repository_context,
+                _source_provenance_context,
             )
 
             repository_context = _build_repository_context(
                 workspace,
             )
+            provenance_resolver = _source_provenance_context
         except Exception:
             repository_context = None
+            provenance_resolver = None
 
-    contextual_bonus_by_path = {
-        match[0]: _contextual_match_bonus(
+    ranked: list[dict[str, Any]] = []
+    for path, line, content in matches:
+        task_score = _rank_match_for_task(
+            task,
+            (path, line, content),
+        )
+        provenance_score = _contextual_match_bonus(
             workspace,
-            match[0],
+            path,
             repository_context,
         )
-        for match in matches
-    }
+        provenance: dict[str, Any] = {}
+        if workspace and provenance_resolver is not None:
+            try:
+                provenance = provenance_resolver(
+                    workspace,
+                    path,
+                    repository_context,
+                )
+            except Exception:
+                provenance = {}
 
-    ranked = sorted(
-        matches,
-        key=lambda m: (
-            -(
-                _rank_match_for_task(task, m)
-                + contextual_bonus_by_path.get(m[0], 0.0)
-            ),
-            m[1],
+        ranked.append({
+            "path": path,
+            "line": line,
+            "content": content,
+            "task_score": task_score,
+            "provenance_score": provenance_score,
+            "total_score": task_score + provenance_score,
+            "provenance": provenance,
+        })
+
+    ranked.sort(
+        key=lambda item: (
+            -float(item["total_score"]),
+            int(item["line"]),
         ),
     )
-
-    path, line, _content = ranked[0]
-    return path, line
+    return ranked
 
 def _path_for_task(task: SubTask) -> str:
     return task.source_scope[0] if task.source_scope else "."
@@ -660,7 +719,12 @@ def execute_subtask(state: ContractState, task: SubTask) -> ContractState:
 
     grep_out = _call_tool(
         "grep",
-        {"pattern": pattern, "path": path, "max_matches": 30},
+        {
+            "pattern": pattern,
+            "path": path,
+            "max_matches": 60,
+            "include_low_authority": True,
+        },
         f"{task.id}_grep_1",
         state,
     )
@@ -674,11 +738,69 @@ def execute_subtask(state: ContractState, task: SubTask) -> ContractState:
         }
         return verify_subtask(state, task)
 
-    match = _first_match(
+    ranked_matches = _rank_matches_with_provenance(
         grep_out,
         task,
         state.workspace,
     )
+    match = (
+        (ranked_matches[0]["path"], ranked_matches[0]["line"])
+        if ranked_matches
+        else None
+    )
+
+    if ranked_matches:
+        audited_candidates = list(ranked_matches[:10])
+        audited_paths = {
+            (item.get("path"), item.get("line"))
+            for item in audited_candidates
+        }
+        for item in ranked_matches:
+            provenance = item.get("provenance") or {}
+            identity = (item.get("path"), item.get("line"))
+            if (
+                provenance.get("role") != "source"
+                and identity not in audited_paths
+            ):
+                audited_candidates.append(item)
+                audited_paths.add(identity)
+                if len(audited_candidates) >= 12:
+                    break
+
+        provenance_audit = {
+            "type": "source_provenance_audit",
+            "task_id": task.id,
+            "selected": {
+                key: ranked_matches[0].get(key)
+                for key in (
+                    "path",
+                    "line",
+                    "task_score",
+                    "provenance_score",
+                    "total_score",
+                    "provenance",
+                )
+            },
+            "candidates": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "path",
+                        "line",
+                        "task_score",
+                        "provenance_score",
+                        "total_score",
+                        "provenance",
+                    )
+                }
+                for item in audited_candidates
+            ],
+        }
+        state.internal_events.append(provenance_audit)
+        _emit(
+            "source_provenance_audit",
+            data=provenance_audit,
+        )
 
     # For stream generator, prefer context around a concrete handler line from route task if available.
     if task.kind == "stream_generator_lookup":

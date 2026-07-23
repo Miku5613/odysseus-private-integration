@@ -721,11 +721,16 @@ def _build_repository_context(workspace: str) -> dict:
     try:
         workspace_path = Path(workspace).resolve()
         candidates = (workspace_path, *workspace_path.parents)
+        repository_root = next(
+            (
+                candidate
+                for candidate in candidates
+                if (candidate / ".git").exists()
+            ),
+            None,
+        )
 
-        if not any(
-            (candidate / ".git").exists()
-            for candidate in candidates
-        ):
+        if repository_root is None:
             return empty_context
     except Exception:
         return empty_context
@@ -733,8 +738,18 @@ def _build_repository_context(workspace: str) -> dict:
     import subprocess
 
     try:
+        # Per-command ownership allowance: do not mutate global Git config.
+        # This keeps provenance available in managed/worktree environments
+        # where the checkout owner differs from the runtime process account.
+        git_base = [
+            "git",
+            "-c",
+            f"safe.directory={repository_root.as_posix()}",
+            "-C",
+            workspace,
+        ]
         proc = subprocess.run(
-            ["git", "-C", workspace, "ls-files"],
+            [*git_base, "ls-files"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -748,7 +763,7 @@ def _build_repository_context(workspace: str) -> dict:
 
         proc = subprocess.run(
             [
-                "git", "-C", workspace,
+                *git_base,
                 "ls-files", "--others", "--ignored", "--exclude-standard",
             ],
             capture_output=True,
@@ -763,7 +778,7 @@ def _build_repository_context(workspace: str) -> dict:
             }
 
         proc = subprocess.run(
-            ["git", "-C", workspace, "status", "--porcelain", "-uall"],
+            [*git_base, "status", "--porcelain", "-uall"],
             capture_output=True,
             text=True,
             timeout=5,
