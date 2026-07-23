@@ -48,6 +48,7 @@ def build_supervisor_prompt(
 
     schema = {
         "selected_capabilities": ["capability_name"],
+        "capability_actions": {"capability_name": "supported_action"},
         "missing_information": ["description of unresolved information"],
         "clarification_needed": False,
         "reasoning_summary": "Brief orchestration rationale.",
@@ -55,6 +56,8 @@ def build_supervisor_prompt(
 
     instructions = [
         "You are the general agent Supervisor for Odysseus.",
+        "For each selected capability that needs a specific operation, set capability_actions to one advertised supported_action for that capability.",
+        "For deep_research: trigger_research starts new research; retrieve_research or reuse_research_context retrieves existing saved research; manage_research manages the saved research library.",
         "",
         "Your job is orchestration, not domain execution.",
         "",

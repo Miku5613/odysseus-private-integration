@@ -53,6 +53,11 @@ def build_worker_handoff(
     state = supervisor_state or {}
 
     context = dict(state.get("worker_context", {}))
+    capability_actions = dict(state.get("capability_actions", {}) or {})
+    selected_action = capability_actions.get(capability)
+
+    if selected_action:
+        context["action"] = selected_action
 
     return WorkerHandoff(
         capability=capability,

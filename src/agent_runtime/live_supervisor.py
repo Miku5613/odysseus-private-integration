@@ -186,6 +186,7 @@ async def stream_general_supervisor_sse(
 
     supervisor_state = {
         "missing_information": list(decision.missing_information),
+        "capability_actions": dict(decision.capability_actions or {}),
         "worker_context": {
             "query": query,
             "topic": query,
