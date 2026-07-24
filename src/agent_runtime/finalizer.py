@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 
@@ -161,3 +164,157 @@ def clean_negative_lookup_wording(*, answer: str, claim_support: dict) -> str:
     for old, new in replacements:
         text = text.replace(old, new)
     return text
+
+def build_grounded_worker_finalizer_prompt(
+    *,
+    objective: str,
+    task_contract: str,
+    claim_support: str,
+    contract_report: str,
+    observations_summary: str,
+    raw_tool_evidence: str,
+) -> str:
+    """Build one evidence-grounded PlanStep finalization contract.
+
+    The worker objective is the complete semantic answer contract. Strong
+    evidence is necessary but never sufficient by itself: the model must also
+    produce a grounded answer that fulfills every requested deliverable.
+    """
+
+    schema = {
+        "answer": "Grounded step-specific answer using only supplied evidence.",
+        "fulfills_objective": True,
+        "missing_requirements": [],
+        "evidence_paths": ["relative/source/path.py"],
+    }
+
+    return "\n".join(
+        [
+            "You are finalizing exactly one already-resolved worker PlanStep.",
+            "Do not answer the broader original user request.",
+            "Do not call tools.",
+            "Use only the supplied source evidence.",
+            "",
+            "The PLANSTEP OBJECTIVE below is the complete answer contract.",
+            "Address every deliverable it requests, not merely the first one.",
+            "For example, if it asks to identify implementation files AND explain",
+            "their responsibilities, a path list or raw grep snippets alone do",
+            "not fulfill the objective.",
+            "",
+            "Completion rules:",
+            "1. Evidence strength and task fulfillment are separate gates.",
+            "2. Set fulfills_objective=true only when the answer itself satisfies",
+            "   every requested deliverable from the PlanStep objective.",
+            "3. Never invent responsibilities, relationships, behavior, paths,",
+            "   symbols, or conclusions not supported by the supplied evidence.",
+            "4. If evidence is strong for only part of the objective, set",
+            "   fulfills_objective=false and list the missing requirements.",
+            "5. Prefer concise file-to-responsibility mappings when the objective",
+            "   asks for implementation ownership or component responsibilities.",
+            "6. Do not return raw retrieval debris as the final answer.",
+            "7. Return one JSON object only, matching the required schema.",
+            "",
+            "PLANSTEP OBJECTIVE:",
+            str(objective or "").strip(),
+            "",
+            task_contract,
+            "",
+            claim_support,
+            "",
+            contract_report,
+            "",
+            "TOP SOURCE OBSERVATIONS:",
+            observations_summary,
+            "",
+            "RAW SOURCE EVIDENCE:",
+            raw_tool_evidence,
+            "",
+            "REQUIRED OUTPUT SCHEMA:",
+            json.dumps(schema, ensure_ascii=False, indent=2),
+        ]
+    )
+
+
+def parse_grounded_worker_finalizer_response(
+    text: str,
+) -> dict[str, Any]:
+    """Parse and validate one grounded worker-finalization JSON object."""
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Grounded worker finalizer returned an empty response")
+
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+
+    payload = None
+    try:
+        decoded = json.loads(candidate)
+        if isinstance(decoded, dict):
+            payload = decoded
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(candidate):
+            if character != "{":
+                continue
+            try:
+                decoded, _ = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, dict):
+                payload = decoded
+                break
+
+    if payload is None:
+        raise ValueError(
+            "Grounded worker finalizer did not return one valid JSON object"
+        )
+
+    answer = payload.get("answer")
+    fulfills = payload.get("fulfills_objective")
+    missing = payload.get("missing_requirements")
+    paths = payload.get("evidence_paths")
+
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError(
+            "Grounded worker finalizer answer must be a non-empty string"
+        )
+    if not isinstance(fulfills, bool):
+        raise ValueError(
+            "Grounded worker finalizer fulfills_objective must be boolean"
+        )
+    if not isinstance(missing, list) or any(
+        not isinstance(item, str) or not item.strip()
+        for item in missing
+    ):
+        raise ValueError(
+            "Grounded worker finalizer missing_requirements must be a list "
+            "of non-empty strings"
+        )
+    if not isinstance(paths, list) or any(
+        not isinstance(item, str) or not item.strip()
+        for item in paths
+    ):
+        raise ValueError(
+            "Grounded worker finalizer evidence_paths must be a list "
+            "of non-empty strings"
+        )
+    if fulfills and missing:
+        raise ValueError(
+            "A fulfilled objective cannot also report missing requirements"
+        )
+    if fulfills and not paths:
+        raise ValueError(
+            "A fulfilled objective must cite at least one evidence path"
+        )
+
+    return {
+        "answer": answer.strip(),
+        "fulfills_objective": fulfills,
+        "missing_requirements": tuple(item.strip() for item in missing),
+        "evidence_paths": tuple(item.strip() for item in paths),
+    }

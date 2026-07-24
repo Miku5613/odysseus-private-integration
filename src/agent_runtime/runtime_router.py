@@ -160,6 +160,63 @@ def _has_regex(text: str, patterns: list[str]) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
 
+_WRITE_NEGATION_PATTERN = re.compile(
+    r"\b(?:do\s+not|don't|dont|never|avoid|refrain\s+from|without)\b"
+    r"(?:\W+\w+){0,8}\W*$",
+    flags=re.IGNORECASE,
+)
+
+_WRITE_SCOPE_BREAK_PATTERN = re.compile(
+    r"(?:[.!?;:\n]|\b(?:but|however|instead|then|except)\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def _write_match_is_negated(text: str, match_start: int) -> bool:
+    """Return True when a mutation keyword is inside an explicit negation.
+
+    Runtime routing must distinguish an action request ("modify the file")
+    from a safety constraint ("do not modify any file"). The check is local
+    to the current clause so a later positive action remains authoritative,
+    for example: "do not edit the source, but create a report".
+    """
+
+    prefix = text[:match_start]
+    scope_breaks = list(
+        _WRITE_SCOPE_BREAK_PATTERN.finditer(prefix)
+    )
+    clause_prefix = (
+        prefix[scope_breaks[-1].end():]
+        if scope_breaks
+        else prefix
+    )
+
+    return bool(
+        _WRITE_NEGATION_PATTERN.search(
+            clause_prefix
+        )
+    )
+
+
+def _has_affirmative_write_intent(
+    text: str,
+    patterns: list[str],
+) -> bool:
+    for pattern in patterns:
+        for match in re.finditer(
+            pattern,
+            text,
+            flags=re.IGNORECASE,
+        ):
+            if not _write_match_is_negated(
+                text,
+                match.start(),
+            ):
+                return True
+
+    return False
+
+
 def _has_any_term(text: str, terms: list[str]) -> bool:
     low = text.lower()
     return any(term.lower() in low for term in terms)
@@ -217,8 +274,10 @@ def route_agent_runtime(prompt: str) -> RuntimeDecision:
             is_safe_readonly=False,
         )
 
-    # Safety first. Any mutation hint prevents contract/general routing.
-    if _has_regex(low, WRITE_PATTERNS):
+    # Safety first. An affirmative mutation request prevents
+    # contract/general routing. Explicitly negated mutation terms are safety
+    # constraints and must not be mistaken for requested side effects.
+    if _has_affirmative_write_intent(low, WRITE_PATTERNS):
         return RuntimeDecision(
             intent="write_mutation",
             target_runtime="legacy",

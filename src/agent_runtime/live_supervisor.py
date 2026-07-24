@@ -9,9 +9,13 @@ from src.agent_runtime.supervisor_decision import parse_supervisor_decision
 from src.agent_runtime.supervisor_reasoner import build_supervisor_prompt
 from src.agent_runtime.worker_dispatcher import (
     DispatchResult,
+    builtin_worker_runners,
     dispatch_supervisor_decision_async,
 )
-from src.llm_core import llm_call_async
+from src.llm_core import (
+    llm_call_async,
+    llm_call_async_with_fallback,
+)
 
 
 RUNTIME_VERSION = "general-supervisor-v1"
@@ -108,6 +112,7 @@ async def stream_general_supervisor_sse(
     active_document: Any = None,
     disabled_tools: set[str] | None = None,
     tool_policy: Any = None,
+    fallbacks: list[Any] | tuple[Any, ...] | None = None,
     llm_caller: AsyncLlmCaller = llm_call_async,
     dispatcher: AsyncDispatcher = dispatch_supervisor_decision_async,
     **kwargs: Any,
@@ -120,13 +125,36 @@ async def stream_general_supervisor_sse(
     if not query:
         raise ValueError("General Supervisor could not find a user message")
 
+    runtime_llm_candidates = [
+        (endpoint_url, model, headers),
+        *list(fallbacks or ()),
+    ]
+
+    async def call_runtime_llm(
+        llm_messages: list[dict[str, Any]],
+        **call_kwargs: Any,
+    ) -> Any:
+        # Explicit injection remains available for tests/internal callers.
+        # Production follows Odysseus's canonical fallback executor.
+        if llm_caller is not llm_call_async:
+            return await llm_caller(
+                endpoint_url,
+                model,
+                llm_messages,
+                headers=headers,
+                **call_kwargs,
+            )
+
+        return await llm_call_async_with_fallback(
+            runtime_llm_candidates,
+            messages=llm_messages,
+            **call_kwargs,
+        )
+
     decision_prompt = build_supervisor_prompt(query)
 
-    decision_response = await llm_caller(
-        endpoint_url,
-        model,
+    decision_response = await call_runtime_llm(
         [{"role": "user", "content": decision_prompt}],
-        headers=headers,
         temperature=0.0,
         max_tokens=min(max_tokens, 1400),
         prompt_type=prompt_type,
@@ -159,6 +187,7 @@ async def stream_general_supervisor_sse(
 
     supervisor_state = {
         "missing_information": list(decision.missing_information),
+        "capability_actions": dict(decision.capability_actions or {}),
         "worker_context": {
             "query": query,
             "topic": query,
@@ -174,11 +203,20 @@ async def stream_general_supervisor_sse(
         },
     }
 
+    dispatch_kwargs = {
+        "supervisor_state": supervisor_state,
+        "session_id": session_id,
+    }
+    if dispatcher is dispatch_supervisor_decision_async:
+        dispatch_kwargs["worker_runners"] = builtin_worker_runners(
+            code_finalizer_candidates=runtime_llm_candidates,
+            code_finalizer_prompt_type=prompt_type,
+        )
+
     dispatch = await dispatcher(
         decision,
         query,
-        supervisor_state=supervisor_state,
-        session_id=session_id,
+        **dispatch_kwargs,
     )
 
     evidence_payload = _dispatch_payload(dispatch)
@@ -221,11 +259,8 @@ async def stream_general_supervisor_sse(
     ])
 
     try:
-        final_response = await llm_caller(
-            endpoint_url,
-            model,
+        final_response = await call_runtime_llm(
             [{"role": "user", "content": synthesis_prompt}],
-            headers=headers,
             temperature=temperature,
             max_tokens=max_tokens,
             prompt_type=prompt_type,

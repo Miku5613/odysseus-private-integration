@@ -12,6 +12,7 @@ class SupervisorDecision:
     """Validated orchestration decision produced by the Supervisor model."""
 
     selected_capabilities: tuple[str, ...]
+    capability_actions: dict[str, str] | None = None
     missing_information: tuple[str, ...] = ()
     clarification_needed: bool = False
     reasoning_summary: str = ""
@@ -40,12 +41,16 @@ def validate_supervisor_decision(
     known = known_capabilities or set(registry)
 
     raw_selected = payload.get("selected_capabilities", [])
+    raw_actions = payload.get("capability_actions", {})
     raw_missing = payload.get("missing_information", [])
     raw_clarification = payload.get("clarification_needed", False)
     raw_summary = payload.get("reasoning_summary", "")
 
     if not isinstance(raw_selected, list):
         raise ValueError("selected_capabilities must be a list")
+
+    if not isinstance(raw_actions, dict):
+        raise ValueError("capability_actions must be an object")
 
     if not isinstance(raw_missing, list):
         raise ValueError("missing_information must be a list")
@@ -69,6 +74,40 @@ def validate_supervisor_decision(
 
         selected.append(name)
 
+    capability_actions: dict[str, str] = {}
+
+    for capability, action in raw_actions.items():
+        if not isinstance(capability, str) or not capability.strip():
+            raise ValueError("capability_actions keys must be non-empty strings")
+
+        if not isinstance(action, str) or not action.strip():
+            raise ValueError("capability_actions values must be non-empty strings")
+
+        capability_name = capability.strip()
+        action_name = action.strip()
+
+        if capability_name not in known:
+            raise ValueError(f"Unknown capability in capability_actions: {capability_name}")
+
+        descriptor = registry.get(capability_name)
+        supported_actions = set(
+            descriptor.supported_actions
+            if descriptor is not None
+            else ()
+        )
+
+        if supported_actions and action_name not in supported_actions:
+            raise ValueError(
+                f"Unsupported action for {capability_name}: {action_name}"
+            )
+
+        if capability_name not in selected:
+            raise ValueError(
+                f"capability_actions entry requires selected capability: {capability_name}"
+            )
+
+        capability_actions[capability_name] = action_name
+
     missing: list[str] = []
 
     for value in raw_missing:
@@ -79,6 +118,7 @@ def validate_supervisor_decision(
 
     return SupervisorDecision(
         selected_capabilities=_dedupe_preserve_order(selected),
+        capability_actions=capability_actions,
         missing_information=_dedupe_preserve_order(missing),
         clarification_needed=raw_clarification,
         reasoning_summary=raw_summary.strip(),

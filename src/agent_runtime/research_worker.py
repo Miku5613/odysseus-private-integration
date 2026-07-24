@@ -18,16 +18,57 @@ def _normalize_action(handoff: WorkerHandoff) -> str:
 
     aliases = {
         "trigger": "start",
+        "trigger_research": "start",
         "research": "start",
         "open": "read",
         "view": "read",
         "get": "read",
         "retrieve": "read",
+        "retrieve_research": "read",
+        "reuse": "read",
+        "reuse_research_context": "read",
+        "manage_research": "list",
         "status": "list",
         "find": "list",
     }
 
     return aliases.get(action, action)
+
+
+def _first_research_id(payload: dict[str, Any]) -> str:
+    """Resolve the first ID from manage_research public list output."""
+
+    output = str(
+        payload.get("output")
+        or payload.get("results")
+        or payload.get("content")
+        or ""
+    )
+
+    marker = "#research-"
+    start = output.find(marker)
+
+    if start < 0:
+        return ""
+
+    start += len(marker)
+    end = output.find(")", start)
+
+    if end < 0:
+        return ""
+
+    candidate = output[start:end].strip()
+
+    if not candidate:
+        return ""
+
+    if not all(
+        char.isalnum() or char in "_-"
+        for char in candidate
+    ):
+        return ""
+
+    return candidate
 
 
 def _backend_failed(payload: dict[str, Any]) -> bool:
@@ -93,24 +134,69 @@ async def run_research_worker(
 
             search = str(handoff.context.get("search") or "").strip()
 
-            if action in {"read", "delete"} and not research_id:
-                return WorkerResult(
-                    capability=RESEARCH_WORKER_CAPABILITY,
-                    status="needs_clarification",
-                    summary=f"Research ID is required for {action}.",
-                    missing_information=("research_id",),
+            if action == "read" and not research_id:
+                list_request: dict[str, Any] = {"action": "list"}
+
+                if search:
+                    list_request["search"] = search
+
+                list_payload = await manage_backend(
+                    json.dumps(list_request),
+                    owner=owner,
                 )
 
-            if research_id:
-                request["id"] = research_id
+                if not isinstance(list_payload, dict):
+                    return WorkerResult(
+                        capability=RESEARCH_WORKER_CAPABILITY,
+                        status="failed",
+                        summary="Research library returned an invalid response.",
+                    )
 
-            if search:
-                request["search"] = search
+                if _backend_failed(list_payload):
+                    payload = list_payload
+                else:
+                    research_id = _first_research_id(list_payload)
 
-            payload = await manage_backend(
-                json.dumps(request),
-                owner=owner,
-            )
+                    if not research_id:
+                        return WorkerResult(
+                            capability=RESEARCH_WORKER_CAPABILITY,
+                            status="needs_clarification",
+                            summary=(
+                                "No completed research report could be resolved "
+                                "from the existing research library."
+                            ),
+                            missing_information=("completed research report",),
+                        )
+
+                    payload = await manage_backend(
+                        json.dumps(
+                            {
+                                "action": "read",
+                                "id": research_id,
+                            }
+                        ),
+                        owner=owner,
+                    )
+
+            else:
+                if action == "delete" and not research_id:
+                    return WorkerResult(
+                        capability=RESEARCH_WORKER_CAPABILITY,
+                        status="needs_clarification",
+                        summary="Research ID is required for delete.",
+                        missing_information=("research_id",),
+                    )
+
+                if research_id:
+                    request["id"] = research_id
+
+                if search:
+                    request["search"] = search
+
+                payload = await manage_backend(
+                    json.dumps(request),
+                    owner=owner,
+                )
 
         else:
             return WorkerResult(

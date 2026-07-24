@@ -19,6 +19,37 @@ def test_live_runtime_worker_inspection_routes_to_general() -> None:
     assert decision.is_safe_readonly is True
 
 
+def test_negated_mutation_constraint_remains_readonly() -> None:
+    decision = route_agent_runtime(
+        "Inspect the current Odysseus repository and list the runtime files. "
+        "Do not modify any file."
+    )
+
+    assert decision.intent == "file_lookup"
+    assert decision.target_runtime == "general"
+    assert decision.is_safe_readonly is True
+
+
+def test_negated_mutation_does_not_hide_later_positive_write() -> None:
+    decision = route_agent_runtime(
+        "Do not edit the existing source, but create a new report file."
+    )
+
+    assert decision.intent == "write_mutation"
+    assert decision.target_runtime == "legacy"
+    assert decision.is_safe_readonly is False
+
+
+def test_multiple_negated_mutation_terms_remain_readonly() -> None:
+    decision = route_agent_runtime(
+        "List the project modules. Do not edit, rename, or delete any files."
+    )
+
+    assert decision.intent == "file_lookup"
+    assert decision.target_runtime == "general"
+    assert decision.is_safe_readonly is True
+
+
 def test_streaming_chat_uses_normalized_web_boolean() -> None:
     source = (
         REPO_ROOT / "routes" / "chat_routes.py"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from functools import partial
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,11 +31,25 @@ class DispatchResult:
     undispatched_capabilities: tuple[str, ...] = ()
 
 
-def builtin_worker_runners() -> dict[str, WorkerRunner]:
-    """Return worker backends currently implemented by the runtime."""
+def builtin_worker_runners(
+    *,
+    code_finalizer_candidates: Sequence[tuple] | None = None,
+    code_finalizer_prompt_type: str | None = None,
+) -> dict[str, WorkerRunner]:
+    """Return configured worker backends currently implemented by the runtime."""
+
+    code_runner: WorkerRunner = run_code_worker
+    if code_finalizer_candidates:
+        code_runner = partial(
+            run_code_worker,
+            finalizer_candidates=tuple(
+                code_finalizer_candidates
+            ),
+            finalizer_prompt_type=code_finalizer_prompt_type,
+        )
 
     return {
-        "code_inspection": run_code_worker,
+        "code_inspection": code_runner,
         "knowledge_search": run_knowledge_worker,
         "deep_research": run_research_worker,
         "mcp_specialized": run_mcp_worker,
@@ -53,6 +68,11 @@ def build_worker_handoff(
     state = supervisor_state or {}
 
     context = dict(state.get("worker_context", {}))
+    capability_actions = dict(state.get("capability_actions", {}) or {})
+    selected_action = capability_actions.get(capability)
+
+    if selected_action:
+        context["action"] = selected_action
 
     return WorkerHandoff(
         capability=capability,

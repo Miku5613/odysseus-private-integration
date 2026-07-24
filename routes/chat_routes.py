@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from functools import partial
 import time
 import logging
 from datetime import datetime
@@ -18,6 +19,9 @@ from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import stream_agent_loop
 from src.agent_runtime.live_supervisor import stream_general_supervisor_sse
+from src.agent_runtime.multi_graph_coordinator import (
+    stream_multi_graph_coordinator_sse,
+)
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -35,6 +39,7 @@ from src.agent_runtime.runtime_router import (
     explain_runtime_route,
     is_casual_conversation_request,
 )
+from src.agent_runtime.agent_admission import assess_explicit_agent_admission
 from src.agent_runtime.mutation_request_policy import evaluate_mutation_request
 
 def _runtime_trace_sse_frame(message: str, runtime_decision):
@@ -171,6 +176,53 @@ async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
         )
 
     async for chunk in stream_agent_loop(*args, **kwargs):
+        yield chunk
+
+
+async def _stream_multi_graph_with_legacy_fallback(*args, **kwargs):
+    """Run the admitted multi-graph coordinator, preserving Legacy fallback."""
+    import inspect
+
+    emitted_any = False
+    coordinator_kwargs = dict(kwargs)
+
+    try:
+        allowed = set(
+            inspect.signature(
+                stream_multi_graph_coordinator_sse
+            ).parameters
+        )
+        coordinator_kwargs = {
+            key: value
+            for key, value in coordinator_kwargs.items()
+            if key in allowed
+        }
+
+        async for chunk in stream_multi_graph_coordinator_sse(
+            *args,
+            **coordinator_kwargs,
+        ):
+            emitted_any = True
+            yield chunk
+
+        return
+
+    except Exception:
+        if emitted_any:
+            raise
+
+        logger.exception(
+            "[multi-graph] coordinator failed before output; "
+            "falling back to Legacy agent loop"
+        )
+
+    legacy_kwargs = dict(kwargs)
+    legacy_kwargs.pop("admission_assessment", None)
+
+    async for chunk in stream_agent_loop(
+        *args,
+        **legacy_kwargs,
+    ):
         yield chunk
 
 
@@ -716,80 +768,16 @@ def setup_chat_routes(
         _search_enabled = web_search_enabled_for_turn(allow_web_search, use_web)
 
 
-        # DAILY_DRIVER_INVERTED_TOOL_GATE_V016F3_START
-        # Default daily-driver behavior:
-        # - Do NOT classify "simple chat" as a special graph case.
-        # - Detect clear tool/runtime intent as the exception.
-        # - If Agent mode was selected but there is no clear tool/runtime intent,
-        #   use the normal model chat stream with no tools.
-        #
-        # This keeps deterministic logic at the tool boundary, not in the
-        # natural-language reply layer. No canned replies are generated here.
-        auto_escalated = False
-        _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
-        _tool_intent_needs_tools = bool(_tool_intent and getattr(_tool_intent, "needs_tools", False))
-
+        # P3_C5_EXPLICIT_AGENT_ADMISSION_PREP_START
+        # Preserve upstream Chat-to-Agent auto-escalation below. This seam only
+        # replaces deterministic demotion of explicitly selected Agent turns.
         # AGENT_LANGGRAPH_REQUEST_BYPASS_V1_START
-        # One request-level gate for the whole LangGraph architecture.
-        # When Agent Tools → "Use LangGraph for Agent mode" is OFF, this turn
-        # must not enter knowledge-runtime, contract/general runtime, or runtime
-        # router probes. It falls through to the legacy agent loop instead.
+        # When LangGraph is disabled, explicit Agent remains on Legacy Agent.
         _agent_langgraph_architecture_enabled = _agent_langgraph_architecture_enabled_for_request(chat_mode)
         # AGENT_LANGGRAPH_REQUEST_BYPASS_V1_END
+        _agent_admission = None
+        # P3_C5_EXPLICIT_AGENT_ADMISSION_PREP_END
 
-        _knowledge_intent_requested = False
-        try:
-            _knowledge_intent_requested = (
-                _agent_langgraph_architecture_enabled
-                and isinstance(message, str)
-                and os.getenv("ODYSSEUS_ENABLE_KNOWLEDGE_RUNTIME", "1").strip().lower() not in {"0", "false", "no", "off"}
-                and should_intercept_knowledge_chat(message)
-            )
-        except Exception as _f3_knowledge_probe_exc:
-            logger.debug("[daily-driver] knowledge intent probe skipped: %s", _f3_knowledge_probe_exc)
-
-        _runtime_intent_requested = False
-        try:
-            _f3_runtime_probe = _route_agent_runtime_for_request(
-                message,
-                _agent_langgraph_architecture_enabled,
-            )
-            _runtime_intent_requested = (
-                _agent_langgraph_architecture_enabled
-                and _f3_runtime_probe is not None
-                and getattr(_f3_runtime_probe, "target_runtime", "legacy") in {"contract", "general"}
-            )
-        except Exception as _f3_runtime_probe_exc:
-            logger.debug("[daily-driver] runtime intent probe skipped: %s", _f3_runtime_probe_exc)
-
-        def _f3_truthy(value) -> bool:
-            return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-        _f3_allow_bash_requested = _f3_truthy(allow_bash)
-        _f3_allow_web_search_requested = _f3_truthy(allow_web_search)
-        _f3_research_requested = _f3_truthy(use_research)
-
-        _clear_tool_or_runtime_intent = (
-            _tool_intent_needs_tools
-            or _knowledge_intent_requested
-            or _runtime_intent_requested
-            or _f3_research_requested
-        )
-
-        if (
-            _agent_langgraph_architecture_enabled
-            and chat_mode == "agent"
-            and not _clear_tool_or_runtime_intent
-            and not compare_mode
-            and not plan_mode
-            and not approved_plan
-            and not workspace
-        ):
-            chat_mode = "chat"
-            logger.info(
-                "[daily-driver] agent turn has no clear tool/runtime intent; defaulting to normal chat stream"
-            )
-        # DAILY_DRIVER_INVERTED_TOOL_GATE_V016F3_END
 
         # Intent auto-escalation: if the user is clearly asking the assistant
         # to create a todo, reminder, or calendar event, promote chat → agent
@@ -917,6 +905,60 @@ def setup_chat_routes(
 
         # Ensure session has auth headers
         resolve_session_auth(sess, session, owner=effective_user(request))
+
+        # P3_C5_EXPLICIT_AGENT_ADMISSION_START
+        # Only the user's explicit Agent selection is semantically admitted.
+        # Upstream Chat-to-Agent promotion remains owned by action_intents.
+        if user_requested_agent:
+            try:
+                from src.endpoint_resolver import resolve_chat_fallback_candidates
+
+                try:
+                    _admission_fallback_candidates = (
+                        resolve_chat_fallback_candidates(owner=owner)
+                    )
+                except Exception as _admission_fallback_exc:
+                    logger.warning(
+                        "[agent-admission] failed to resolve chat fallbacks: %s",
+                        _admission_fallback_exc,
+                    )
+                    _admission_fallback_candidates = []
+
+                _agent_admission = await assess_explicit_agent_admission(
+                    message,
+                    langgraph_enabled=_agent_langgraph_architecture_enabled,
+                    llm_candidates=[
+                        (sess.endpoint_url, sess.model, sess.headers),
+                        *_admission_fallback_candidates,
+                    ],
+                    prompt_type=preset_id,
+                )
+                logger.info(
+                    "[agent-admission] explicit Agent path=%s execution_class=%s",
+                    _agent_admission.path,
+                    (
+                        _agent_admission.assessment.execution_class
+                        if _agent_admission.assessment is not None
+                        else None
+                    ),
+                )
+
+                if _agent_admission.use_normal_chat:
+                    chat_mode = "chat"
+                    logger.info(
+                        "[agent-admission] explicit Agent request is "
+                        "conversation-class; reusing normal chat stream"
+                    )
+            except Exception as _agent_admission_exc:
+                # Never silently demote an explicit Agent request when semantic
+                # admission fails. Preserve existing Agent compatibility/fallback.
+                logger.exception(
+                    "[agent-admission] semantic admission failed; "
+                    "preserving explicit Agent mode: %s",
+                    _agent_admission_exc,
+                )
+                _agent_admission = None
+        # P3_C5_EXPLICIT_AGENT_ADMISSION_END
 
         # Check for research_pending BEFORE mode persist overwrites it
         do_research = str(use_research).lower() == "true"
@@ -1593,16 +1635,39 @@ def setup_chat_routes(
                         )
                     # RUNTIME_ROUTER_V013D_DECISION_END
 
-                    # LANGGRAPH_FIRST_AMBIGUOUS_AGENT_V1_START
+                    # P3_C5_EXPLICIT_GRAPH_ROUTE_START
+                    # Explicit Agent semantic admission is authoritative before
+                    # backend-specific compatibility routers. single_graph enters
+                    # the General Supervisor. multi_graph enters the dependency-
+                    # aware coordinator. Legacy remains the failure fallback.
+                    _explicit_agent_single_graph = bool(
+                        user_requested_agent
+                        and _agent_admission is not None
+                        and _agent_admission.use_single_graph
+                    )
+                    _explicit_agent_multi_graph = bool(
+                        user_requested_agent
+                        and _agent_admission is not None
+                        and _agent_admission.use_multi_graph
+                        and not compare_mode
+                        and not effective_do_research
+                        and not plan_mode
+                        and not approved_plan
+                    )
                     _langgraph_first_ambiguous_agent = (
                         _agent_langgraph_architecture_enabled
                         and chat_mode == "agent"
-                        and _runtime_decision is not None
-                        and _runtime_decision.intent == "legacy_exploratory"
-                        and _runtime_decision.target_runtime == "legacy"
-                        and not is_casual_conversation_request(message)
+                        and (
+                            _explicit_agent_single_graph
+                            or (
+                                _runtime_decision is not None
+                                and _runtime_decision.intent == "legacy_exploratory"
+                                and _runtime_decision.target_runtime == "legacy"
+                                and not is_casual_conversation_request(message)
+                            )
+                        )
                     )
-                    # LANGGRAPH_FIRST_AMBIGUOUS_AGENT_V1_END
+                    # P3_C5_EXPLICIT_GRAPH_ROUTE_END
 
                     # CONTRACT_RUNTIME_V012D_AGENT_BRANCH_START
                     _contract_requested_agent = (
@@ -1612,6 +1677,7 @@ def setup_chat_routes(
                     )
                     _contract_allowed_agent = (
                         _contract_requested_agent
+                        and not _explicit_agent_multi_graph
                         and contract_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
                         and bool(workspace)
@@ -1629,7 +1695,16 @@ def setup_chat_routes(
                                 and should_intercept_workspace_knowledge(message)
                             )
                         )
-                        if _agent_langgraph_architecture_enabled and chat_mode == "agent" and _knowledge_runtime_enabled and _knowledge_intercept:
+                        if (
+                            _agent_langgraph_architecture_enabled
+                            and chat_mode == "agent"
+                            and _knowledge_runtime_enabled
+                            and _knowledge_intercept
+                            and not (
+                                _explicit_agent_single_graph
+                                or _explicit_agent_multi_graph
+                            )
+                        ):
                             logger.info("[knowledge-runtime] routing request to v0.16-D knowledge chat bridge")
                             _knowledge_llm_config = knowledge_llm_config_from_runtime_locals(locals())
                             if _knowledge_llm_config.get("model") and not _knowledge_llm_config.get("url"):
@@ -1814,6 +1889,7 @@ def setup_chat_routes(
                     )
                     _general_allowed_agent = (
                         _general_requested_agent
+                        and not _explicit_agent_multi_graph
                         and general_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
                         and bool(workspace)
@@ -1893,7 +1969,8 @@ def setup_chat_routes(
 
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_START
                     _legacy_trace_needed = (
-                        _router_agent_runtime_requested
+                        not _explicit_agent_multi_graph
+                        and _router_agent_runtime_requested
                         and (
                             _runtime_decision.target_runtime == "legacy"
                             or (_contract_requested_agent and not _contract_allowed_agent)
@@ -1912,16 +1989,26 @@ def setup_chat_routes(
                         _runtime_tool_events = [_runtime_trace_tool_event(message, _runtime_decision)]
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_END
 
-                    _selected_agent_stream = (
-                        _stream_langgraph_first_with_legacy_fallback
-                        if _langgraph_first_ambiguous_agent
-                        else stream_agent_loop
-                    )
-
-                    if _langgraph_first_ambiguous_agent:
+                    if _explicit_agent_multi_graph:
+                        _selected_agent_stream = partial(
+                            _stream_multi_graph_with_legacy_fallback,
+                            admission_assessment=(
+                                _agent_admission.assessment
+                            ),
+                        )
+                        logger.info(
+                            "[multi-graph] explicit Agent request entering "
+                            "dependency-aware coordinator"
+                        )
+                    elif _langgraph_first_ambiguous_agent:
+                        _selected_agent_stream = (
+                            _stream_langgraph_first_with_legacy_fallback
+                        )
                         logger.info(
                             "[langgraph-first] ambiguous Agent request entering native LangGraph runtime"
                         )
+                    else:
+                        _selected_agent_stream = stream_agent_loop
 
                     async for chunk in _selected_agent_stream(
                         sess.endpoint_url,
