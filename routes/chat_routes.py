@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from functools import partial
 import time
 import logging
 from datetime import datetime
@@ -18,6 +19,9 @@ from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import stream_agent_loop
 from src.agent_runtime.live_supervisor import stream_general_supervisor_sse
+from src.agent_runtime.multi_graph_coordinator import (
+    stream_multi_graph_coordinator_sse,
+)
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -172,6 +176,53 @@ async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
         )
 
     async for chunk in stream_agent_loop(*args, **kwargs):
+        yield chunk
+
+
+async def _stream_multi_graph_with_legacy_fallback(*args, **kwargs):
+    """Run the admitted multi-graph coordinator, preserving Legacy fallback."""
+    import inspect
+
+    emitted_any = False
+    coordinator_kwargs = dict(kwargs)
+
+    try:
+        allowed = set(
+            inspect.signature(
+                stream_multi_graph_coordinator_sse
+            ).parameters
+        )
+        coordinator_kwargs = {
+            key: value
+            for key, value in coordinator_kwargs.items()
+            if key in allowed
+        }
+
+        async for chunk in stream_multi_graph_coordinator_sse(
+            *args,
+            **coordinator_kwargs,
+        ):
+            emitted_any = True
+            yield chunk
+
+        return
+
+    except Exception:
+        if emitted_any:
+            raise
+
+        logger.exception(
+            "[multi-graph] coordinator failed before output; "
+            "falling back to Legacy agent loop"
+        )
+
+    legacy_kwargs = dict(kwargs)
+    legacy_kwargs.pop("admission_assessment", None)
+
+    async for chunk in stream_agent_loop(
+        *args,
+        **legacy_kwargs,
+    ):
         yield chunk
 
 
@@ -1584,16 +1635,24 @@ def setup_chat_routes(
                         )
                     # RUNTIME_ROUTER_V013D_DECISION_END
 
-                    # P3_C5_EXPLICIT_SINGLE_GRAPH_ROUTE_START
-                    # Explicit Agent single-graph admission is authoritative at
-                    # the native LangGraph boundary. Backend-specific legacy
-                    # routers may still handle their established contract/general
-                    # cases, but a legacy/ambiguous result must enter the General
-                    # Supervisor before Legacy fallback.
+                    # P3_C5_EXPLICIT_GRAPH_ROUTE_START
+                    # Explicit Agent semantic admission is authoritative before
+                    # backend-specific compatibility routers. single_graph enters
+                    # the General Supervisor. multi_graph enters the dependency-
+                    # aware coordinator. Legacy remains the failure fallback.
                     _explicit_agent_single_graph = bool(
                         user_requested_agent
                         and _agent_admission is not None
                         and _agent_admission.use_single_graph
+                    )
+                    _explicit_agent_multi_graph = bool(
+                        user_requested_agent
+                        and _agent_admission is not None
+                        and _agent_admission.use_multi_graph
+                        and not compare_mode
+                        and not effective_do_research
+                        and not plan_mode
+                        and not approved_plan
                     )
                     _langgraph_first_ambiguous_agent = (
                         _agent_langgraph_architecture_enabled
@@ -1608,7 +1667,7 @@ def setup_chat_routes(
                             )
                         )
                     )
-                    # P3_C5_EXPLICIT_SINGLE_GRAPH_ROUTE_END
+                    # P3_C5_EXPLICIT_GRAPH_ROUTE_END
 
                     # CONTRACT_RUNTIME_V012D_AGENT_BRANCH_START
                     _contract_requested_agent = (
@@ -1618,6 +1677,7 @@ def setup_chat_routes(
                     )
                     _contract_allowed_agent = (
                         _contract_requested_agent
+                        and not _explicit_agent_multi_graph
                         and contract_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
                         and bool(workspace)
@@ -1640,7 +1700,10 @@ def setup_chat_routes(
                             and chat_mode == "agent"
                             and _knowledge_runtime_enabled
                             and _knowledge_intercept
-                            and not _explicit_agent_single_graph
+                            and not (
+                                _explicit_agent_single_graph
+                                or _explicit_agent_multi_graph
+                            )
                         ):
                             logger.info("[knowledge-runtime] routing request to v0.16-D knowledge chat bridge")
                             _knowledge_llm_config = knowledge_llm_config_from_runtime_locals(locals())
@@ -1826,6 +1889,7 @@ def setup_chat_routes(
                     )
                     _general_allowed_agent = (
                         _general_requested_agent
+                        and not _explicit_agent_multi_graph
                         and general_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
                         and bool(workspace)
@@ -1905,7 +1969,8 @@ def setup_chat_routes(
 
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_START
                     _legacy_trace_needed = (
-                        _router_agent_runtime_requested
+                        not _explicit_agent_multi_graph
+                        and _router_agent_runtime_requested
                         and (
                             _runtime_decision.target_runtime == "legacy"
                             or (_contract_requested_agent and not _contract_allowed_agent)
@@ -1924,16 +1989,26 @@ def setup_chat_routes(
                         _runtime_tool_events = [_runtime_trace_tool_event(message, _runtime_decision)]
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_END
 
-                    _selected_agent_stream = (
-                        _stream_langgraph_first_with_legacy_fallback
-                        if _langgraph_first_ambiguous_agent
-                        else stream_agent_loop
-                    )
-
-                    if _langgraph_first_ambiguous_agent:
+                    if _explicit_agent_multi_graph:
+                        _selected_agent_stream = partial(
+                            _stream_multi_graph_with_legacy_fallback,
+                            admission_assessment=(
+                                _agent_admission.assessment
+                            ),
+                        )
+                        logger.info(
+                            "[multi-graph] explicit Agent request entering "
+                            "dependency-aware coordinator"
+                        )
+                    elif _langgraph_first_ambiguous_agent:
+                        _selected_agent_stream = (
+                            _stream_langgraph_first_with_legacy_fallback
+                        )
                         logger.info(
                             "[langgraph-first] ambiguous Agent request entering native LangGraph runtime"
                         )
+                    else:
+                        _selected_agent_stream = stream_agent_loop
 
                     async for chunk in _selected_agent_stream(
                         sess.endpoint_url,

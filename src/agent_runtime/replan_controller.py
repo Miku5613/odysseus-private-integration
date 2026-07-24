@@ -23,6 +23,9 @@ from src.agent_runtime.step_execution import (
     StepExecutionContext,
     StepSurfaceExecutor,
 )
+from src.agent_runtime.structured_llm import (
+    invoke_structured_model_async,
+)
 from src.agent_runtime.supervisor_contracts import WorkerResult
 from src.agent_runtime.task_plan import (
     PlanStep,
@@ -99,6 +102,9 @@ def _step_payload(
         ),
         "work_domains": list(
             step.work_domains
+        ),
+        "uses_dependency_state": (
+            step.uses_dependency_state
         ),
         "requires_external_state": (
             step.requires_external_state
@@ -220,6 +226,7 @@ def build_task_replanner_prompt(
                 "work_domains": [
                     "semantic_domain_label"
                 ],
+                "uses_dependency_state": False,
                 "requires_external_state": False,
                 "requires_mutation": False,
             }
@@ -249,10 +256,15 @@ def build_task_replanner_prompt(
         "previous output will not be reused.",
         "7. Dependencies must reference ids in the revised plan and remain "
         "acyclic.",
-        "8. Planning never grants permission to mutate persistent or external "
+        "8. Preserve uses_dependency_state semantics: true means the step "
+        "directly consumes completed depends_on outputs. Pure reasoning over "
+        "dependency outputs does not require new external state.",
+        "9. requires_external_state is only for NEW state beyond the request, "
+        "context, and completed dependency outputs.",
+        "10. Planning never grants permission to mutate persistent or external "
         "state.",
-        "9. work_domains remain semantic labels only.",
-        "10. Return only one JSON object matching the TaskPlan schema.",
+        "11. work_domains remain semantic labels only.",
+        "12. Return only one JSON object matching the TaskPlan schema.",
         "",
         "ORIGINAL USER REQUEST:",
         normalized_query,
@@ -367,15 +379,10 @@ async def replan_task_from_request_async(
         request,
         replan_context=replan_context,
     )
-    response = model.invoke(
-        prompt
-    )
-
-    if inspect.isawaitable(response):
-        response = await response
-
-    return parse_task_plan_response(
-        response
+    return await invoke_structured_model_async(
+        model,
+        prompt,
+        parse_task_plan_response,
     )
 
 

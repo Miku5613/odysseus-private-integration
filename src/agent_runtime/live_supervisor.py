@@ -9,6 +9,7 @@ from src.agent_runtime.supervisor_decision import parse_supervisor_decision
 from src.agent_runtime.supervisor_reasoner import build_supervisor_prompt
 from src.agent_runtime.worker_dispatcher import (
     DispatchResult,
+    builtin_worker_runners,
     dispatch_supervisor_decision_async,
 )
 from src.llm_core import (
@@ -202,11 +203,20 @@ async def stream_general_supervisor_sse(
         },
     }
 
+    dispatch_kwargs = {
+        "supervisor_state": supervisor_state,
+        "session_id": session_id,
+    }
+    if dispatcher is dispatch_supervisor_decision_async:
+        dispatch_kwargs["worker_runners"] = builtin_worker_runners(
+            code_finalizer_candidates=runtime_llm_candidates,
+            code_finalizer_prompt_type=prompt_type,
+        )
+
     dispatch = await dispatcher(
         decision,
         query,
-        supervisor_state=supervisor_state,
-        session_id=session_id,
+        **dispatch_kwargs,
     )
 
     evidence_payload = _dispatch_payload(dispatch)

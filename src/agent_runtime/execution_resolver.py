@@ -11,6 +11,9 @@ from src.agent_runtime.capability_registry import (
 from src.agent_runtime.supervisor_contracts import (
     CapabilityDescriptor,
 )
+from src.agent_runtime.structured_llm import (
+    invoke_structured_model_async,
+)
 from src.agent_runtime.task_plan import PlanStep
 from src.agent_runtime.worker_dispatcher import (
     builtin_worker_runners,
@@ -295,6 +298,31 @@ def build_execution_surface_catalog(
     return tuple(validated)
 
 
+_CANONICAL_SURFACE_BOUNDARIES = {
+    "langgraph:deep_research": (
+        "Owns the persistent deep-research library: starting research and "
+        "listing, reading, or reusing completed saved research reports. "
+        "Saved research reports do not belong to workspace knowledge search."
+    ),
+    "langgraph:knowledge_search": (
+        "Owns retrieval from an indexed workspace, vault, or knowledge root. "
+        "It requires the relevant semantic index and does not own the "
+        "persistent deep-research report library."
+    ),
+    "langgraph:code_inspection": (
+        "Owns read-only inspection of repository source files, symbols, "
+        "configuration, and implementation structure. It does not require a "
+        "workspace semantic knowledge index."
+    ),
+    "langgraph:dependency_reasoning": (
+        "Owns reasoning, comparison, reconciliation, synthesis, and decisions "
+        "that can be completed entirely from already-completed PlanStep "
+        "dependency outputs. It does not retrieve new external state or own "
+        "any external source system."
+    ),
+}
+
+
 def _surface_payload(
     surface: ExecutionSurfaceDescriptor,
 ) -> dict[str, Any]:
@@ -302,6 +330,12 @@ def _surface_payload(
         "id": surface.id,
         "kind": surface.kind,
         "description": surface.description,
+        "semantic_boundary": (
+            _CANONICAL_SURFACE_BOUNDARIES.get(
+                surface.id,
+                "",
+            )
+        ),
         "capability_name": surface.capability_name,
         "supports_external_state": (
             surface.supports_external_state
@@ -347,29 +381,50 @@ def build_execution_resolver_prompt(
         "",
         "RULES:",
         "1. Evaluate semantic capability from the PlanStep objective, work "
-        "domains, and the surface descriptions.",
-        "2. Return ALL semantically compatible surface ids, not just your "
-        "favorite one.",
-        "3. Do not prefer Legacy merely because it is broad; include a native "
+        "domains, surface descriptions, and semantic_boundary fields.",
+        "2. Treat each non-empty semantic_boundary as authoritative source "
+        "ownership. Similar verbs such as retrieve, inspect, or read do not "
+        "make two different source systems interchangeable.",
+        "3. A saved deep-research report or research-library request belongs "
+        "to deep_research, not knowledge_search. Indexed workspace or vault "
+        "retrieval belongs to knowledge_search. Repository source inspection "
+        "belongs to code_inspection when that surface is available.",
+        "4. Return ALL genuinely compatible surface ids, not merely every "
+        "surface that can perform a loosely related verb.",
+        "5. Do not prefer Legacy merely because it is broad; include a native "
         "LangGraph surface whenever it can genuinely perform the step.",
-        "4. Missing native LangGraph parity is not a reason to erase or alter "
+        "6. Missing native LangGraph parity is not a reason to erase or alter "
         "the PlanStep. Legacy or another registered surface may still be "
         "compatible.",
-        "5. supports_mutation and supports_external_state are hard capability "
+        "7. supports_mutation and supports_external_state are hard capability "
         "facts. Do not claim compatibility when a required fact is false.",
-        "6. Selection never grants mutation permission. Downstream policy and "
+        "8. Selection never grants mutation permission. Downstream policy and "
         "confirmation gates still apply.",
-        "7. Set clarification_needed only when missing user/source/scope "
+        "9. uses_dependency_state is authoritative semantic metadata from the "
+        "Task Planner. When uses_dependency_state=true, depends_on is non-empty, "
+        "requires_external_state=false, and requires_mutation=false, the step is "
+        "dependency-only reasoning over completed prior outputs; "
+        "dependency_reasoning is the canonical surface when available.",
+        "10. Do not select a retrieval/inspection surface merely because a "
+        "dependency-only objective mentions findings or evidence that were "
+        "already produced upstream.",
+        "11. Set clarification_needed only when missing user/source/scope "
         "information prevents determining a viable execution surface.",
-        "8. Return only one JSON object matching the schema. No markdown.",
+        "12. Return only one JSON object matching the schema. No markdown.",
         "",
         "PLAN STEP:",
         json.dumps(
             {
                 "id": step.id,
                 "objective": step.objective,
+                "depends_on": list(
+                    step.depends_on
+                ),
                 "work_domains": list(
                     step.work_domains
+                ),
+                "uses_dependency_state": (
+                    step.uses_dependency_state
                 ),
                 "requires_external_state": (
                     step.requires_external_state
@@ -573,6 +628,12 @@ def _hard_compatible(
     surface: ExecutionSurfaceDescriptor,
 ) -> bool:
     if (
+        surface.id == "langgraph:dependency_reasoning"
+        and not step.uses_dependency_state
+    ):
+        return False
+
+    if (
         step.requires_external_state
         and not surface.supports_external_state
     ):
@@ -585,6 +646,48 @@ def _hard_compatible(
         return False
 
     return True
+
+
+def _canonical_dependency_resolution(
+    step: PlanStep,
+    catalog: tuple[
+        ExecutionSurfaceDescriptor,
+        ...,
+    ],
+) -> ExecutionResolution | None:
+    """Resolve pure dependency-state work without semantic rediscovery."""
+
+    if not (
+        step.uses_dependency_state
+        and step.depends_on
+        and not step.requires_external_state
+        and not step.requires_mutation
+    ):
+        return None
+
+    for surface in catalog:
+        if (
+            surface.id == "langgraph:dependency_reasoning"
+            and _hard_compatible(
+                step,
+                surface,
+            )
+        ):
+            return ExecutionResolution(
+                step_id=step.id,
+                status="resolved",
+                selected_surface=surface,
+                compatible_surface_ids=(
+                    surface.id,
+                ),
+                reasoning_summary=(
+                    "Task Planner marked this as dependency-only work: "
+                    "it consumes completed dependency outputs and requires "
+                    "no new external or mutation state."
+                ),
+            )
+
+    return None
 
 
 def resolve_plan_step(
@@ -628,6 +731,13 @@ def resolve_plan_step(
         raise ValueError(
             "Execution Resolver surface ids must be unique"
         )
+
+    canonical = _canonical_dependency_resolution(
+        step,
+        catalog,
+    )
+    if canonical is not None:
+        return canonical
 
     prompt = build_execution_resolver_prompt(
         step,
@@ -818,21 +928,33 @@ async def resolve_plan_step_async(
             "Execution Resolver surface ids must be unique"
         )
 
+    canonical = _canonical_dependency_resolution(
+        step,
+        catalog,
+    )
+    if canonical is not None:
+        return canonical
+
     prompt = build_execution_resolver_prompt(
         step,
         catalog,
     )
-    response = model.invoke(prompt)
 
-    if inspect.isawaitable(response):
-        response = await response
+    def validate_response(
+        response: Any,
+    ) -> ExecutionResolution:
+        return resolve_plan_step(
+            step,
+            model=_StaticExecutionResolverModel(
+                response
+            ),
+            surfaces=catalog,
+        )
 
-    return resolve_plan_step(
-        step,
-        model=_StaticExecutionResolverModel(
-            response
-        ),
-        surfaces=catalog,
+    return await invoke_structured_model_async(
+        model,
+        prompt,
+        validate_response,
     )
 
 

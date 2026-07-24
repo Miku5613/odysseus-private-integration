@@ -53,18 +53,21 @@ def test_agent_langgraph_toggle_gates_direct_knowledge_runtime_branch() -> None:
     assert "should_intercept_workspace_knowledge(message)" in chat
     assert "and _knowledge_runtime_enabled" in chat
     assert "and _knowledge_intercept" in chat
-    assert "and not _explicit_agent_single_graph" in chat
+    assert "_explicit_agent_single_graph" in chat
+    assert "_explicit_agent_multi_graph" in chat
+    assert "and not (" in chat
     assert 'if chat_mode == "agent" and _knowledge_runtime_enabled and _knowledge_intercept:' not in chat
 
 
 def test_explicit_single_graph_admission_owns_native_supervisor_boundary() -> None:
     chat = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
 
-    assert "P3_C5_EXPLICIT_SINGLE_GRAPH_ROUTE_START" in chat
+    assert "P3_C5_EXPLICIT_GRAPH_ROUTE_START" in chat
     assert "_explicit_agent_single_graph = bool(" in chat
     assert "_agent_admission.use_single_graph" in chat
     assert "_explicit_agent_single_graph\n                            or (" in chat
-    assert "and not _explicit_agent_single_graph" in chat
+    assert "and not (\n                                _explicit_agent_single_graph" in chat
+    assert "or _explicit_agent_multi_graph" in chat
     assert "_stream_langgraph_first_with_legacy_fallback" in chat
 
 
@@ -120,3 +123,19 @@ def test_langgraph_request_bypass_never_calls_runtime_router(monkeypatch) -> Non
 
     assert chat_routes._route_agent_runtime_for_request("Find doc_stream", False) is None
     assert calls == []
+
+
+def test_explicit_multi_graph_admission_owns_coordinator_boundary() -> None:
+    chat = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
+
+    assert "stream_multi_graph_coordinator_sse" in chat
+    assert "def _stream_multi_graph_with_legacy_fallback" in chat
+    assert "_explicit_agent_multi_graph = bool(" in chat
+    assert "_agent_admission.use_multi_graph" in chat
+    assert "admission_assessment=(" in chat
+    assert "_agent_admission.assessment" in chat
+    assert "not _explicit_agent_multi_graph\n                        and contract_runtime_enabled()" in chat
+    assert "not _explicit_agent_multi_graph\n                        and general_runtime_enabled()" in chat
+    assert "not _explicit_agent_multi_graph\n                        and _router_agent_runtime_requested" in chat
+    assert "_stream_multi_graph_with_legacy_fallback" in chat
+    assert "falling back to Legacy agent loop" in chat

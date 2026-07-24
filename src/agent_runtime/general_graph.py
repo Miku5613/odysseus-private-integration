@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 from src.agent_runtime.capability_registry import worker_capabilities
+from src.agent_runtime.evidence_ledger import (
+    observations_from_tool_result,
+    pick_context_candidate,
+)
 
 import json
 import re
@@ -617,9 +621,16 @@ def _inspection_terms(query: str) -> list[str]:
         "implement",
         "implements",
         "implemented",
+        "implementing",
+        "identify",
+        "repository",
+        "workspace",
         "file",
         "files",
         "responsible",
+        "responsibility",
+        "responsibilities",
+        "their",
         "response",
         "responses",
         "handling",
@@ -634,6 +645,9 @@ def _inspection_terms(query: str) -> list[str]:
         "streaming": "stream",
         "messages": "message",
         "events": "event",
+        "planning": "plan",
+        "coordination": "coordinat",
+        "replanning": "replan",
     }
 
     out = []
@@ -1041,7 +1055,55 @@ def _apply_freshness_rerank(
     return reranked
 
 
-def _execute_broad_source_inspection(state: GeneralState) -> str | None:
+def _prioritize_inspection_candidates(
+    files: list[str],
+    terms: list[str],
+    *,
+    limit: int = 240,
+) -> list[str]:
+    """Rank all discovered paths before applying the bounded content scan."""
+
+    ranked = []
+    for index, path in enumerate(files):
+        low_path = path.lower().replace("\\", "/")
+        path_hits = sum(
+            1
+            for term in terms
+            if term in low_path
+        )
+        ranked.append((path_hits, -index, path))
+
+    path_supported = [
+        item
+        for item in ranked
+        if item[0] > 0
+    ]
+    path_supported.sort(reverse=True)
+
+    selected = [
+        item[2]
+        for item in path_supported[:limit]
+    ]
+    selected_set = set(selected)
+
+    if len(selected) < limit:
+        for path in files:
+            if path in selected_set:
+                continue
+            selected.append(path)
+            selected_set.add(path)
+            if len(selected) >= limit:
+                break
+
+    return selected
+
+def _execute_broad_source_inspection(
+    state: GeneralState,
+    *,
+    include_agent_runtime: bool = False,
+    discovery_limit: int = 120,
+    expand_evidence_context: bool = False,
+) -> str | None:
     assert state.task is not None
 
     terms = _inspection_terms(state.raw_query)
@@ -1055,17 +1117,25 @@ def _execute_broad_source_inspection(state: GeneralState) -> str | None:
 
     files = []
     for pattern in patterns:
-        out = tools.glob_files(
-            state.workspace,
-            pattern,
-            max_results=120,
-        )
+        if include_agent_runtime:
+            out = tools.glob_files(
+                state.workspace,
+                pattern,
+                max_results=discovery_limit,
+                include_agent_runtime=True,
+            )
+        else:
+            out = tools.glob_files(
+                state.workspace,
+                pattern,
+                max_results=discovery_limit,
+            )
         _record(
             state,
             "glob_files",
             {
                 "pattern": pattern,
-                "max_results": 120,
+                "max_results": discovery_limit,
             },
             out,
             bool(out.strip()),
@@ -1090,13 +1160,28 @@ def _execute_broad_source_inspection(state: GeneralState) -> str | None:
 
     ranked = []
 
-    for path in files[:240]:
-        out = tools.grep(
-            state.workspace,
-            grep_pattern,
-            path=path,
-            max_results=12,
-        )
+    candidate_files = _prioritize_inspection_candidates(
+        files,
+        terms,
+        limit=240,
+    )
+
+    for path in candidate_files:
+        if include_agent_runtime:
+            out = tools.grep(
+                state.workspace,
+                grep_pattern,
+                path=path,
+                max_results=12,
+                include_agent_runtime=True,
+            )
+        else:
+            out = tools.grep(
+                state.workspace,
+                grep_pattern,
+                path=path,
+                max_results=12,
+            )
 
         if not out.strip():
             continue
@@ -1199,6 +1284,61 @@ def _execute_broad_source_inspection(state: GeneralState) -> str | None:
             out,
             True,
         )
+
+    if expand_evidence_context:
+        ledger_observations = []
+        for index, (_, _, _, path, out, _, _) in enumerate(
+            selected,
+            start=1,
+        ):
+            ledger_observations.extend(
+                observations_from_tool_result(
+                    tool_name="grep",
+                    args={
+                        "pattern": grep_pattern,
+                        "path": path,
+                        "max_results": 12,
+                    },
+                    content=out,
+                    span_id=f"code_recovery_grep_{index}",
+                    query=state.raw_query,
+                    start_index=len(ledger_observations),
+                )
+            )
+
+        expanded_paths = []
+        for _ in range(min(4, len(selected))):
+            candidate = pick_context_candidate(
+                ledger_observations,
+                expanded_paths,
+                query=state.raw_query,
+            )
+            if not candidate:
+                break
+
+            path = str(candidate.get("source_path") or "").strip()
+            line = int(candidate.get("line_start") or 0)
+            if not path or line <= 0:
+                break
+
+            around = tools.read_file_around(
+                state.workspace,
+                path,
+                line,
+                radius=36,
+            )
+            _record(
+                state,
+                "read_file_around",
+                {
+                    "path": path,
+                    "line": line,
+                    "radius": 36,
+                },
+                around,
+                bool(str(around).strip()),
+            )
+            expanded_paths.append(path)
 
     lines = [
         "Relevant source evidence for this inspection:",
@@ -1696,6 +1836,66 @@ def finalize(state: GeneralState) -> str:
 
     return "I could not find reliable source-code evidence for that request."
 
+
+def run_code_inspection_recovery(
+    query: str,
+    workspace: str,
+) -> GeneralState:
+    """Run bounded source inspection for an already-resolved code capability.
+
+    This entry point does not classify user intent. The caller has already
+    resolved the PlanStep to ``code_inspection``. Recovery therefore preserves
+    that semantic contract and only chooses a read-only source-inspection
+    execution strategy.
+    """
+
+    start = time.time()
+    state = GeneralState(
+        raw_query=query,
+        workspace=workspace,
+    )
+    state.task = GeneralTask(
+        raw_query=query,
+        kind="code_lookup",
+        target="",
+        reason=(
+            "Capability-locked recovery for a pre-resolved "
+            "code_inspection PlanStep."
+        ),
+        is_readonly=True,
+        should_fallback=False,
+    )
+
+    workspace_output = tools.get_workspace(state.workspace)
+    _record(
+        state,
+        "get_workspace",
+        {},
+        workspace_output,
+        bool(workspace_output.strip()),
+    )
+
+    answer = _execute_broad_source_inspection(
+        state,
+        include_agent_runtime=True,
+        discovery_limit=1200,
+        expand_evidence_context=True,
+    )
+    state.final_answer = (
+        answer
+        or "I could not find reliable source-code evidence for that request."
+    )
+    state.metrics = {
+        "runtime": "code-inspection-recovery-v1",
+        "model": "deterministic-source-inspection",
+        "elapsed_s": round(time.time() - start, 3),
+        "tool_calls": len(state.observations),
+        "fallback_required": False,
+        "task_kind": state.task.kind,
+        "semantic_capability": "code_inspection",
+        "intent_reclassified": False,
+    }
+    return state
 
 def run_general_runtime(query: str, workspace: str) -> GeneralState:
     start = time.time()

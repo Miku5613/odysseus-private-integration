@@ -5,6 +5,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from src.agent_runtime.structured_llm import (
+    invoke_validated_fallback_async,
+)
 from src.llm_core import llm_call_async_with_fallback
 
 
@@ -559,17 +562,17 @@ async def assess_intent_complexity(
         4096,
     )
 
-    response = await llm_call_async_with_fallback(
+    response = await invoke_validated_fallback_async(
+        llm_call_async_with_fallback,
         list(llm_candidates),
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-        temperature=0.0,
-        max_tokens=token_limit,
-        prompt_type=prompt_type,
+        prompt,
+        parse_intent_complexity_response,
+        call_kwargs={
+            "temperature": 0.0,
+            "max_tokens": token_limit,
+            "prompt_type": prompt_type,
+        },
+        max_rounds=2,
     )
 
     if not isinstance(response, str):

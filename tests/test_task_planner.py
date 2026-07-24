@@ -82,6 +82,7 @@ def _valid_plan_payload():
                     "current_research",
                 ],
                 "work_domains": ["cross_domain_synthesis"],
+                "uses_dependency_state": True,
                 "requires_external_state": False,
                 "requires_mutation": False,
             },
@@ -119,6 +120,9 @@ def test_prompt_is_backend_independent_and_dependency_aware():
     assert "downstream Execution Resolver" in prompt
     assert "deliberately choose Legacy" in prompt
     assert "depends_on" in prompt
+    assert "uses_dependency_state=true" in prompt
+    assert "dependency outputs" in prompt
+    assert "requires_external_state=true means" in prompt
     assert "work_domains are semantic labels only" in prompt
 
 
@@ -145,6 +149,8 @@ def test_parse_plain_json_response():
         "project_state",
         "current_research",
     )
+    assert plan.steps[2].uses_dependency_state is True
+    assert plan.steps[2].requires_external_state is False
 
 
 def test_parse_fenced_json_response():

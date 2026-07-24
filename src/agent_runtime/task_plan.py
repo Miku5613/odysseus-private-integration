@@ -15,6 +15,7 @@ _STEP_KEYS = {
     "objective",
     "depends_on",
     "work_domains",
+    "uses_dependency_state",
     "requires_external_state",
     "requires_mutation",
 }
@@ -34,6 +35,7 @@ class PlanStep:
     objective: str
     depends_on: tuple[str, ...] = ()
     work_domains: tuple[str, ...] = ()
+    uses_dependency_state: bool = False
     requires_external_state: bool = False
     requires_mutation: bool = False
 
@@ -156,6 +158,20 @@ def _validate_dependencies(steps: tuple[PlanStep, ...]) -> None:
                 )
 
 
+def _validate_dependency_state_usage(
+    steps: tuple[PlanStep, ...],
+) -> None:
+    for step in steps:
+        if (
+            step.uses_dependency_state
+            and not step.depends_on
+        ):
+            raise ValueError(
+                f"PlanStep {step.id} uses_dependency_state=true "
+                "requires at least one depends_on step"
+            )
+
+
 def topological_step_ids(plan: TaskPlan) -> tuple[str, ...]:
     """Return a stable topological ordering, rejecting dependency cycles."""
 
@@ -271,6 +287,16 @@ def validate_task_plan_payload(
                         f"TaskPlan step {index} work_domains"
                     ),
                 ),
+                uses_dependency_state=_clean_bool(
+                    raw_step.get(
+                        "uses_dependency_state",
+                        False,
+                    ),
+                    field=(
+                        f"TaskPlan step {index} "
+                        "uses_dependency_state"
+                    ),
+                ),
                 requires_external_state=_clean_bool(
                     raw_step.get(
                         "requires_external_state",
@@ -304,6 +330,7 @@ def validate_task_plan_payload(
     )
 
     _validate_dependencies(plan.steps)
+    _validate_dependency_state_usage(plan.steps)
     topological_step_ids(plan)
     return plan
 

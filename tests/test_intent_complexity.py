@@ -306,6 +306,11 @@ def test_model_call_reuses_canonical_candidate_chain(
     assert captured["kwargs"]["temperature"] == 0.0
     assert captured["kwargs"]["max_tokens"] == 3000
     assert captured["kwargs"]["prompt_type"] == "test"
+    validator = captured["kwargs"]["response_validator"]
+    assert callable(validator)
+    assert validator(
+        json.dumps(_conversation_payload())
+    ).execution_class == "conversation"
 
 
 @pytest.mark.parametrize(
@@ -373,3 +378,46 @@ def test_missing_information_is_deduplicated():
     assert result.missing_information == (
         "calendar authorization",
     )
+
+
+def test_assessment_retries_structured_chain_after_validation_exhaustion(
+    monkeypatch,
+):
+    calls = []
+
+    async def fake_fallback(
+        candidates,
+        *,
+        messages,
+        response_validator=None,
+        **kwargs,
+    ):
+        calls.append(messages[0]["content"])
+        response = (
+            "not valid json"
+            if len(calls) == 1
+            else json.dumps(_conversation_payload())
+        )
+        if response_validator is not None:
+            response_validator(response)
+        return response
+
+    monkeypatch.setattr(
+        intent_complexity,
+        "llm_call_async_with_fallback",
+        fake_fallback,
+    )
+
+    result = asyncio.run(
+        intent_complexity.assess_intent_complexity(
+            "Explain dependency graphs conceptually.",
+            llm_candidates=[
+                ("url", "model", {}),
+            ],
+        )
+    )
+
+    assert result.execution_class == "conversation"
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+    assert "STRUCTURED OUTPUT RETRY:" in calls[1]

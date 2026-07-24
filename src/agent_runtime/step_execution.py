@@ -267,7 +267,10 @@ def apply_worker_result_to_plan_state(
             worker_result=result,
         )
 
-    if result.status == "needs_clarification":
+    if result.status in {
+        "needs_clarification",
+        "partial",
+    }:
         replan = request_replan(
             state,
             reason=_clarification_reason(result),

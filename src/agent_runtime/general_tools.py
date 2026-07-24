@@ -53,10 +53,19 @@ def _safe_path(workspace: str, path: str | None = None) -> Path:
     return p
 
 
-def _iter_files(workspace: str) -> Iterable[Path]:
+def _iter_files(
+    workspace: str,
+    *,
+    include_agent_runtime: bool = False,
+) -> Iterable[Path]:
     root = _safe_root(workspace)
+    skip_dirs = (
+        SKIP_DIRS - {"agent_runtime"}
+        if include_agent_runtime
+        else SKIP_DIRS
+    )
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         base = Path(dirpath)
         for name in filenames:
             low = name.lower()
@@ -82,10 +91,19 @@ def ls(workspace: str, path: str = "") -> str:
     return "\n".join(rows[:300])
 
 
-def glob_files(workspace: str, pattern: str, max_results: int = 80) -> str:
+def glob_files(
+    workspace: str,
+    pattern: str,
+    max_results: int = 80,
+    *,
+    include_agent_runtime: bool = False,
+) -> str:
     root = _safe_root(workspace)
     out = []
-    for f in _iter_files(workspace):
+    for f in _iter_files(
+        workspace,
+        include_agent_runtime=include_agent_runtime,
+    ):
         rel = str(f.relative_to(root)).replace("\\", "/")
         if fnmatch.fnmatch(rel, pattern):
             out.append(rel)
@@ -94,10 +112,26 @@ def glob_files(workspace: str, pattern: str, max_results: int = 80) -> str:
     return "\n".join(out)
 
 
-def grep(workspace: str, pattern: str, path: str = "", max_results: int = 80) -> str:
+def grep(
+    workspace: str,
+    pattern: str,
+    path: str = "",
+    max_results: int = 80,
+    *,
+    include_agent_runtime: bool = False,
+) -> str:
     root = _safe_root(workspace)
     start = _safe_path(workspace, path)
-    files = [start] if start.is_file() else list(_iter_files(str(start)))
+    files = (
+        [start]
+        if start.is_file()
+        else list(
+            _iter_files(
+                str(start),
+                include_agent_runtime=include_agent_runtime,
+            )
+        )
+    )
     rx = re.compile(pattern, re.IGNORECASE)
     rows = []
     for file in files:

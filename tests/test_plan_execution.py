@@ -64,6 +64,7 @@ def _plan():
                     "work_domains": [
                         "cross_domain_synthesis"
                     ],
+                    "uses_dependency_state": True,
                     "requires_external_state": False,
                     "requires_mutation": False,
                 },
@@ -479,6 +480,28 @@ def test_plan_fingerprint_changes_when_semantics_change():
     changed = TaskPlan(
         objective="Different objective",
         steps=plan.steps,
+        reasoning_summary=plan.reasoning_summary,
+    )
+
+    assert task_plan_fingerprint(plan) != (
+        task_plan_fingerprint(changed)
+    )
+
+
+def test_plan_fingerprint_tracks_dependency_state_semantics():
+    plan = _plan()
+    changed_step = replace(
+        plan.step_by_id("synthesize"),
+        uses_dependency_state=False,
+    )
+    changed = TaskPlan(
+        objective=plan.objective,
+        steps=tuple(
+            changed_step
+            if step.id == "synthesize"
+            else step
+            for step in plan.steps
+        ),
         reasoning_summary=plan.reasoning_summary,
     )
 

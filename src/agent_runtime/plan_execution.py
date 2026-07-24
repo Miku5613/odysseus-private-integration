@@ -110,6 +110,9 @@ def task_plan_fingerprint(plan: TaskPlan) -> str:
                 "objective": step.objective,
                 "depends_on": list(step.depends_on),
                 "work_domains": list(step.work_domains),
+                "uses_dependency_state": (
+                    step.uses_dependency_state
+                ),
                 "requires_external_state": (
                     step.requires_external_state
                 ),

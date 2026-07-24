@@ -6,6 +6,7 @@ import pytest
 
 from src.agent_runtime.execution_resolver import (
     ExecutionSurfaceDescriptor,
+    build_execution_resolver_prompt,
     build_execution_surface_catalog,
     parse_execution_compatibility_response,
     resolve_plan_step,
@@ -126,6 +127,125 @@ def test_duplicate_surface_ids_are_rejected():
             include_legacy=True,
             extra_surfaces=(duplicate,),
         )
+
+
+def test_resolver_prompt_defines_canonical_source_ownership_boundaries():
+    step = PlanStep(
+        id="step_saved_research",
+        objective=(
+            "Retrieve the most recent completed saved research report."
+        ),
+        depends_on=(),
+        work_domains=("user_saved_research",),
+        requires_external_state=True,
+        requires_mutation=False,
+    )
+    surfaces = (
+        _surface(
+            "langgraph:deep_research",
+            "langgraph",
+            capability_name="deep_research",
+        ),
+        _surface(
+            "langgraph:knowledge_search",
+            "langgraph",
+            capability_name="knowledge_search",
+        ),
+        _surface(
+            "langgraph:code_inspection",
+            "langgraph",
+            capability_name="code_inspection",
+        ),
+        _surface(
+            "langgraph:dependency_reasoning",
+            "langgraph",
+            capability_name="dependency_reasoning",
+            supports_external_state=False,
+        ),
+    )
+
+    prompt = build_execution_resolver_prompt(
+        step,
+        surfaces,
+    )
+
+    assert (
+        "Saved research reports do not belong to workspace "
+        "knowledge search."
+        in prompt
+    )
+    assert (
+        "It requires the relevant semantic index and does not own "
+        "the persistent deep-research report library."
+        in prompt
+    )
+    assert (
+        "It does not require a workspace semantic knowledge index."
+        in prompt
+    )
+    assert (
+        "Similar verbs such as retrieve, inspect, or read do not "
+        "make two different source systems interchangeable."
+        in prompt
+    )
+    assert (
+        "already-completed PlanStep dependency outputs"
+        in prompt
+    )
+
+
+def test_resolver_prompt_exposes_dependencies_for_dependency_reasoning_selection():
+    step = PlanStep(
+        id="compare",
+        objective="Compare the completed research and code findings.",
+        depends_on=("research", "code"),
+        work_domains=("cross_domain_synthesis",),
+        requires_external_state=False,
+        requires_mutation=False,
+    )
+    prompt = build_execution_resolver_prompt(
+        step,
+        (
+            _surface(
+                "langgraph:dependency_reasoning",
+                "langgraph",
+                capability_name="dependency_reasoning",
+                supports_external_state=False,
+            ),
+        ),
+    )
+
+    assert '"depends_on": ["research", "code"]' in prompt
+    assert (
+        "dependency_reasoning is the canonical surface"
+        in prompt
+    )
+
+
+def test_resolver_prompt_leaves_unknown_surfaces_without_fake_boundaries():
+    prompt = build_execution_resolver_prompt(
+        _step(),
+        (
+            _surface(
+                "registered:custom",
+                "registered",
+            ),
+        ),
+    )
+
+    payload_text = prompt.split(
+        "AVAILABLE EXECUTION SURFACES:",
+        1,
+    )[1].split(
+        "REQUIRED JSON SCHEMA:",
+        1,
+    )[0]
+    payload = json.loads(
+        payload_text.strip()
+    )
+
+    assert payload[0]["id"] == "registered:custom"
+    assert payload[0]["semantic_boundary"] == ""
 
 
 def test_langgraph_surface_requires_capability_name():
@@ -464,6 +584,140 @@ def test_plan_step_remains_backend_independent():
         "objective",
         "depends_on",
         "work_domains",
+        "uses_dependency_state",
         "requires_external_state",
         "requires_mutation",
     }
+
+
+def test_dependency_only_step_routes_canonically_without_model_call():
+    class _MustNotRun:
+        def invoke(self, prompt):
+            raise AssertionError(
+                "canonical dependency routing should not invoke the model"
+            )
+
+    step = PlanStep(
+        id="goal_3",
+        objective="Compare the completed research and code findings.",
+        depends_on=("goal_1", "goal_2"),
+        work_domains=("research_comparison", "code_analysis"),
+        uses_dependency_state=True,
+        requires_external_state=False,
+        requires_mutation=False,
+    )
+    surfaces = (
+        ExecutionSurfaceDescriptor(
+            id="langgraph:dependency_reasoning",
+            kind="langgraph",
+            description="Reason over completed dependency outputs.",
+            capability_name="dependency_reasoning",
+            supports_external_state=False,
+            supports_mutation=False,
+            priority=-100,
+        ),
+        ExecutionSurfaceDescriptor(
+            id="langgraph:code_inspection",
+            kind="langgraph",
+            description="Inspect repository source.",
+            capability_name="code_inspection",
+            supports_external_state=True,
+            supports_mutation=False,
+        ),
+    )
+
+    result = resolve_plan_step(
+        step,
+        model=_MustNotRun(),
+        surfaces=surfaces,
+    )
+
+    assert result.status == "resolved"
+    assert result.selected_surface is not None
+    assert result.selected_surface.id == "langgraph:dependency_reasoning"
+    assert result.compatible_surface_ids == (
+        "langgraph:dependency_reasoning",
+    )
+
+
+def test_dependency_state_does_not_hide_new_external_state_requirement():
+    step = PlanStep(
+        id="followup",
+        objective=(
+            "Use the prior findings to inspect additional repository state."
+        ),
+        depends_on=("goal_1",),
+        work_domains=("codebase_inspection",),
+        uses_dependency_state=True,
+        requires_external_state=True,
+        requires_mutation=False,
+    )
+    surfaces = (
+        ExecutionSurfaceDescriptor(
+            id="langgraph:dependency_reasoning",
+            kind="langgraph",
+            description="Reason over completed dependency outputs.",
+            capability_name="dependency_reasoning",
+            supports_external_state=False,
+            supports_mutation=False,
+            priority=-100,
+        ),
+        ExecutionSurfaceDescriptor(
+            id="langgraph:code_inspection",
+            kind="langgraph",
+            description="Inspect repository source.",
+            capability_name="code_inspection",
+            supports_external_state=True,
+            supports_mutation=False,
+        ),
+    )
+    model = _Model(
+        {
+            "compatible_surface_ids": [
+                "langgraph:dependency_reasoning",
+                "langgraph:code_inspection",
+            ],
+            "clarification_needed": False,
+            "missing_information": [],
+            "reasoning_summary": "New repository state is still required.",
+        }
+    )
+
+    result = resolve_plan_step(
+        step,
+        model=model,
+        surfaces=surfaces,
+    )
+
+    assert result.status == "resolved"
+    assert result.selected_surface is not None
+    assert result.selected_surface.id == "langgraph:code_inspection"
+    assert "langgraph:dependency_reasoning" in result.rejected_surface_ids
+
+
+def test_resolver_prompt_exposes_dependency_state_semantics():
+    step = PlanStep(
+        id="goal_3",
+        objective="Synthesize the completed dependency outputs.",
+        depends_on=("goal_1", "goal_2"),
+        uses_dependency_state=True,
+        requires_external_state=False,
+        requires_mutation=False,
+    )
+    surfaces = (
+        ExecutionSurfaceDescriptor(
+            id="langgraph:dependency_reasoning",
+            kind="langgraph",
+            description="Reason over completed dependency outputs.",
+            supports_external_state=False,
+            supports_mutation=False,
+        ),
+    )
+
+    prompt = build_execution_resolver_prompt(
+        step,
+        surfaces,
+    )
+
+    assert '"uses_dependency_state": true' in prompt
+    assert "uses_dependency_state is authoritative semantic metadata" in prompt

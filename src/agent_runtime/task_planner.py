@@ -11,6 +11,9 @@ from src.agent_runtime.task_plan import (
     TaskPlan,
     validate_task_plan_payload,
 )
+from src.agent_runtime.structured_llm import (
+    invoke_structured_model_async,
+)
 
 
 class TaskPlannerModel(Protocol):
@@ -87,6 +90,7 @@ def build_task_planner_prompt(
                 "work_domains": [
                     "semantic_domain_label"
                 ],
+                "uses_dependency_state": False,
                 "requires_external_state": False,
                 "requires_mutation": False,
             }
@@ -122,13 +126,25 @@ def build_task_planner_prompt(
         "calls.",
         "7. Dependencies must reference step ids from the same plan. The plan "
         "must be acyclic.",
-        "8. requires_external_state means the step needs information not "
-        "already contained in the current request/context.",
-        "9. requires_mutation means the step changes persistent or external "
+        "8. uses_dependency_state=true means the step directly consumes one or "
+        "more completed dependency outputs from depends_on steps as inputs. "
+        "It requires at least one "
+        "depends_on step.",
+        "9. requires_external_state=true means the step must retrieve, inspect, "
+        "or read NEW state beyond the user request/context AND beyond outputs "
+        "already supplied by depends_on steps. Do not set it true merely because "
+        "an upstream dependency originally came from an external source.",
+        "10. A pure comparison, synthesis, reconciliation, transformation, or "
+        "decision over prior step outputs must set uses_dependency_state=true "
+        "and requires_external_state=false.",
+        "11. A step may set both uses_dependency_state=true and "
+        "requires_external_state=true only when it consumes prior outputs AND "
+        "must acquire additional new external state.",
+        "12. requires_mutation means the step changes persistent or external "
         "state. Planning never grants permission to perform that mutation.",
-        "10. work_domains are semantic labels only. They are not capability or "
+        "13. work_domains are semantic labels only. They are not capability or "
         "backend names.",
-        "11. Return only one JSON object matching the schema. Do not include "
+        "14. Return only one JSON object matching the schema. Do not include "
         "markdown fences or commentary.",
         "",
         "USER REQUEST:",
@@ -292,13 +308,12 @@ async def plan_task_from_assessment_async(
         query,
         assessment,
     )
-    response = model.invoke(prompt)
-
-    if inspect.isawaitable(response):
-        response = await response
-
-    return _validate_multi_graph_plan(
-        parse_task_plan_response(response)
+    return await invoke_structured_model_async(
+        model,
+        prompt,
+        lambda response: _validate_multi_graph_plan(
+            parse_task_plan_response(response)
+        ),
     )
 
 

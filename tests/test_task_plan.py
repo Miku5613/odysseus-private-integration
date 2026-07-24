@@ -40,6 +40,7 @@ def _multi_plan_payload():
                     "current_research",
                 ],
                 "work_domains": ["cross_domain_synthesis"],
+                "uses_dependency_state": True,
                 "requires_external_state": False,
                 "requires_mutation": False,
             },
@@ -69,6 +70,18 @@ def test_validate_dependency_aware_backend_independent_plan():
         "project_state",
         "current_research",
     )
+    assert plan.steps[2].uses_dependency_state is True
+
+
+def test_dependency_state_usage_requires_dependency():
+    payload = _multi_plan_payload()
+    payload["steps"][0]["uses_dependency_state"] = True
+
+    with pytest.raises(
+        ValueError,
+        match="uses_dependency_state=true requires at least one depends_on",
+    ):
+        validate_task_plan_payload(payload)
 
 
 def test_backend_execution_fields_are_rejected():
