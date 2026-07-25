@@ -865,10 +865,16 @@ app.include_router(setup_vault_routes())
 
 # Contacts (CardDAV)
 from routes.contacts.contacts_routes import setup_contacts_routes
+# OPENCODE_RUNTIME_ROUTE_V1_START
+from routes.opencode_runtime_routes import router as opencode_runtime_router
+# OPENCODE_RUNTIME_ROUTE_V1_END
 app.include_router(setup_contacts_routes())
 
 from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
+# OPENCODE_RUNTIME_INCLUDE_V1_START
+app.include_router(opencode_runtime_router)
+# OPENCODE_RUNTIME_INCLUDE_V1_END
 
 # ========= ROUTES (kept in app.py) =========
 

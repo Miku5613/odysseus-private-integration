@@ -1,0 +1,1583 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field, replace
+import fnmatch
+import os
+import json
+from pathlib import Path
+import threading
+import time
+from typing import Any, AsyncIterator
+import uuid
+
+from .config import OpenCodeRuntimeConfig
+from .normalizer import (
+    OpenCodeEventNormalizer,
+    extract_final_assistant_message,
+)
+from .process_manager import (
+    OpenCodeServerLifecycleError,
+    OpenCodeServerManager,
+)
+from .transport import OpenCodeHttpTransport, OpenCodeTransportError
+
+
+WORKSPACE_PATH_RUNTIME_RULE = """
+Odysseus workspace path rule:
+- Treat the configured OpenCode workspace as the project root.
+- For files inside that workspace, use workspace-relative paths such as
+  routes/example.py or src/package/module.py.
+- Never prefix workspace files with / or \\ because that turns them into
+  filesystem-root paths and may trigger external-directory permissions.
+- Use an absolute path only when the user explicitly requests a location
+  outside the configured workspace.
+""".strip()
+
+
+def sse_frame(payload: dict[str, Any]) -> str:
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+
+@dataclass(slots=True)
+class ActiveOpenCodeRun:
+    run_id: str
+    odysseus_session_id: str
+    opencode_session_id: str
+    cancel_event: threading.Event = field(
+        default_factory=threading.Event
+    )
+    status: str = "starting"
+
+
+@dataclass(slots=True)
+class PendingPermission:
+    request_id: str
+    odysseus_session_id: str
+    opencode_session_id: str
+    run_id: str
+    action: str
+    resources: tuple[str, ...]
+    save: tuple[str, ...]
+    title: str
+    directory: str
+    call_id: str
+    created_at: float = field(default_factory=time.time)
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "action": self.action,
+            "resources": list(self.resources),
+            "title": self.title,
+            "directory": self.directory,
+            "call_id": self.call_id,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(slots=True)
+class SessionApproval:
+    action: str
+    resources: tuple[str, ...]
+    workspace: str
+    created_at: float = field(default_factory=time.time)
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "resources": list(self.resources),
+            "workspace": self.workspace,
+            "created_at": self.created_at,
+        }
+
+
+class OpenCodeRuntimeService:
+    """Standalone OpenCode runtime lifecycle, without fallback routing."""
+
+    PERMISSION_MODES = {"ask", "workspace"}
+    WORKSPACE_SAFE_ACTIONS = {
+        "read",
+        "edit",
+        "glob",
+        "grep",
+        "list",
+        "lsp",
+    }
+    SENSITIVE_PATH_MARKERS = {
+        ".env",
+        ".git/config",
+        "id_rsa",
+        "id_ed25519",
+        "credentials",
+        "secret",
+        ".pem",
+        ".p12",
+        ".pfx",
+    }
+
+    def __init__(
+        self,
+        config: OpenCodeRuntimeConfig | None = None,
+        transport: OpenCodeHttpTransport | None = None,
+        server_manager: OpenCodeServerManager | None = None,
+    ):
+        base_config = config or OpenCodeRuntimeConfig.from_env()
+        system_prompt = str(base_config.system_prompt or "").strip()
+        if WORKSPACE_PATH_RUNTIME_RULE not in system_prompt:
+            system_prompt = (
+                system_prompt
+                + "\n\n"
+                + WORKSPACE_PATH_RUNTIME_RULE
+            ).strip()
+            base_config = replace(
+                base_config,
+                system_prompt=system_prompt,
+            )
+        self.config = base_config
+        self.transport = transport or OpenCodeHttpTransport(self.config)
+        self.server_manager = server_manager or OpenCodeServerManager(
+            self.config,
+            health_probe=self.transport.health,
+        )
+        self._sessions: dict[str, str] = {}
+        self._runs: dict[str, ActiveOpenCodeRun] = {}
+        self._run_by_conversation: dict[str, str] = {}
+        self._run_errors: dict[str, str] = {}
+        self._permission_modes: dict[str, str] = {}
+        self._permission_approvals: dict[
+            str,
+            list[SessionApproval],
+        ] = {}
+        self._pending_permissions: dict[str, PendingPermission] = {}
+        self._lock = threading.RLock()
+
+
+    @classmethod
+    def _normalize_permission_mode(cls, mode: str) -> str:
+        value = str(mode or "ask").strip().lower()
+        if value not in cls.PERMISSION_MODES:
+            raise ValueError(
+                "OpenCode permission mode must be 'ask' or 'workspace'."
+            )
+        return value
+
+    def set_permission_mode(
+        self,
+        odysseus_session_id: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise ValueError("Odysseus session id is required.")
+        normalized = self._normalize_permission_mode(mode)
+        with self._lock:
+            self._permission_modes[conversation_id] = normalized
+        self._log(
+            "PERMISSION_MODE_UPDATED",
+            odysseus_session_id=conversation_id,
+            permission_mode=normalized,
+        )
+        return self.permission_state(conversation_id)
+
+    def permission_state(
+        self,
+        odysseus_session_id: str,
+    ) -> dict[str, Any]:
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise ValueError("Odysseus session id is required.")
+        with self._lock:
+            mode = self._permission_modes.get(conversation_id, "ask")
+            approvals = [
+                item.public_dict()
+                for item in self._permission_approvals.get(
+                    conversation_id,
+                    [],
+                )
+            ]
+            pending = [
+                item.public_dict()
+                for item in self._pending_permissions.values()
+                if item.odysseus_session_id == conversation_id
+            ]
+        return {
+            "ok": True,
+            "odysseus_session_id": conversation_id,
+            "mode": mode,
+            "workspace": str(
+                Path(
+                    self.config.workspace or Path.cwd()
+                ).expanduser().resolve()
+            ),
+            "approvals": approvals,
+            "pending": pending,
+        }
+
+    def clear_permission_approvals(
+        self,
+        odysseus_session_id: str,
+    ) -> dict[str, Any]:
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise ValueError("Odysseus session id is required.")
+        with self._lock:
+            removed = len(
+                self._permission_approvals.pop(conversation_id, [])
+            )
+        self._log(
+            "PERMISSION_APPROVALS_CLEARED",
+            odysseus_session_id=conversation_id,
+            removed=removed,
+        )
+        return {
+            "ok": True,
+            "odysseus_session_id": conversation_id,
+            "removed": removed,
+        }
+
+    @staticmethod
+    def _permission_values(value: Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, list):
+            values = value
+        else:
+            values = []
+        return tuple(
+            str(item).strip()[:1000]
+            for item in values
+            if str(item).strip()
+        )
+
+    @staticmethod
+    def _normalize_resource(value: str) -> str:
+        return os.path.normcase(
+            str(value or "").strip().replace("\\", "/")
+        )
+
+    def _workspace_root(self) -> Path:
+        return Path(
+            self.config.workspace or Path.cwd()
+        ).expanduser().resolve()
+
+    @staticmethod
+    def _path_is_within(root: Path, candidate: Path) -> bool:
+        try:
+            root_value = os.path.normcase(str(root.resolve()))
+            candidate_value = os.path.normcase(
+                str(candidate.resolve(strict=False))
+            )
+            return (
+                os.path.commonpath([root_value, candidate_value])
+                == root_value
+            )
+        except (OSError, ValueError):
+            return False
+
+    def _directory_is_within_workspace(
+        self,
+        directory: str,
+    ) -> bool:
+        root = self._workspace_root()
+        if not str(directory or "").strip():
+            return True
+        return self._path_is_within(
+            root,
+            Path(directory).expanduser(),
+        )
+
+    def _resource_path_within_workspace(
+        self,
+        resource: str,
+        *,
+        directory: str,
+    ) -> bool:
+        raw = str(resource or "").strip().strip("'\"")
+        if not raw:
+            return False
+        if "://" in raw:
+            return False
+
+        wildcard_at = min(
+            [
+                index
+                for token in ("*", "?")
+                if (index := raw.find(token)) >= 0
+            ]
+            or [-1]
+        )
+        if wildcard_at == 0:
+            return self._directory_is_within_workspace(directory)
+        if wildcard_at > 0:
+            raw = raw[:wildcard_at]
+
+        raw = raw.rstrip("/\\")
+        if not raw:
+            return self._directory_is_within_workspace(directory)
+
+        root = self._workspace_root()
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            base = (
+                Path(directory).expanduser()
+                if str(directory or "").strip()
+                else root
+            )
+            path = base / path
+        return self._path_is_within(root, path)
+
+    @classmethod
+    def _resource_is_sensitive(cls, resource: str) -> bool:
+        value = cls._normalize_resource(resource)
+        return any(marker in value for marker in cls.SENSITIVE_PATH_MARKERS)
+
+    def _workspace_policy_allows(
+        self,
+        pending: PendingPermission,
+    ) -> bool:
+        action = pending.action.lower()
+        if action not in self.WORKSPACE_SAFE_ACTIONS:
+            return False
+        if not self._directory_is_within_workspace(pending.directory):
+            return False
+        if any(
+            self._resource_is_sensitive(resource)
+            for resource in pending.resources
+        ):
+            return False
+
+        if action in {"read", "edit"}:
+            return bool(pending.resources) and all(
+                self._resource_path_within_workspace(
+                    resource,
+                    directory=pending.directory,
+                )
+                for resource in pending.resources
+            )
+
+        # Search/list/LSP actions are scoped by OpenCode's event directory.
+        # Any attempt to escape that directory should arrive separately as
+        # external_directory, which always remains approval-gated.
+        return True
+
+    def _session_approval_matches(
+        self,
+        conversation_id: str,
+        pending: PendingPermission,
+    ) -> bool:
+        workspace = os.path.normcase(str(self._workspace_root()))
+        requested = tuple(
+            self._normalize_resource(value)
+            for value in pending.resources
+        )
+        with self._lock:
+            approvals = list(
+                self._permission_approvals.get(conversation_id, [])
+            )
+        for approval in approvals:
+            if approval.action != pending.action:
+                continue
+            if os.path.normcase(approval.workspace) != workspace:
+                continue
+            approved = tuple(
+                self._normalize_resource(value)
+                for value in approval.resources
+            )
+            if approved == requested:
+                return True
+        return False
+
+    def _store_session_approval(
+        self,
+        conversation_id: str,
+        pending: PendingPermission,
+    ) -> None:
+        approval = SessionApproval(
+            action=pending.action,
+            resources=pending.resources,
+            workspace=str(self._workspace_root()),
+        )
+        with self._lock:
+            bucket = self._permission_approvals.setdefault(
+                conversation_id,
+                [],
+            )
+            if not any(
+                item.action == approval.action
+                and item.resources == approval.resources
+                and os.path.normcase(item.workspace)
+                == os.path.normcase(approval.workspace)
+                for item in bucket
+            ):
+                bucket.append(approval)
+
+    def _remove_pending_permission(
+        self,
+        request_id: str,
+    ) -> PendingPermission | None:
+        with self._lock:
+            return self._pending_permissions.pop(
+                str(request_id or ""),
+                None,
+            )
+
+    async def _reply_to_pending(
+        self,
+        pending: PendingPermission,
+        *,
+        reply: str,
+        source: str,
+    ) -> bool:
+        workspace = str(self._workspace_root())
+        effective_directory = (
+            str(pending.directory or "").strip()
+            or workspace
+        )
+        reply_fields = {
+            "odysseus_session_id": pending.odysseus_session_id,
+            "opencode_session_id": pending.opencode_session_id,
+            "request_id": pending.request_id,
+            "action": pending.action,
+            "resources": list(pending.resources),
+            "reply": reply,
+            "source": source,
+            "directory": effective_directory,
+        }
+        self._log(
+            "PERMISSION_REPLY_SUBMITTING",
+            **reply_fields,
+        )
+        try:
+            accepted = await asyncio.to_thread(
+                self.transport.reply_permission,
+                pending.request_id,
+                reply,
+                directory=effective_directory,
+            )
+        except Exception as exc:
+            self._log(
+                "PERMISSION_REPLY_FAILED",
+                **reply_fields,
+                error=str(exc),
+            )
+            raise
+        if not accepted:
+            error = "OpenCode rejected the permission response."
+            self._log(
+                "PERMISSION_REPLY_FAILED",
+                **reply_fields,
+                error=error,
+            )
+            raise OpenCodeTransportError(error)
+        self._remove_pending_permission(pending.request_id)
+        self._log(
+            "PERMISSION_REPLIED",
+            **reply_fields,
+        )
+        return True
+
+    async def resolve_permission_request(
+        self,
+        *,
+        odysseus_session_id: str,
+        request_id: str,
+        decision: str,
+    ) -> dict[str, Any]:
+        conversation_id = str(odysseus_session_id or "").strip()
+        normalized = str(decision or "").strip().lower()
+        if normalized not in {"once", "session", "reject"}:
+            raise ValueError(
+                "Permission decision must be once, session, or reject."
+            )
+        with self._lock:
+            pending = self._pending_permissions.get(
+                str(request_id or "").strip()
+            )
+        if pending is None:
+            raise KeyError("OpenCode permission request was not found.")
+        if pending.odysseus_session_id != conversation_id:
+            raise PermissionError(
+                "Permission request does not belong to this Odysseus chat."
+            )
+
+        if normalized == "session":
+            self._store_session_approval(conversation_id, pending)
+        reply = "reject" if normalized == "reject" else "once"
+        await self._reply_to_pending(
+            pending,
+            reply=reply,
+            source=(
+                "user_session_approval"
+                if normalized == "session"
+                else "user"
+            ),
+        )
+        return {
+            "ok": True,
+            "request_id": pending.request_id,
+            "decision": normalized,
+            "mode": self._permission_modes.get(
+                conversation_id,
+                "ask",
+            ),
+            "approval_count": len(
+                self._permission_approvals.get(
+                    conversation_id,
+                    [],
+                )
+            ),
+        }
+
+    async def _apply_permission_policy(
+        self,
+        pending: PendingPermission,
+    ) -> dict[str, Any]:
+        conversation_id = pending.odysseus_session_id
+        mode = self._permission_modes.get(conversation_id, "ask")
+
+        source = ""
+        if self._session_approval_matches(conversation_id, pending):
+            source = "odysseus_session_approval"
+        elif mode == "workspace" and self._workspace_policy_allows(pending):
+            source = "workspace_policy"
+
+        if not source:
+            return {
+                "type": "runtime.permission_requested",
+                "runtime": "opencode",
+                **pending.public_dict(),
+                "mode": mode,
+            }
+
+        await self._reply_to_pending(
+            pending,
+            reply="once",
+            source=source,
+        )
+        return {
+            "type": "runtime.permission_resolved",
+            "runtime": "opencode",
+            "request_id": pending.request_id,
+            "action": pending.action,
+            "resources": list(pending.resources),
+            "decision": "once",
+            "source": source,
+        }
+
+    def _log(self, event: str, **fields: Any) -> None:
+        logger = getattr(self.server_manager, "log_event", None)
+        if not callable(logger):
+            return
+        try:
+            logger(event, **fields)
+        except Exception:
+            # Observability must never break the runtime path.
+            pass
+
+    @staticmethod
+    def _unwrap_global_event(
+        raw: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], str]:
+        if not isinstance(raw, dict):
+            return "", {}, ""
+        directory = str(raw.get("directory") or "")
+        payload = raw.get("payload")
+        if not isinstance(payload, dict):
+            payload = raw
+        event_type = str(payload.get("type") or "")
+        properties = payload.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+        return event_type, properties, directory
+
+    @staticmethod
+    def _session_error_summary(properties: dict[str, Any]) -> str:
+        value: Any = (
+            properties.get("error")
+            or properties.get("message")
+            or properties.get("data")
+            or properties
+        )
+        if isinstance(value, dict):
+            for key in ("message", "error", "detail"):
+                candidate = value.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()[:1000]
+            nested = value.get("data")
+            if isinstance(nested, dict):
+                for key in ("message", "error", "detail"):
+                    candidate = nested.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        return candidate.strip()[:1000]
+            candidate = value.get("name")
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()[:1000]
+            try:
+                return json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )[:1000]
+            except Exception:
+                return str(value)[:1000]
+        return str(value or "OpenCode session error.")[:1000]
+
+    def _observe_raw_event(
+        self,
+        raw: dict[str, Any],
+        *,
+        run_id: str,
+        odysseus_session_id: str,
+        opencode_session_id: str,
+    ) -> PendingPermission | None:
+        event_type, properties, directory = self._unwrap_global_event(
+            raw
+        )
+        if not event_type:
+            return None
+
+        session_id = str(
+            properties.get("sessionID")
+            or properties.get("sessionId")
+            or ""
+        )
+        if session_id and session_id != opencode_session_id:
+            return None
+
+        observed_types = {
+            "session.created",
+            "session.updated",
+            "session.status",
+            "session.idle",
+            "session.error",
+            "permission.asked",
+            "permission.updated",
+            "permission.replied",
+            "permission.v2.asked",
+            "permission.v2.replied",
+        }
+        if event_type in observed_types:
+            error_payload: Any = None
+            if event_type == "session.error":
+                error_payload = (
+                    properties.get("error")
+                    or properties.get("data")
+                    or properties
+                )
+                self._run_errors[run_id] = (
+                    self._session_error_summary(properties)
+                )
+            self._log(
+                "OPENCODE_EVENT",
+                run_id=run_id,
+                odysseus_session_id=odysseus_session_id,
+                opencode_session_id=opencode_session_id,
+                event_type=event_type,
+                event_directory=directory,
+                status=properties.get("status"),
+                error_payload=error_payload,
+            )
+
+        if event_type in {
+            "permission.replied",
+            "permission.v2.replied",
+        }:
+            replied_id = str(
+                properties.get("requestID")
+                or properties.get("requestId")
+                or properties.get("id")
+                or ""
+            ).strip()
+            if replied_id:
+                self._remove_pending_permission(replied_id)
+            return None
+
+        if event_type not in {
+            "permission.asked",
+            "permission.updated",
+            "permission.v2.asked",
+        }:
+            return None
+
+        request_id = str(
+            properties.get("id")
+            or properties.get("requestID")
+            or properties.get("requestId")
+            or ""
+        ).strip()
+        action = str(
+            properties.get("action")
+            or properties.get("permission")
+            or properties.get("type")
+            or ""
+        ).strip()
+        resources = self._permission_values(
+            properties.get("resources")
+            if properties.get("resources") is not None
+            else (
+                properties.get("patterns")
+                if properties.get("patterns") is not None
+                else properties.get("pattern")
+            )
+        )
+        save = self._permission_values(properties.get("save"))
+        metadata = (
+            properties.get("metadata")
+            if isinstance(properties.get("metadata"), dict)
+            else {}
+        )
+        source = (
+            properties.get("source")
+            if isinstance(properties.get("source"), dict)
+            else {}
+        )
+        call_id = str(
+            source.get("callID")
+            or source.get("callId")
+            or properties.get("callID")
+            or properties.get("callId")
+            or ""
+        )
+        title = str(
+            properties.get("title")
+            or metadata.get("title")
+            or metadata.get("description")
+            or action
+            or "OpenCode permission"
+        )[:500]
+
+        if not request_id or not action:
+            self._log(
+                "PERMISSION_EVENT_IGNORED",
+                run_id=run_id,
+                odysseus_session_id=odysseus_session_id,
+                reason="missing_request_id_or_action",
+                event_type=event_type,
+            )
+            return None
+
+        pending = PendingPermission(
+            request_id=request_id,
+            odysseus_session_id=odysseus_session_id,
+            opencode_session_id=opencode_session_id,
+            run_id=run_id,
+            action=action,
+            resources=resources,
+            save=save,
+            title=title,
+            directory=str(directory or ""),
+            call_id=call_id,
+        )
+        with self._lock:
+            self._pending_permissions[request_id] = pending
+
+        self._log(
+            "PERMISSION_REQUESTED",
+            odysseus_session_id=odysseus_session_id,
+            opencode_session_id=opencode_session_id,
+            run_id=run_id,
+            request_id=request_id,
+            action=action,
+            resources=list(resources),
+            save=list(save),
+            title=title,
+            call_id=call_id,
+            directory=str(directory or ""),
+            permission_mode=self._permission_modes.get(
+                odysseus_session_id,
+                "ask",
+            ),
+        )
+        return pending
+
+    def _observe_normalized_event(
+        self,
+        event: dict[str, Any],
+        *,
+        run_id: str,
+        odysseus_session_id: str,
+        opencode_session_id: str,
+    ) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type not in {
+            "tool.started",
+            "tool.completed",
+            "runtime.status",
+            "runtime.failed",
+            "runtime.cancelled",
+        }:
+            return
+        self._log(
+            "NORMALIZED_EVENT",
+            run_id=run_id,
+            odysseus_session_id=odysseus_session_id,
+            opencode_session_id=opencode_session_id,
+            event_type=event_type,
+            tool=event.get("tool"),
+            call_id=event.get("call_id"),
+            status=event.get("status"),
+            success=event.get("success"),
+            summary=event.get("summary"),
+            output_summary=event.get("output_summary"),
+            error=event.get("error"),
+        )
+
+    def _observe_message_snapshot(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        run_id: str,
+        odysseus_session_id: str,
+        opencode_session_id: str,
+    ) -> None:
+        paths: list[dict[str, str]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            info = message.get("info")
+            if not isinstance(info, dict):
+                continue
+            path = info.get("path")
+            if not isinstance(path, dict):
+                continue
+            observed = {
+                "cwd": str(path.get("cwd") or ""),
+                "root": str(path.get("root") or ""),
+            }
+            if observed not in paths:
+                paths.append(observed)
+        self._log(
+            "MESSAGE_SNAPSHOT",
+            run_id=run_id,
+            odysseus_session_id=odysseus_session_id,
+            opencode_session_id=opencode_session_id,
+            message_count=len(messages),
+            observed_paths=paths,
+        )
+
+    async def health(self) -> dict[str, Any]:
+        self._log(
+            "HEALTH_CHECK_REQUESTED",
+            endpoint=self.config.base_url,
+            model_id=self.config.model_id,
+            configured_workspace=(
+                self.config.workspace or str(Path.cwd())
+            ),
+        )
+        launch = await asyncio.to_thread(
+            self.server_manager.ensure_running
+        )
+        value = launch["health"]
+        self._log(
+            "HEALTH_CHECK_COMPLETED",
+            mode=launch["mode"],
+            owned=launch["owned"],
+            pid=launch["pid"],
+            healthy=bool(value.get("healthy", True)),
+        )
+        return {
+            "ok": bool(value.get("healthy", True)),
+            "runtime": "opencode",
+            "launch": {
+                "mode": launch["mode"],
+                "owned": launch["owned"],
+                "pid": launch["pid"],
+            },
+            "server": value,
+            "model": {
+                "provider_id": self.config.provider_id,
+                "model_id": self.config.model_id,
+                "agent": self.config.agent,
+            },
+            "workspace": self.config.workspace or str(Path.cwd()),
+            "log_root": str(
+                getattr(self.server_manager, "log_root", "") or ""
+            ),
+            "server_log_path": str(
+                getattr(self.server_manager, "log_path", "") or ""
+            ),
+            "log_path": str(
+                getattr(self.server_manager, "log_path", "") or ""
+            ),
+            "config": {
+                "path": self.config.config_path or "",
+                "default_model": (
+                    self.server_manager.config_default_model()
+                    if hasattr(
+                        self.server_manager,
+                        "config_default_model",
+                    )
+                    else ""
+                ),
+                "requested_model": self.config.model_id,
+                "effective_model": self.config.model_id,
+            },
+        }
+
+    async def stream(
+        self,
+        *,
+        message: str,
+        odysseus_session_id: str,
+        title: str = "",
+        permission_mode: str = "ask",
+    ) -> AsyncIterator[str]:
+        normalized_message = str(message or "").strip()
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not normalized_message:
+            yield sse_frame({
+                "type": "runtime.failed",
+                "runtime": "opencode",
+                "error": "Message must not be empty.",
+            })
+            return
+        if not conversation_id:
+            yield sse_frame({
+                "type": "runtime.failed",
+                "runtime": "opencode",
+                "error": "Odysseus session id is required.",
+            })
+            return
+
+        try:
+            normalized_permission_mode = self._normalize_permission_mode(
+                permission_mode
+            )
+        except ValueError as exc:
+            yield sse_frame({
+                "type": "runtime.failed",
+                "runtime": "opencode",
+                "error": str(exc),
+            })
+            return
+        with self._lock:
+            self._permission_modes[conversation_id] = (
+                normalized_permission_mode
+            )
+
+        self._log(
+            "RUN_REQUESTED",
+            odysseus_session_id=conversation_id,
+            prompt_length=len(normalized_message),
+            title_length=len(str(title or "")),
+            model_id=self.config.model_id,
+            configured_workspace=(
+                self.config.workspace or str(Path.cwd())
+            ),
+        )
+
+        with self._lock:
+            existing_run_id = self._run_by_conversation.get(conversation_id)
+            if existing_run_id and existing_run_id in self._runs:
+                self._log(
+                    "RUN_REJECTED",
+                    odysseus_session_id=conversation_id,
+                    reason="already_active",
+                    active_run_id=existing_run_id,
+                )
+                yield sse_frame({
+                    "type": "runtime.failed",
+                    "runtime": "opencode",
+                    "error": "An OpenCode run is already active for this chat.",
+                })
+                return
+
+        run_id = uuid.uuid4().hex
+        session_id = ""
+        event_thread: threading.Thread | None = None
+        queue: asyncio.Queue[dict[str, Any] | BaseException] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        try:
+            launch = await asyncio.to_thread(
+                self.server_manager.ensure_running
+            )
+            self._log(
+                "RUN_SERVER_READY",
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                mode=launch.get("mode"),
+                owned=launch.get("owned"),
+                pid=launch.get("pid"),
+            )
+            session_id = await self._get_or_create_session(
+                conversation_id,
+                title=title,
+            )
+            run = ActiveOpenCodeRun(
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                opencode_session_id=session_id,
+            )
+            with self._lock:
+                self._runs[run_id] = run
+                self._run_by_conversation[conversation_id] = run_id
+
+            self._log(
+                "RUN_STARTED",
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                opencode_session_id=session_id,
+                model_id=self.config.model_id,
+                configured_workspace=(
+                    self.config.workspace or str(Path.cwd())
+                ),
+            )
+            normalizer = OpenCodeEventNormalizer(session_id=session_id)
+
+            def event_worker() -> None:
+                self._log(
+                    "EVENT_STREAM_OPENING",
+                    run_id=run_id,
+                    odysseus_session_id=conversation_id,
+                    opencode_session_id=session_id,
+                )
+                try:
+                    for raw in self.transport.iter_global_events(
+                        run.cancel_event
+                    ):
+                        loop.call_soon_threadsafe(queue.put_nowait, raw)
+                except BaseException as exc:
+                    self._log(
+                        "EVENT_STREAM_ERROR",
+                        run_id=run_id,
+                        error=str(exc),
+                    )
+                    loop.call_soon_threadsafe(queue.put_nowait, exc)
+                finally:
+                    self._log(
+                        "EVENT_STREAM_CLOSED",
+                        run_id=run_id,
+                        cancelled=run.cancel_event.is_set(),
+                    )
+
+            event_thread = threading.Thread(
+                target=event_worker,
+                daemon=True,
+                name=f"OpenCodeEvents-{run_id[:8]}",
+            )
+            event_thread.start()
+
+            yield sse_frame({
+                "type": "runtime.started",
+                "runtime": "opencode",
+                "run_id": run_id,
+                "opencode_session_id": session_id,
+                "label": "OpenCode runtime",
+            })
+
+            self._log(
+                "PROMPT_SUBMITTING",
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                opencode_session_id=session_id,
+                prompt_length=len(normalized_message),
+                requested_model_id=self.config.model_id,
+                effective_model_id=self.config.model_id,
+            )
+            await asyncio.to_thread(
+                self.transport.submit_prompt,
+                session_id,
+                normalized_message,
+            )
+            self._log(
+                "PROMPT_ACCEPTED",
+                run_id=run_id,
+                opencode_session_id=session_id,
+            )
+            run.status = "running"
+            yield sse_frame({
+                "type": "runtime.status",
+                "runtime": "opencode",
+                "status": "running",
+                "label": "OpenCode is working",
+            })
+
+            started = time.monotonic()
+            idle_seen = False
+            next_message_reconcile = 0.0
+            message_poll_failures = 0
+            while not idle_seen:
+                if run.cancel_event.is_set():
+                    run.status = "cancelled"
+                    yield sse_frame({
+                        "type": "runtime.cancelled",
+                        "runtime": "opencode",
+                        "run_id": run_id,
+                    })
+                    return
+
+                if (
+                    time.monotonic() - started
+                    > self.config.run_timeout_seconds
+                ):
+                    await asyncio.to_thread(
+                        self.transport.abort_session,
+                        session_id,
+                    )
+                    run.cancel_event.set()
+                    run.status = "failed"
+                    yield sse_frame({
+                        "type": "runtime.failed",
+                        "runtime": "opencode",
+                        "run_id": run_id,
+                        "error": "OpenCode run timed out.",
+                    })
+                    return
+
+                now = time.monotonic()
+                if now >= next_message_reconcile:
+                    try:
+                        snapshot = await asyncio.to_thread(
+                            self.transport.list_messages,
+                            session_id,
+                        )
+                        message_poll_failures = 0
+                        self._observe_message_snapshot(
+                            snapshot,
+                            run_id=run_id,
+                            odysseus_session_id=conversation_id,
+                            opencode_session_id=session_id,
+                        )
+                        for event in normalizer.reconcile_messages(snapshot):
+                            event["run_id"] = run_id
+                            self._observe_normalized_event(
+                                event,
+                                run_id=run_id,
+                                odysseus_session_id=conversation_id,
+                                opencode_session_id=session_id,
+                            )
+                            yield sse_frame(event)
+                    except OpenCodeTransportError:
+                        message_poll_failures += 1
+                        if message_poll_failures >= 3:
+                            raise
+                    next_message_reconcile = now + 0.75
+
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=0.35,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                if isinstance(item, BaseException):
+                    raise OpenCodeTransportError(
+                        f"OpenCode event stream failed: {item}"
+                    )
+
+                pending_permission = self._observe_raw_event(
+                    item,
+                    run_id=run_id,
+                    odysseus_session_id=conversation_id,
+                    opencode_session_id=session_id,
+                )
+                if pending_permission is not None:
+                    permission_event = await self._apply_permission_policy(
+                        pending_permission
+                    )
+                    yield sse_frame(permission_event)
+
+                for event in normalizer.normalize(item):
+                    if event.get("type") == "runtime.idle":
+                        idle_seen = True
+                        self._log(
+                            "RUN_IDLE_OBSERVED",
+                            run_id=run_id,
+                            opencode_session_id=session_id,
+                        )
+                        continue
+                    event["run_id"] = run_id
+                    self._observe_normalized_event(
+                        event,
+                        run_id=run_id,
+                        odysseus_session_id=conversation_id,
+                        opencode_session_id=session_id,
+                    )
+                    yield sse_frame(event)
+
+            messages = await asyncio.to_thread(
+                self.transport.list_messages,
+                session_id,
+            )
+            self._observe_message_snapshot(
+                messages,
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                opencode_session_id=session_id,
+            )
+            for event in normalizer.reconcile_messages(messages):
+                event["run_id"] = run_id
+                self._observe_normalized_event(
+                    event,
+                    run_id=run_id,
+                    odysseus_session_id=conversation_id,
+                    opencode_session_id=session_id,
+                )
+                yield sse_frame(event)
+            final = extract_final_assistant_message(messages)
+            if not final["text"]:
+                run.status = "failed"
+                session_error = self._run_errors.pop(run_id, "")
+                reason = (
+                    "session_error"
+                    if session_error
+                    else "idle_without_final_response"
+                )
+                failure_message = (
+                    f"OpenCode session failed: {session_error}"
+                    if session_error
+                    else (
+                        "OpenCode returned no assistant output. "
+                        "Start a fresh OpenCode session and retry."
+                    )
+                )
+                self._log(
+                    "RUN_FAILED",
+                    run_id=run_id,
+                    odysseus_session_id=conversation_id,
+                    opencode_session_id=session_id,
+                    reason=reason,
+                    error=session_error or None,
+                )
+                yield sse_frame({
+                    "type": "runtime.failed",
+                    "runtime": "opencode",
+                    "run_id": run_id,
+                    "error": failure_message,
+                })
+                return
+
+            run.status = "completed"
+            self._log(
+                "RUN_COMPLETED",
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                opencode_session_id=session_id,
+                provider_id=final["provider_id"],
+                model_id=final["model_id"],
+                message_id=final["message_id"],
+                response_length=len(final["text"]),
+            )
+            yield sse_frame({
+                "type": "runtime.completed",
+                "runtime": "opencode",
+                "run_id": run_id,
+                "content": final["text"],
+                "provider_id": final["provider_id"],
+                "model_id": final["model_id"],
+                "message_id": final["message_id"],
+            })
+
+        except (
+            OpenCodeServerLifecycleError,
+            OpenCodeTransportError,
+        ) as exc:
+            self._log(
+                "RUN_FAILED",
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                opencode_session_id=session_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            yield sse_frame({
+                "type": "runtime.failed",
+                "runtime": "opencode",
+                "run_id": run_id,
+                "error": str(exc),
+            })
+        except asyncio.CancelledError:
+            self._log(
+                "RUN_TASK_CANCELLED",
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                opencode_session_id=session_id,
+            )
+            if session_id:
+                await asyncio.to_thread(
+                    self.transport.abort_session,
+                    session_id,
+                )
+            raise
+        finally:
+            with self._lock:
+                run = self._runs.pop(run_id, None)
+                self._run_by_conversation.pop(conversation_id, None)
+            self._run_errors.pop(run_id, None)
+            with self._lock:
+                stale_permission_ids = [
+                    request_id
+                    for request_id, pending in self._pending_permissions.items()
+                    if pending.run_id == run_id
+                ]
+                for request_id in stale_permission_ids:
+                    self._pending_permissions.pop(request_id, None)
+            if run is not None:
+                run.cancel_event.set()
+            if event_thread is not None:
+                event_thread.join(timeout=2.0)
+            self._log(
+                "RUN_CLEANUP_COMPLETED",
+                run_id=run_id,
+                odysseus_session_id=conversation_id,
+                opencode_session_id=session_id,
+            )
+
+    def _assert_idle(self) -> None:
+        with self._lock:
+            if self._runs:
+                raise OpenCodeServerLifecycleError(
+                    "An OpenCode run is active. Stop it before changing "
+                    "server configuration."
+                )
+
+    async def restart_server(
+        self,
+        *,
+        model_id: str,
+        workspace: str,
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        self._log(
+            "SERVER_RESTART_REQUESTED",
+            requested_model_id=str(model_id or "").strip(),
+            requested_workspace=str(workspace or "").strip(),
+            current_model_id=self.config.model_id,
+            current_workspace=self.config.workspace or str(Path.cwd()),
+        )
+
+        selected_model = str(model_id or "").strip()
+        selected_workspace = str(workspace or "").strip()
+        if not selected_model:
+            raise OpenCodeServerLifecycleError(
+                "OpenCode model must not be empty."
+            )
+        if not selected_workspace:
+            raise OpenCodeServerLifecycleError(
+                "OpenCode workspace must not be empty."
+            )
+
+        workspace_path = Path(selected_workspace).expanduser().resolve()
+        if not workspace_path.is_dir():
+            raise OpenCodeServerLifecycleError(
+                f"OpenCode workspace does not exist: {workspace_path}"
+            )
+
+        previous_workspace = self._workspace_root()
+        workspace_changed = (
+            os.path.normcase(str(previous_workspace))
+            != os.path.normcase(str(workspace_path))
+        )
+
+        external_healthy = False
+        if not self.server_manager.owns_process:
+            try:
+                await asyncio.to_thread(self.transport.health)
+                external_healthy = True
+            except Exception:
+                external_healthy = False
+        if external_healthy:
+            raise OpenCodeServerLifecycleError(
+                "The connected OpenCode server is external. Stop it "
+                "manually before applying managed workspace settings."
+            )
+
+        with self._lock:
+            native_sessions = list(self._sessions.values())
+            self._sessions.clear()
+            if workspace_changed:
+                approval_count = sum(
+                    len(items)
+                    for items in self._permission_approvals.values()
+                )
+                self._permission_approvals.clear()
+                self._pending_permissions.clear()
+            else:
+                approval_count = 0
+
+        if workspace_changed:
+            self._log(
+                "PERMISSION_APPROVALS_INVALIDATED",
+                reason="workspace_changed",
+                previous_workspace=str(previous_workspace),
+                new_workspace=str(workspace_path),
+                removed=approval_count,
+            )
+
+        for session_id in native_sessions:
+            try:
+                await asyncio.to_thread(
+                    self.transport.delete_session,
+                    session_id,
+                )
+            except Exception:
+                pass
+
+        await asyncio.to_thread(self.server_manager.stop_owned)
+
+        updated = replace(
+            self.config,
+            model_id=selected_model,
+            workspace=str(workspace_path),
+        )
+        self.config = updated
+        self.transport = OpenCodeHttpTransport(updated)
+        self.server_manager = OpenCodeServerManager(
+            updated,
+            health_probe=self.transport.health,
+            log_root=getattr(
+                self.server_manager,
+                "log_root",
+                None,
+            ),
+        )
+        result = await self.health()
+        self._log(
+            "SERVER_RESTART_COMPLETED",
+            model_id=selected_model,
+            workspace=str(workspace_path),
+            launch=result.get("launch"),
+        )
+        return result
+
+    async def stop_server(self) -> dict[str, Any]:
+        self._assert_idle()
+        self._log(
+            "SERVER_STOP_API_REQUESTED",
+            owned=self.server_manager.owns_process,
+        )
+        if not self.server_manager.owns_process:
+            return {
+                "ok": True,
+                "stopped": False,
+                "owned": False,
+                "reason": "not_owned",
+            }
+
+        stopped = await asyncio.to_thread(
+            self.server_manager.stop_owned
+        )
+        with self._lock:
+            self._sessions.clear()
+        return {
+            "ok": True,
+            "stopped": bool(stopped),
+            "owned": True,
+        }
+
+    async def open_log_terminal(
+        self,
+        odysseus_session_id: str = "",
+    ) -> dict[str, Any]:
+        value = await asyncio.to_thread(
+            self.server_manager.open_log_terminal,
+            str(odysseus_session_id or "").strip(),
+        )
+        return {"ok": True, **value}
+
+    async def cancel(self, run_id: str) -> bool:
+        with self._lock:
+            run = self._runs.get(str(run_id or ""))
+        if run is None:
+            self._log(
+                "RUN_CANCEL_NOT_FOUND",
+                run_id=str(run_id or ""),
+            )
+            return False
+        self._log(
+            "RUN_CANCEL_REQUESTED",
+            run_id=run.run_id,
+            odysseus_session_id=run.odysseus_session_id,
+            opencode_session_id=run.opencode_session_id,
+        )
+        run.cancel_event.set()
+        run.status = "cancelled"
+        return await asyncio.to_thread(
+            self.transport.abort_session,
+            run.opencode_session_id,
+        )
+
+    async def forget_conversation(
+        self,
+        odysseus_session_id: str,
+    ) -> bool:
+        conversation_id = str(odysseus_session_id or "")
+        with self._lock:
+            session_id = self._sessions.pop(conversation_id, "")
+            self._permission_modes.pop(conversation_id, None)
+            self._permission_approvals.pop(conversation_id, None)
+            stale_permission_ids = [
+                request_id
+                for request_id, pending in self._pending_permissions.items()
+                if pending.odysseus_session_id == conversation_id
+            ]
+            for request_id in stale_permission_ids:
+                self._pending_permissions.pop(request_id, None)
+        if not session_id:
+            self._log(
+                "SESSION_FORGET_SKIPPED",
+                odysseus_session_id=conversation_id,
+                reason="no_mapping",
+            )
+            return False
+        deleted = await asyncio.to_thread(
+            self.transport.delete_session,
+            session_id,
+        )
+        self._log(
+            "SESSION_FORGOTTEN",
+            odysseus_session_id=conversation_id,
+            opencode_session_id=session_id,
+            deleted=deleted,
+        )
+        return deleted
+
+    async def _get_or_create_session(
+        self,
+        conversation_id: str,
+        *,
+        title: str,
+    ) -> str:
+        with self._lock:
+            existing = self._sessions.get(conversation_id)
+        if existing:
+            self._log(
+                "SESSION_REUSED",
+                odysseus_session_id=conversation_id,
+                opencode_session_id=existing,
+                configured_workspace=(
+                    self.config.workspace or str(Path.cwd())
+                ),
+            )
+            return existing
+
+        session_title = str(title or "").strip()
+        if not session_title:
+            session_title = f"Odysseus chat {conversation_id[:12]}"
+        created = await asyncio.to_thread(
+            self.transport.create_session,
+            session_title,
+        )
+        self._log(
+            "SESSION_CREATED",
+            odysseus_session_id=conversation_id,
+            opencode_session_id=created,
+            title_length=len(session_title),
+            configured_workspace=(
+                self.config.workspace or str(Path.cwd())
+            ),
+        )
+        with self._lock:
+            current = self._sessions.setdefault(
+                conversation_id,
+                created,
+            )
+        if current != created:
+            await asyncio.to_thread(
+                self.transport.delete_session,
+                created,
+            )
+        return current

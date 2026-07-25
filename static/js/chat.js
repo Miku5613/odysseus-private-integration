@@ -23,6 +23,7 @@ import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handle
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
+import runtimeControl from './runtimeControl.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -596,6 +597,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       return;
     }
 
+    // OpenCode owns its own cancellation endpoint and run id. Handle it
+    // before the legacy/LangGraph stop path so failures remain OpenCode
+    // failures and are never rerouted.
+    if (runtimeControl.isOpenCodeStreaming()) {
+      await runtimeControl.stopActiveOpenCodeRun();
+      updateSubmitButton('idle', submitBtn);
+      _setForegroundChatBusy(false);
+      return;
+    }
+
     // If currently streaming, keyboard Enter can queue a non-empty composer.
     // Clicking the stop icon should still stop normally, even if text exists.
     if (isStreaming) {
@@ -865,6 +876,51 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
     }
 
+    const _runtimeSessionId = sessionModule.getCurrentSessionId();
+    const _selectedRuntime = runtimeControl.ensureSessionRuntime(
+      _runtimeSessionId
+    );
+
+    if (
+      runtimeControl.isAgentMode()
+      && _selectedRuntime === 'opencode'
+    ) {
+      const _openCodeInput = el('message');
+      const _openCodeTitle = (
+        sessionModule.getSessions().find(
+          item => item.id === _runtimeSessionId
+        ) || {}
+      ).name || 'OpenCode chat';
+
+      if (_openCodeInput) {
+        _openCodeInput.value = '';
+        if (uiModule.autoResize) uiModule.autoResize(_openCodeInput);
+      }
+      if (window._syncModelPickerAutohide) {
+        window._syncModelPickerAutohide();
+      }
+
+      _releaseSendFlag();
+      updateSubmitButton('streaming', submitBtn);
+
+      try {
+        await runtimeControl.streamOpenCodeTurn({
+          message: msg,
+          sessionId: _runtimeSessionId,
+          title: _openCodeTitle,
+        });
+      } finally {
+        updateSubmitButton('idle', submitBtn);
+        _setForegroundChatBusy(false);
+        runtimeControl.refreshRuntimeIndicator();
+        _drainQueuedAgentRequests();
+      }
+      return;
+    }
+
+    if (runtimeControl.isAgentMode()) {
+      await runtimeControl.prepareNativeRuntime(_selectedRuntime);
+    }
 
     const messageInput = el('message');
     const originalBtnText = submitBtn ? submitBtn.innerHTML : '';
@@ -3570,6 +3626,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   // the server run — otherwise closing the tab would kill the background task,
   // defeating the whole point. Only the Stop button cancels the server run.
   export function abortCurrentRequest(stopServer = false) {
+    if (stopServer && runtimeControl.isOpenCodeStreaming()) {
+      runtimeControl.stopActiveOpenCodeRun();
+      return;
+    }
     if (currentAbort) {
       currentAbort.abort();
       // Don't set to null here - let catch block handle it
