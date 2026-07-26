@@ -93,6 +93,67 @@ class OpenCodeEventNormalizer:
         props = _properties(event)
         output: list[dict[str, Any]] = []
 
+        if event_type == "todo.updated":
+            todos = props.get("todos")
+            if not isinstance(todos, list) or not todos:
+                return []
+
+            status_map = {
+                "pending": "pending",
+                "in_progress": "running",
+                "in-progress": "running",
+                "active": "running",
+                "running": "running",
+                "completed": "completed",
+                "done": "completed",
+                "success": "completed",
+                "cancelled": "cancelled",
+                "canceled": "cancelled",
+                "failed": "failed",
+                "error": "failed",
+            }
+            steps: list[dict[str, Any]] = []
+
+            for index, todo in enumerate(todos):
+                if not isinstance(todo, dict):
+                    continue
+
+                todo_id = str(
+                    todo.get("id") or "opencode-todo-%s" % (index + 1)
+                ).strip()
+                objective = str(
+                    todo.get("content")
+                    or todo.get("title")
+                    or todo_id
+                ).strip()
+                status = status_map.get(
+                    str(todo.get("status") or "pending").lower(),
+                    "pending",
+                )
+
+                if not todo_id or not objective:
+                    continue
+
+                steps.append({
+                    "id": todo_id,
+                    "objective": objective[:500],
+                    "depends_on": [],
+                    "work_domains": ["code"],
+                    "status": status,
+                })
+
+            if not steps:
+                return []
+
+            return [{
+                "type": "runtime.plan.updated",
+                "runtime": "opencode",
+                "status": "running",
+                "label": "OpenCode checklist",
+                "detail": "Checklist updated",
+                "steps": steps,
+            }]
+
         if event_type == "message.part.updated":
             part = props.get("part")
             if not isinstance(part, dict):

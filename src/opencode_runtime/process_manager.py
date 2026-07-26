@@ -142,43 +142,40 @@ class OpenCodeServerManager:
         return ""
 
     def _prepare_managed_config(self) -> tuple[str, list[dict[str, str]]]:
-        """Create a portable config overlay where Odysseus owns permissions.
-
-        The user's base config is never modified. Managed actions resolve to
-        ``ask`` so the per-Odysseus-session permission policy can either show
-        approval UI or auto-approve proven workspace-local operations.
-        """
+        """Create an Odysseus-owned portable OpenCode config overlay."""
 
         configured = str(self.config.config_path or "").strip()
-        if not configured:
+        has_registry_provider = bool(
+            str(self.config.provider_base_url or "").strip()
+            and str(self.config.provider_id or "").strip()
+            and str(self.config.model_id or "").strip()
+        )
+        if not configured and not has_registry_provider:
             return "", []
 
-        source_path = Path(configured).expanduser().resolve()
-        if not source_path.is_file():
-            raise OpenCodeServerLifecycleError(
-                f"OpenCode config does not exist: {source_path}"
-            )
-
-        try:
-            payload = json.loads(
-                source_path.read_text(encoding="utf-8")
-            )
-        except Exception as exc:
-            raise OpenCodeServerLifecycleError(
-                f"OpenCode config could not be read: {source_path}: {exc}"
-            ) from exc
-
-        if not isinstance(payload, dict):
-            raise OpenCodeServerLifecycleError(
-                "OpenCode config must contain a JSON object."
-            )
+        payload: dict[str, Any] = {}
+        if configured:
+            source_path = Path(configured).expanduser().resolve()
+            if not source_path.is_file():
+                raise OpenCodeServerLifecycleError(
+                    f"OpenCode config does not exist: {source_path}"
+                )
+            try:
+                payload = json.loads(
+                    source_path.read_text(encoding="utf-8")
+                )
+            except Exception as exc:
+                raise OpenCodeServerLifecycleError(
+                    f"OpenCode config could not be read: {source_path}: {exc}"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise OpenCodeServerLifecycleError(
+                    "OpenCode config must contain a JSON object."
+                )
 
         changes: list[dict[str, str]] = []
 
-        def manage_permissions(
-            owner: dict[str, Any],
-            location: str,
-        ) -> None:
+        def manage_permissions(owner: dict[str, Any], location: str) -> None:
             permissions = owner.get("permission")
             if not isinstance(permissions, dict):
                 permissions = {}
@@ -199,18 +196,98 @@ class OpenCodeServerManager:
                     "effective": "ask",
                 })
 
+        def allow_safe_runtime_tools(
+            owner: dict[str, Any],
+            location: str,
+        ) -> None:
+            permissions = owner.get("permission")
+            if not isinstance(permissions, dict):
+                permissions = {}
+                owner["permission"] = permissions
+
+            previous = permissions.get("todowrite")
+            if previous == "allow":
+                return
+
+            permissions["todowrite"] = "allow"
+            changes.append({
+                "location": location,
+                "action": "todowrite",
+                "previous": (
+                    str(previous)
+                    if previous is not None
+                    else "<unset>"
+                ),
+                "effective": "allow",
+            })
+
         manage_permissions(payload, "permission")
+        allow_safe_runtime_tools(payload, "permission")
         for container_key in ("agent", "agents"):
             agents = payload.get(container_key)
             if not isinstance(agents, dict):
                 continue
             for agent_name, agent_payload in agents.items():
-                if not isinstance(agent_payload, dict):
+                if isinstance(agent_payload, dict):
+                    manage_permissions(
+                        agent_payload,
+                        f"{container_key}.{agent_name}.permission",
+                    )
+                    allow_safe_runtime_tools(
+                        agent_payload,
+                        f"{container_key}.{agent_name}.permission",
+                    )
+
+        if has_registry_provider:
+            provider_id = str(self.config.provider_id).strip()
+            model_id = str(self.config.model_id).strip()
+            model_ids = []
+            seen = set()
+            for value in (*tuple(self.config.provider_models or ()), model_id):
+                candidate = str(value or "").strip()
+                if not candidate or candidate in seen:
                     continue
-                manage_permissions(
-                    agent_payload,
-                    f"{container_key}.{agent_name}.permission",
+                seen.add(candidate)
+                model_ids.append(candidate)
+
+            providers = payload.get("provider")
+            if not isinstance(providers, dict):
+                providers = {}
+                payload["provider"] = providers
+
+            options: dict[str, Any] = {
+                "baseURL": str(
+                    self.config.provider_base_url
+                ).strip().rstrip("/"),
+            }
+            if self.config.provider_api_key:
+                options["apiKey"] = (
+                    "{env:ODYSSEUS_OPENCODE_MODEL_API_KEY}"
                 )
+
+            providers[provider_id] = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": (
+                    str(self.config.provider_name or "").strip()
+                    or "Odysseus Model Endpoint"
+                ),
+                "options": options,
+                "models": {
+                    candidate: {"name": candidate}
+                    for candidate in model_ids
+                },
+            }
+            payload.setdefault(
+                "$schema",
+                "https://opencode.ai/config.json",
+            )
+            payload["model"] = f"{provider_id}/{model_id}"
+            changes.append({
+                "location": f"provider.{provider_id}",
+                "action": "model_registry",
+                "previous": "<generated>",
+                "effective": f"{provider_id}/{model_id}",
+            })
 
         if (
             os.environ.get("PYTEST_CURRENT_TEST")
@@ -227,11 +304,7 @@ class OpenCodeServerManager:
         output_path = config_root / "managed_config.json"
         temporary_path = output_path.with_suffix(".json.tmp")
         temporary_path.write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-            ) + "\n",
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -374,6 +447,10 @@ class OpenCodeServerManager:
             ) = self._prepare_managed_config()
             if effective_config_path:
                 environment["OPENCODE_CONFIG"] = effective_config_path
+            if self.config.provider_api_key:
+                environment[
+                    "ODYSSEUS_OPENCODE_MODEL_API_KEY"
+                ] = self.config.provider_api_key
             if self.config.username:
                 environment["OPENCODE_SERVER_USERNAME"] = (
                     self.config.username

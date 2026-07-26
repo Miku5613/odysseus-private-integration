@@ -9,11 +9,14 @@ import sessionModule from './sessions.js';
 import chatRenderer from './chatRenderer.js';
 import markdownModule from './markdown.js';
 
+import openCodeTaskPlannerAdapter from './openCodeTaskPlannerAdapter.js';
+
 const DEFAULT_RUNTIME_KEY = 'odysseus-agent-runtime-default-v1';
 const SESSION_RUNTIME_KEY = 'odysseus-agent-runtime-sessions-v1';
 const REUSE_SESSION_KEY = 'odysseus-opencode-reuse-session-v1';
 const RESET_ON_SWITCH_KEY = 'odysseus-opencode-reset-on-switch-v1';
 const OPENCODE_MODEL_KEY = 'odysseus-opencode-model-v1';
+const OPENCODE_ENDPOINT_KEY = 'odysseus-opencode-endpoint-v1';
 const OPENCODE_WORKSPACE_KEY = 'odysseus-opencode-workspace-v1';
 const OPENCODE_PERMISSION_MODE_KEY = 'odysseus-opencode-permission-mode-v1';
 
@@ -148,6 +151,9 @@ function runtimeLabel(runtime) {
 }
 
 function dispatchRuntimeChanged(runtime, sessionId = '') {
+  openCodeTaskPlannerAdapter.handleRuntimeChanged(runtime, {
+    sessionId,
+  });
   try {
     window.dispatchEvent(new CustomEvent('odysseus:runtime-changed', {
       detail: {
@@ -394,8 +400,7 @@ function createRuntimePanel() {
             <label class="runtime-field">
               <span>Model</span>
               <div class="runtime-field-shell">
-                <input id="runtime-opencode-model" type="text"
-                       placeholder="qwen3:8b" autocomplete="off">
+                <select id="runtime-opencode-model" aria-label="OpenCode model"></select>
                 <button id="runtime-use-active-model-btn" type="button"
                         class="runtime-field-action"
                         title="Use active chat model">
@@ -642,7 +647,7 @@ function syncSettingsControls() {
   const model = document.getElementById('runtime-opencode-model');
   const workspace = document.getElementById('runtime-opencode-workspace');
   if (model && document.activeElement !== model) {
-    model.value = safeStorageGet(OPENCODE_MODEL_KEY) || '';
+    restoreOpenCodeModelSelection();
   }
   if (workspace && document.activeElement !== workspace) {
     workspace.value = safeStorageGet(OPENCODE_WORKSPACE_KEY) || '';
@@ -756,18 +761,97 @@ async function clearCurrentPermissionApprovals() {
   return payload;
 }
 
+let _openCodeModelEndpoints = [];
+
+function selectedOpenCodeModelOption() {
+  const select = document.getElementById('runtime-opencode-model');
+  if (!select || select.selectedIndex < 0) return null;
+  return select.options[select.selectedIndex] || null;
+}
+
+function selectOpenCodeModel(modelId, endpointId = '') {
+  const select = document.getElementById('runtime-opencode-model');
+  if (!select) return false;
+  const targetModel = String(modelId || '').trim();
+  const targetEndpoint = String(endpointId || '').trim();
+  const option = Array.from(select.options).find(item => (
+    item.value === targetModel &&
+    (!targetEndpoint || item.dataset.endpointId === targetEndpoint)
+  ));
+  if (!option) return false;
+  select.selectedIndex = Array.from(select.options).indexOf(option);
+  return select.selectedIndex >= 0;
+}
+
+function restoreOpenCodeModelSelection() {
+  return selectOpenCodeModel(
+    safeStorageGet(OPENCODE_MODEL_KEY) || '',
+    safeStorageGet(OPENCODE_ENDPOINT_KEY) || ''
+  );
+}
+
+async function loadOpenCodeModelOptions() {
+  const select = document.getElementById('runtime-opencode-model');
+  if (!select) return [];
+
+  const response = await fetch('/api/model-endpoints', {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) {
+    throw new Error(`Model registry HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  _openCodeModelEndpoints = (Array.isArray(payload) ? payload : [])
+    .filter(endpoint => (
+      endpoint &&
+      endpoint.is_enabled !== false &&
+      (endpoint.model_type || 'llm') === 'llm'
+    ));
+
+  select.innerHTML = '';
+  for (const endpoint of _openCodeModelEndpoints) {
+    const models = Array.isArray(endpoint.models) ? endpoint.models : [];
+    if (!models.length) continue;
+
+    const group = document.createElement('optgroup');
+    group.label = endpoint.name || endpoint.base_url || 'Model endpoint';
+
+    for (const modelId of models) {
+      const option = document.createElement('option');
+      option.value = String(modelId);
+      option.textContent = String(modelId);
+      option.dataset.endpointId = String(endpoint.id || '');
+      option.dataset.endpointName = String(endpoint.name || '');
+      group.appendChild(option);
+    }
+    select.appendChild(group);
+  }
+
+  if (!restoreOpenCodeModelSelection()) {
+    const first = select.options[0];
+    if (first) first.selected = true;
+  }
+  return _openCodeModelEndpoints;
+}
+
 function configuredOpenCodeValues() {
   const modelInput = document.getElementById('runtime-opencode-model');
   const workspaceInput = document.getElementById(
     'runtime-opencode-workspace'
   );
+  const option = selectedOpenCodeModelOption();
   return {
+    endpoint_id: String(option?.dataset.endpointId || '').trim(),
     model_id: String(modelInput && modelInput.value || '').trim(),
     workspace: String(workspaceInput && workspaceInput.value || '').trim(),
   };
 }
 
 function storeConfiguredOpenCodeValues(values) {
+  if (values.endpoint_id) {
+    safeStorageSet(OPENCODE_ENDPOINT_KEY, values.endpoint_id);
+  }
   if (values.model_id) {
     safeStorageSet(OPENCODE_MODEL_KEY, values.model_id);
   }
@@ -821,8 +905,11 @@ export async function restartOpenCodeServer() {
   }
 
   const values = configuredOpenCodeValues();
-  if (!values.model_id) {
-    showConfigMessage('Choose an OpenCode model first.', true);
+  if (!values.endpoint_id || !values.model_id) {
+    showConfigMessage(
+      'Choose an enabled Odysseus model for OpenCode.',
+      true
+    );
     return null;
   }
   if (!values.workspace) {
@@ -981,8 +1068,14 @@ function wireRuntimeSettings() {
         showConfigMessage('No active chat model is selected.', true);
         return;
       }
-      modelInput.value = model;
-      showConfigMessage('Active chat model copied. Apply to restart.');
+      if (!selectOpenCodeModel(model)) {
+        showConfigMessage(
+          'The active chat model is not enabled in the Odysseus registry.',
+          true
+        );
+        return;
+      }
+      showConfigMessage('Active chat model selected. Apply to restart.');
     });
   }
 
@@ -1114,9 +1207,14 @@ export async function refreshOpenCodeHealth() {
     const configuredModel = String(model.model_id || '').trim();
     const configuredWorkspace = String(payload.workspace || '').trim();
 
-    if (modelInput && !modelInput.value && configuredModel) {
-      modelInput.value = configuredModel;
-      safeStorageSet(OPENCODE_MODEL_KEY, configuredModel);
+    if (modelInput && configuredModel) {
+      const endpointId = String(model.endpoint_id || '').trim();
+      if (selectOpenCodeModel(configuredModel, endpointId)) {
+        safeStorageSet(OPENCODE_MODEL_KEY, configuredModel);
+        if (endpointId) {
+          safeStorageSet(OPENCODE_ENDPOINT_KEY, endpointId);
+        }
+      }
     }
     if (workspaceInput && !workspaceInput.value && configuredWorkspace) {
       workspaceInput.value = configuredWorkspace;
@@ -1643,6 +1741,11 @@ function handleRuntimeEvent(context, event) {
   if (!event || typeof event !== 'object') return false;
   const type = String(event.type || '');
 
+  openCodeTaskPlannerAdapter.handleRuntimeEvent(event, {
+    sessionId: context?.sessionId || '',
+    title: context?.title || '',
+  });
+
   if (type === 'runtime.started') {
     _activeRun.runId = String(event.run_id || '');
     context.status.textContent = 'running';
@@ -1765,6 +1868,32 @@ export async function stopActiveOpenCodeRun() {
   }
 }
 
+function captureOpenCodeTranscriptMetadata(context, event) {
+  if (!context || !event || typeof event !== 'object') return;
+
+  context.runId = String(
+    event.run_id || event.runId || context.runId || ''
+  ).trim();
+  context.opencodeSessionId = String(
+    event.opencode_session_id
+    || event.opencodeSessionId
+    || context.opencodeSessionId
+    || ''
+  ).trim();
+  context.providerId = String(
+    event.provider_id || event.providerId || context.providerId || ''
+  ).trim();
+  context.modelId = String(
+    event.model_id || event.modelId || context.modelId || ''
+  ).trim();
+  context.opencodeMessageId = String(
+    event.message_id
+    || event.messageId
+    || context.opencodeMessageId
+    || ''
+  ).trim();
+}
+
 export async function streamOpenCodeTurn({
   message,
   sessionId,
@@ -1781,9 +1910,10 @@ export async function streamOpenCodeTurn({
     await resetOpenCodeSession(id);
   }
 
+  const userTimestamp = new Date().toISOString();
   chatRenderer.addMessage('user', prompt, '', {
     runtime: 'opencode',
-    timestamp: new Date().toISOString(),
+    timestamp: userTimestamp,
   });
 
   const context = {
@@ -1794,6 +1924,11 @@ export async function streamOpenCodeTurn({
     toolThread: null,
     toolNodes: new Map(),
     permissionNodes: new Map(),
+    runId: '',
+    opencodeSessionId: '',
+    providerId: '',
+    modelId: '',
+    opencodeMessageId: '',
   };
   const controller = new AbortController();
   _activeRun = {
@@ -1840,6 +1975,7 @@ export async function streamOpenCodeTurn({
         const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/);
         buffer = buffer.slice(boundary + (separator ? separator[0].length : 2));
         const event = parseSseFrame(frame);
+        captureOpenCodeTranscriptMetadata(context, event);
         if (handleRuntimeEvent(context, event)) {
           try { await reader.cancel(); } catch (_) {}
           break;
@@ -1852,6 +1988,15 @@ export async function streamOpenCodeTurn({
     if (!context.terminal) {
       throw new Error('OpenCode stream ended without a terminal event.');
     }
+
+    if (context.terminal === 'completed') {
+      const finalText = String(
+        context.holder?.dataset?.raw || context.accumulated || ''
+      ).trim();
+      if (finalText) {
+      }
+    }
+
     return {
       status: context.terminal,
       runId: _activeRun && _activeRun.runId,
@@ -1909,12 +2054,22 @@ export async function initRuntimeControl() {
   createRuntimeIndicator();
   createRuntimeQuickReset();
   watchComposerState();
+
+  try {
+    await loadOpenCodeModelOptions();
+  } catch (error) {
+    showConfigMessage(
+      `Model registry failed: ${error.message || error}`,
+      true
+    );
+  }
+
   syncSettingsControls();
 
   const modelInput = document.getElementById('runtime-opencode-model');
   if (modelInput && !modelInput.value) {
     const model = activeChatModel();
-    if (model) modelInput.value = model;
+    if (model) selectOpenCodeModel(model);
   }
 
   refreshRuntimeIndicator();

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 
 
@@ -41,8 +41,16 @@ class OpenCodeRuntimeConfig:
     password: str = ""
     provider_id: str = "ollama"
     model_id: str = "qwen3:8b"
+    endpoint_id: str = ""
+    provider_name: str = ""
+    provider_base_url: str = ""
+    provider_models: tuple[str, ...] = ()
+    provider_api_key: str = field(default="", repr=False)
     agent: str = "build"
-    system_prompt: str = DEFAULT_OPENCODE_RUNTIME_SYSTEM_PROMPT
+    system_prompt: str = (
+        DEFAULT_OPENCODE_RUNTIME_SYSTEM_PROMPT
+        + "\nFor requests with three or more distinct actions, call OpenCode's todowrite tool before the first work tool. Break the request into clear outcome-oriented checklist items, keep exactly one item in_progress while working, and update every item as progress changes."
+    )
     manage_server: bool = True
     executable: str = "opencode"
     config_path: str = ""
@@ -67,6 +75,30 @@ class OpenCodeRuntimeConfig:
             model_id=os.getenv(
                 "ODYSSEUS_OPENCODE_MODEL",
                 "qwen3:8b",
+            ),
+            endpoint_id=os.getenv(
+                "ODYSSEUS_OPENCODE_ENDPOINT_ID",
+                "",
+            ),
+            provider_name=os.getenv(
+                "ODYSSEUS_OPENCODE_PROVIDER_NAME",
+                "",
+            ),
+            provider_base_url=os.getenv(
+                "ODYSSEUS_OPENCODE_PROVIDER_BASE_URL",
+                "",
+            ).rstrip("/"),
+            provider_models=tuple(
+                item.strip()
+                for item in os.getenv(
+                    "ODYSSEUS_OPENCODE_PROVIDER_MODELS",
+                    "",
+                ).split(",")
+                if item.strip()
+            ),
+            provider_api_key=os.getenv(
+                "ODYSSEUS_OPENCODE_PROVIDER_API_KEY",
+                "",
             ),
             agent=os.getenv("ODYSSEUS_OPENCODE_AGENT", "build"),
             system_prompt=os.getenv(

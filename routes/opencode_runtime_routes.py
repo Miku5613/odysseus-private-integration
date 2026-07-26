@@ -1,17 +1,129 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from core.models import (
+    ChatMessage,
+    get_session_manager_instance,
+)
+from src.auth_helpers import effective_user
 from src.opencode_runtime import OpenCodeRuntimeService
+from src.opencode_runtime.model_registry import (
+    resolve_model_selection,
+)
 
 
 router = APIRouter(
     prefix="/api/opencode/runtime",
     tags=["opencode-runtime"],
 )
-_service = OpenCodeRuntimeService()
+def _session_manager():
+    manager = get_session_manager_instance()
+    if manager is None:
+        raise RuntimeError("Odysseus session manager is unavailable.")
+    return manager
+
+
+def _verify_opencode_session_owner(
+    request: Request,
+    session_id: str,
+) -> None:
+    manager = _session_manager()
+    try:
+        session = manager.get_session(str(session_id or "").strip())
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found.",
+        ) from exc
+
+    user = effective_user(request)
+    owner = str(getattr(session, "owner", "") or "").strip()
+    if owner and owner != str(user or "").strip():
+        raise HTTPException(
+            status_code=403,
+            detail="Session does not belong to the current user.",
+        )
+
+
+def _persist_transcript_message(
+    session_id: str,
+    role: str,
+    content: str,
+    metadata: dict[str, object],
+) -> None:
+    manager = _session_manager()
+    session = manager.get_session(str(session_id or "").strip())
+    normalized_role = str(role or "").strip().lower()
+    normalized_content = str(content or "")
+
+    if normalized_role not in {"user", "assistant"}:
+        raise ValueError("Unsupported transcript role.")
+    if not normalized_content.strip():
+        raise ValueError("Transcript content must not be empty.")
+
+    message = ChatMessage(
+        role=normalized_role,
+        content=normalized_content,
+        metadata=dict(metadata or {}),
+    )
+    before_count = len(session.history)
+    manager.add_message(session.id, message)
+
+    if not (message.metadata or {}).get("_db_id"):
+        if (
+            len(session.history) == before_count + 1
+            and session.history[-1] is message
+        ):
+            session.history.pop()
+            session._history = session.history
+            session.message_count = len(session.history)
+        raise RuntimeError("Odysseus transcript persistence did not commit.")
+
+
+def _resolve_persisted_native_session(
+    session_id: str,
+) -> dict[str, str] | None:
+    manager = _session_manager()
+    session = manager.get_session(str(session_id or "").strip())
+
+    for message in reversed(session.history):
+        metadata = (
+            message.metadata
+            if isinstance(message.metadata, dict)
+            else {}
+        )
+        if str(metadata.get("runtime") or "") != "opencode":
+            continue
+
+        native_session_id = str(
+            metadata.get("opencode_session_id") or ""
+        ).strip()
+        if not native_session_id:
+            continue
+
+        return {
+            "opencode_session_id": native_session_id,
+            "provider_id": str(
+                metadata.get("provider_id") or ""
+            ).strip(),
+            "model_id": str(
+                metadata.get("model_id") or ""
+            ).strip(),
+            "workspace": str(
+                metadata.get("workspace") or ""
+            ).strip(),
+        }
+
+    return None
+
+
+_service = OpenCodeRuntimeService(
+    transcript_persister=_persist_transcript_message,
+    session_resolver=_resolve_persisted_native_session,
+)
 
 
 class OpenCodeRuntimeRequest(BaseModel):
@@ -22,6 +134,7 @@ class OpenCodeRuntimeRequest(BaseModel):
 
 
 class OpenCodeRestartRequest(BaseModel):
+    endpoint_id: str = Field(min_length=1)
     model_id: str = Field(min_length=1)
     workspace: str = Field(min_length=1)
 
@@ -52,7 +165,14 @@ async def opencode_runtime_health():
 
 
 @router.post("/stream")
-async def stream_opencode_runtime(request: OpenCodeRuntimeRequest):
+async def stream_opencode_runtime(
+    http_request: Request,
+    request: OpenCodeRuntimeRequest,
+):
+    _verify_opencode_session_owner(
+        http_request,
+        request.odysseus_session_id,
+    )
     return StreamingResponse(
         _service.stream(
             message=request.message,
@@ -71,8 +191,18 @@ async def stream_opencode_runtime(request: OpenCodeRuntimeRequest):
 @router.post("/server/restart")
 async def restart_opencode_server(request: OpenCodeRestartRequest):
     try:
-        value = await _service.restart_server(
+        selection = resolve_model_selection(
+            endpoint_id=request.endpoint_id,
             model_id=request.model_id,
+        )
+        value = await _service.restart_server(
+            endpoint_id=selection.endpoint_id,
+            provider_id=selection.provider_id,
+            provider_name=selection.provider_name,
+            provider_base_url=selection.base_url,
+            provider_models=selection.models,
+            provider_api_key=selection.api_key,
+            model_id=selection.model_id,
             workspace=request.workspace,
         )
         return {"ok": True, **value}

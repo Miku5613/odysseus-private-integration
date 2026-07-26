@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import threading
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 import uuid
 
 from .config import OpenCodeRuntimeConfig
@@ -21,6 +21,15 @@ from .process_manager import (
     OpenCodeServerManager,
 )
 from .transport import OpenCodeHttpTransport, OpenCodeTransportError
+
+TranscriptPersister = Callable[
+    [str, str, str, dict[str, Any]],
+    None,
+]
+SessionResolver = Callable[
+    [str],
+    dict[str, str] | None,
+]
 
 
 WORKSPACE_PATH_RUNTIME_RULE = """
@@ -121,6 +130,8 @@ class OpenCodeRuntimeService:
         config: OpenCodeRuntimeConfig | None = None,
         transport: OpenCodeHttpTransport | None = None,
         server_manager: OpenCodeServerManager | None = None,
+        transcript_persister: TranscriptPersister | None = None,
+        session_resolver: SessionResolver | None = None,
     ):
         base_config = config or OpenCodeRuntimeConfig.from_env()
         system_prompt = str(base_config.system_prompt or "").strip()
@@ -140,6 +151,8 @@ class OpenCodeRuntimeService:
             self.config,
             health_probe=self.transport.health,
         )
+        self._transcript_persister = transcript_persister
+        self._session_resolver = session_resolver
         self._sessions: dict[str, str] = {}
         self._runs: dict[str, ActiveOpenCodeRun] = {}
         self._run_by_conversation: dict[str, str] = {}
@@ -565,6 +578,70 @@ class OpenCodeRuntimeService:
             "source": source,
         }
 
+    def _persist_transcript_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        metadata: dict[str, Any],
+    ) -> bool:
+        persister = self._transcript_persister
+        if persister is None:
+            return False
+
+        normalized_session_id = str(session_id or "").strip()
+        normalized_role = str(role or "").strip().lower()
+        normalized_content = str(content or "")
+        safe_metadata = dict(metadata or {})
+
+        if not normalized_session_id:
+            raise OpenCodeTransportError(
+                "OpenCode transcript persistence requires a session id."
+            )
+        if normalized_role not in {"user", "assistant"}:
+            raise OpenCodeTransportError(
+                "OpenCode transcript persistence received an invalid role."
+            )
+        if not normalized_content.strip():
+            raise OpenCodeTransportError(
+                "OpenCode transcript persistence received empty content."
+            )
+
+        try:
+            persister(
+                normalized_session_id,
+                normalized_role,
+                normalized_content,
+                safe_metadata,
+            )
+        except Exception as exc:
+            self._log(
+                "TRANSCRIPT_MESSAGE_PERSIST_FAILED",
+                odysseus_session_id=normalized_session_id,
+                role=normalized_role,
+                content_length=len(normalized_content),
+                run_id=safe_metadata.get("run_id"),
+                error_type=type(exc).__name__,
+            )
+            raise OpenCodeTransportError(
+                "OpenCode transcript persistence failed."
+            ) from exc
+
+        self._log(
+            "TRANSCRIPT_MESSAGE_PERSISTED",
+            odysseus_session_id=normalized_session_id,
+            role=normalized_role,
+            content_length=len(normalized_content),
+            run_id=safe_metadata.get("run_id"),
+            opencode_session_id=safe_metadata.get(
+                "opencode_session_id"
+            ),
+            opencode_message_id=safe_metadata.get(
+                "opencode_message_id"
+            ),
+        )
+        return True
+
     def _log(self, event: str, **fields: Any) -> None:
         logger = getattr(self.server_manager, "log_event", None)
         if not callable(logger):
@@ -651,6 +728,7 @@ class OpenCodeRuntimeService:
             "session.status",
             "session.idle",
             "session.error",
+            "todo.updated",
             "permission.asked",
             "permission.updated",
             "permission.replied",
@@ -803,6 +881,7 @@ class OpenCodeRuntimeService:
         if event_type not in {
             "tool.started",
             "tool.completed",
+            "runtime.plan.updated",
             "runtime.status",
             "runtime.failed",
             "runtime.cancelled",
@@ -886,6 +965,7 @@ class OpenCodeRuntimeService:
             },
             "server": value,
             "model": {
+                "endpoint_id": self.config.endpoint_id,
                 "provider_id": self.config.provider_id,
                 "model_id": self.config.model_id,
                 "agent": self.config.agent,
@@ -1059,11 +1139,32 @@ class OpenCodeRuntimeService:
             )
             event_thread.start()
 
+            # Persist the user turn before OpenCode starts work.
+            await asyncio.to_thread(
+                self._persist_transcript_message,
+                conversation_id,
+                "user",
+                normalized_message,
+                {
+                    "runtime": "opencode",
+                    "run_id": run_id,
+                    "opencode_session_id": session_id,
+                    "provider_id": self.config.provider_id,
+                    "model_id": self.config.model_id,
+                    "transcript_phase": "user",
+                    "workspace": str(self._workspace_root()),
+                },
+            )
+
             yield sse_frame({
                 "type": "runtime.started",
                 "runtime": "opencode",
                 "run_id": run_id,
                 "opencode_session_id": session_id,
+                "objective": (
+                    str(title or message or "OpenCode execution")
+                    .strip()[:500]
+                ),
                 "label": "OpenCode runtime",
             })
 
@@ -1250,6 +1351,24 @@ class OpenCodeRuntimeService:
                 })
                 return
 
+            # Persist the final assistant turn before reporting completion.
+            await asyncio.to_thread(
+                self._persist_transcript_message,
+                conversation_id,
+                "assistant",
+                final["text"],
+                {
+                    "runtime": "opencode",
+                    "run_id": run_id,
+                    "opencode_session_id": session_id,
+                    "provider_id": final["provider_id"],
+                    "model_id": final["model_id"],
+                    "opencode_message_id": final["message_id"],
+                    "transcript_phase": "assistant",
+                    "workspace": str(self._workspace_root()),
+                },
+            )
+
             run.status = "completed"
             self._log(
                 "RUN_COMPLETED",
@@ -1339,18 +1458,51 @@ class OpenCodeRuntimeService:
         *,
         model_id: str,
         workspace: str,
+        endpoint_id: str = "",
+        provider_id: str = "",
+        provider_name: str = "",
+        provider_base_url: str = "",
+        provider_models: tuple[str, ...] = (),
+        provider_api_key: str = "",
     ) -> dict[str, Any]:
         self._assert_idle()
         self._log(
             "SERVER_RESTART_REQUESTED",
             requested_model_id=str(model_id or "").strip(),
             requested_workspace=str(workspace or "").strip(),
+            requested_endpoint_id=str(endpoint_id or "").strip(),
+            requested_provider_id=str(provider_id or "").strip(),
             current_model_id=self.config.model_id,
             current_workspace=self.config.workspace or str(Path.cwd()),
         )
 
         selected_model = str(model_id or "").strip()
         selected_workspace = str(workspace or "").strip()
+        selected_endpoint = (
+            str(endpoint_id or "").strip()
+            or self.config.endpoint_id
+        )
+        selected_provider = (
+            str(provider_id or "").strip()
+            or self.config.provider_id
+        )
+        selected_provider_name = (
+            str(provider_name or "").strip()
+            or self.config.provider_name
+        )
+        selected_provider_base = (
+            str(provider_base_url or "").strip().rstrip("/")
+            or self.config.provider_base_url
+        )
+        selected_provider_models = tuple(
+            str(item or "").strip()
+            for item in (
+                provider_models
+                or self.config.provider_models
+                or ()
+            )
+            if str(item or "").strip()
+        )
         if not selected_model:
             raise OpenCodeServerLifecycleError(
                 "OpenCode model must not be empty."
@@ -1420,7 +1572,13 @@ class OpenCodeRuntimeService:
 
         updated = replace(
             self.config,
+            provider_id=selected_provider,
             model_id=selected_model,
+            endpoint_id=selected_endpoint,
+            provider_name=selected_provider_name,
+            provider_base_url=selected_provider_base,
+            provider_models=selected_provider_models,
+            provider_api_key=str(provider_api_key or ""),
             workspace=str(workspace_path),
         )
         self.config = updated
@@ -1437,6 +1595,8 @@ class OpenCodeRuntimeService:
         result = await self.health()
         self._log(
             "SERVER_RESTART_COMPLETED",
+            endpoint_id=selected_endpoint,
+            provider_id=selected_provider,
             model_id=selected_model,
             workspace=str(workspace_path),
             launch=result.get("launch"),
@@ -1535,6 +1695,120 @@ class OpenCodeRuntimeService:
         )
         return deleted
 
+    async def _restore_persisted_session(
+        self,
+        conversation_id: str,
+    ) -> str:
+        resolver = self._session_resolver
+        if resolver is None:
+            return ""
+
+        try:
+            saved = resolver(conversation_id)
+        except Exception as exc:
+            self._log(
+                "SESSION_RESTORE_SKIPPED",
+                odysseus_session_id=conversation_id,
+                reason="resolver_failed",
+                error_type=type(exc).__name__,
+            )
+            return ""
+
+        if not isinstance(saved, dict):
+            return ""
+
+        candidate = str(
+            saved.get("opencode_session_id") or ""
+        ).strip()
+        if not candidate:
+            return ""
+
+        saved_workspace = str(
+            saved.get("workspace") or ""
+        ).strip()
+        current_workspace = str(self._workspace_root())
+        try:
+            workspace_matches = (
+                bool(saved_workspace)
+                and os.path.normcase(
+                    str(Path(saved_workspace).expanduser().resolve())
+                )
+                == os.path.normcase(current_workspace)
+            )
+        except (OSError, ValueError):
+            workspace_matches = False
+
+        if not workspace_matches:
+            self._log(
+                "SESSION_RESTORE_REJECTED",
+                odysseus_session_id=conversation_id,
+                opencode_session_id=candidate,
+                reason="workspace_mismatch",
+            )
+            return ""
+
+        saved_provider = str(
+            saved.get("provider_id") or ""
+        ).strip()
+        saved_model = str(saved.get("model_id") or "").strip()
+
+        if (
+            saved_provider
+            and self.config.provider_id
+            and saved_provider != self.config.provider_id
+        ):
+            self._log(
+                "SESSION_RESTORE_REJECTED",
+                odysseus_session_id=conversation_id,
+                opencode_session_id=candidate,
+                reason="provider_mismatch",
+            )
+            return ""
+
+        if (
+            saved_model
+            and self.config.model_id
+            and saved_model != self.config.model_id
+        ):
+            self._log(
+                "SESSION_RESTORE_REJECTED",
+                odysseus_session_id=conversation_id,
+                opencode_session_id=candidate,
+                reason="model_mismatch",
+            )
+            return ""
+
+        try:
+            messages = await asyncio.to_thread(
+                self.transport.list_messages,
+                candidate,
+            )
+        except OpenCodeTransportError:
+            self._log(
+                "SESSION_RESTORE_REJECTED",
+                odysseus_session_id=conversation_id,
+                opencode_session_id=candidate,
+                reason="native_session_unavailable",
+            )
+            return ""
+
+        with self._lock:
+            current = self._sessions.setdefault(
+                conversation_id,
+                candidate,
+            )
+        if current != candidate:
+            return current
+
+        self._log(
+            "SESSION_RESTORED",
+            odysseus_session_id=conversation_id,
+            opencode_session_id=candidate,
+            configured_workspace=current_workspace,
+            message_count=len(messages),
+        )
+        return candidate
+
     async def _get_or_create_session(
         self,
         conversation_id: str,
@@ -1553,6 +1827,12 @@ class OpenCodeRuntimeService:
                 ),
             )
             return existing
+
+        restored = await self._restore_persisted_session(
+            conversation_id
+        )
+        if restored:
+            return restored
 
         session_title = str(title or "").strip()
         if not session_title:
