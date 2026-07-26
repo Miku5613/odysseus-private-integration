@@ -144,7 +144,101 @@ function stepObjective(step, fallback = '') {
   );
 }
 
-function stepsFromEvent(event, fallbackObjective) {
+
+// STEP3L_USER_FACING_PLANNER
+const PLANNER_TECHNICAL_PATTERNS = [
+  /(?:[A-Za-z]:\\|\/)[^\s"'`]+/g,
+  /(?:[\w.-]+[\\/])+[\w.-]+\.(?:py|js|ts|tsx|jsx|json|md|html|css)\b/gi,
+  /\b(?:read|write|edit|bash|grep|glob|todowrite)\b/gi,
+  /\bqwen[\w.:-]*\b/gi,
+  /\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?\b/gi,
+];
+
+function cleanPlannerObjective(value, fallback = 'Complete the requested task') {
+  let text = stringValue(value).replace(/\s+/g, ' ').trim();
+  if (!text) return fallback;
+
+  text = text
+    .replace(/^inspect\s+.+?\s+and\s+/i, '')
+    .replace(/^review\s+.+?\s+and\s+/i, '')
+    .replace(/^read\s+.+?\s+and\s+/i, '')
+    .replace(/^check\s+.+?\s+and\s+/i, '');
+
+  for (const pattern of PLANNER_TECHNICAL_PATTERNS) {
+    text = text.replace(pattern, ' ');
+  }
+
+  text = text
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;:])/g, '$1')
+    .trim();
+
+  if (!text || text.length < 4) return fallback;
+  return (text.charAt(0).toUpperCase() + text.slice(1)).slice(0, 180);
+}
+
+function objectiveIsFinal(value) {
+  return /\b(final|verdict|summary|summar(?:y|ize)|synthesi[sz]e|conclusion|answer)\b/i
+    .test(String(value || ''));
+}
+
+function fallbackStepsFromObjective(objective) {
+  const numbered = [];
+  const objectiveLines = String(objective || '')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .split('\n');
+
+  for (const line of objectiveLines) {
+    const match = line.match(/^\s*(?:\d+[.)]|[-*])\s+(.+?)\s*$/);
+    if (!match) continue;
+    const cleaned = cleanPlannerObjective(match[1], '');
+    if (cleaned) numbered.push(cleaned);
+  }
+
+  const objectives = numbered.length
+    ? numbered
+    : [cleanPlannerObjective(objective)];
+
+  if (
+    objectives.length > 1 &&
+    !objectiveIsFinal(objectives[objectives.length - 1])
+  ) {
+    objectives.push('Prepare the final answer');
+  }
+
+  return objectives.map((item, index) => ({
+    id: `opencode-objective-${index + 1}`,
+    objective: item,
+    depends_on: index ? [`opencode-objective-${index}`] : [],
+    work_domains: ['general'],
+    status: index === 0 ? 'running' : 'pending',
+  }));
+}
+
+function nextFallbackStepId() {
+  const current = adapterState.steps.find(
+    step => step.id === adapterState.currentStepId
+  );
+  if (
+    current &&
+    ['pending', 'running'].includes(normalizeStatus(current.status))
+  ) {
+    return current.id;
+  }
+
+  return (
+    adapterState.steps.find(
+      step => normalizeStatus(step.status) === 'running'
+    )?.id ||
+    adapterState.steps.find(
+      step => normalizeStatus(step.status) === 'pending'
+    )?.id ||
+    ''
+  );
+}
+
+function stepsFromEvent(event, fallbackObjective = '') {
   const data = eventData(event);
   const candidates = (
     Array.isArray(event?.steps)
@@ -159,37 +253,28 @@ function stepsFromEvent(event, fallbackObjective) {
   );
 
   const normalized = candidates
-    .map((step, index) => {
-      const id = stringValue(
+    .map((step, index) => ({
+      id: stringValue(
         step?.id,
         step?.step_id,
         step?.stepId,
         `opencode-step-${index + 1}`,
-      );
+      ),
+      objective: cleanPlannerObjective(
+        stepObjective(step, ''),
+        `Complete objective ${index + 1}`,
+      ),
+      depends_on: Array.isArray(step?.depends_on)
+        ? step.depends_on.map(String)
+        : [],
+      work_domains: ['general'],
+      status: normalizeStatus(step?.status) || 'pending',
+    }))
+    .filter(step => step.id && step.objective);
 
-      return {
-        id,
-        objective: stepObjective(step, `OpenCode step ${index + 1}`),
-        depends_on: Array.isArray(step?.depends_on)
-          ? step.depends_on.map(String)
-          : [],
-        work_domains: Array.isArray(step?.work_domains)
-          ? step.work_domains.map(String)
-          : ['code'],
-        status: normalizeStatus(step?.status) || 'pending',
-      };
-    })
-    .filter(step => step.id);
-
-  if (normalized.length) return normalized;
-
-  return [{
-    id: 'opencode-execution',
-    objective: fallbackObjective || 'OpenCode execution',
-    depends_on: [],
-    work_domains: ['code'],
-    status: 'pending',
-  }];
+  return normalized.length
+    ? normalized
+    : fallbackStepsFromObjective(fallbackObjective);
 }
 
 function cloneSteps(steps) {
@@ -232,43 +317,23 @@ function eventAction(type, stepId = '', detail = '', payload = {}) {
 }
 
 function ensureStepForStatus(event) {
-  const data = eventData(event);
   const explicitId = stepIdFromEvent(event);
-  const toolName = stringValue(
-    event?.tool,
-    data.tool,
-    event?.action,
-    data.action,
-  );
 
-  if (!explicitId && !toolName) {
-    return adapterState.currentStepId ||
-      adapterState.steps[0]?.id ||
-      '';
+  if (adapterState.hasNativePlan && explicitId) {
+    return adapterState.steps.some(step => step.id === explicitId)
+      ? explicitId
+      : (
+        adapterState.currentStepId ||
+        adapterState.steps.find(
+          step => normalizeStatus(step.status) === 'running'
+        )?.id ||
+        ''
+      );
   }
 
-  const stepId = explicitId || `opencode-tool-${toolName}`;
-  const existing = adapterState.steps.find(step => step.id === stepId);
-
-  if (!existing) {
-    adapterState.steps.push({
-      id: stepId,
-      objective: stringValue(
-        event?.summary,
-        data.summary,
-        event?.title,
-        data.title,
-        toolName,
-        stepId,
-      ),
-      depends_on: [],
-      work_domains: ['code'],
-      status: 'pending',
-    });
-    adapterState.revision += 1;
-  }
-
-  return stepId;
+  const fallbackId = nextFallbackStepId();
+  adapterState.currentStepId = fallbackId;
+  return fallbackId;
 }
 
 function startRun(event, context = {}) {
@@ -361,10 +426,9 @@ function translateStatus(event) {
       event?.title,
       data.title,
     );
-    const phase = type === 'tool.completed' ? 'Completed' : 'Running';
-    const detail = [phase, toolName, summary]
-      .filter(Boolean)
-      .join(' · ');
+    const detail = type === 'tool.completed'
+      ? 'Objective activity completed'
+      : 'Working on the current objective';
 
     adapterState.revision += 1;
     return [planAction('running', detail)];
@@ -402,6 +466,30 @@ function translateStatus(event) {
   );
 
   const actions = [];
+
+  if (!adapterState.hasNativePlan && stepId) {
+    const current = adapterState.steps.find(step => step.id === stepId);
+    if (current) {
+      if (status === 'completed' || status === 'failed') {
+        current.status = status;
+        const next = adapterState.steps.find(
+          step => normalizeStatus(step.status) === 'pending'
+        );
+        if (next) {
+          next.status = 'running';
+          adapterState.currentStepId = next.id;
+        } else {
+          adapterState.currentStepId = '';
+        }
+        adapterState.revision += 1;
+        actions.push(planAction('running', 'Objective completed'));
+      } else if (status === 'running') {
+        current.status = 'running';
+        adapterState.currentStepId = current.id;
+      }
+    }
+  }
+
   if (hasIncomingSteps || addedDynamicStep) {
     actions.push(planAction('running', detail));
   }
@@ -513,10 +601,14 @@ function translateOpenCodeRuntimeEvent(event, context = {}) {
   }
 
   if (type === 'runtime.completed') {
-    return terminalAction(
-      TASK_EVENT_TYPES.PLAN_COMPLETED,
-      event,
-    );
+    adapterState.steps = adapterState.steps.map(step => ({
+      ...step,
+      status: 'completed',
+    }));
+    adapterState.currentStepId = '';
+    adapterState.status = 'completed';
+    adapterState.revision += 1;
+    return [planAction('completed', 'Completed')];
   }
 
   if (type === 'runtime.failed') {

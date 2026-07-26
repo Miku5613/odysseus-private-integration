@@ -1162,8 +1162,7 @@ class OpenCodeRuntimeService:
                 "run_id": run_id,
                 "opencode_session_id": session_id,
                 "objective": (
-                    str(title or message or "OpenCode execution")
-                    .strip()[:500]
+                    message
                 ),
                 "label": "OpenCode runtime",
             })

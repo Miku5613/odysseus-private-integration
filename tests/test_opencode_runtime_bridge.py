@@ -1703,3 +1703,35 @@ def test_permission_reply_failure_is_logged_and_remains_pending(tmp_path):
         service.permission_state("ody-1")["pending"][0]["request_id"]
         == "per_reply_failure"
     )
+
+def test_runtime_started_uses_full_message_as_planner_objective():
+    import ast as _ast
+    from pathlib import Path as _Path
+
+    service_source = _Path(
+        "src/opencode_runtime/service.py"
+    ).read_text(encoding="utf-8")
+    tree = _ast.parse(service_source)
+    matches = []
+
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Dict):
+            continue
+
+        pairs = {}
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, _ast.Constant) and isinstance(key.value, str):
+                pairs[key.value] = value
+
+        type_value = pairs.get("type")
+        objective_value = pairs.get("objective")
+        if (
+            isinstance(type_value, _ast.Constant)
+            and type_value.value == "runtime.started"
+            and objective_value is not None
+        ):
+            matches.append(objective_value)
+
+    assert len(matches) == 1
+    assert isinstance(matches[0], _ast.Name)
+    assert matches[0].id == "message"

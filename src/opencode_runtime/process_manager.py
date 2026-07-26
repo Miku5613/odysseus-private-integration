@@ -672,8 +672,18 @@ class OpenCodeServerManager:
             )
 
         literal_path = str(target_path).replace("'", "''")
+        scope_label = "Active chat" if session_id else "Server"
+        model_label = str(self.config.model_id or "OpenCode").replace(
+            "'", "''"
+        )
+        title = (
+            f"Odysseus OpenCode — {scope_label} — {model_label}"
+        ).replace("'", "''")
         command = (
-            "$Host.UI.RawUI.WindowTitle='Odysseus OpenCode Logs'; "
+            f"$Host.UI.RawUI.WindowTitle='{title}'; "
+            f"Write-Host 'Following {scope_label} log for {model_label}'; "
+            f"Write-Host '{literal_path}'; "
+            "Write-Host ''; "
             f"Get-Content -LiteralPath '{literal_path}' -Tail 200 -Wait"
         )
         process = subprocess.Popen(

@@ -957,34 +957,23 @@ export async function stopOpenCodeServer() {
   }
 }
 
-export async function openOpenCodeLogTerminal() {
-  try {
-    const sessionId = String(
-      (
-        sessionModule.getCurrentSessionId
-        && sessionModule.getCurrentSessionId()
-      )
-      || ''
-    ).trim();
-    const payload = await runtimeJsonRequest(
-      '/api/opencode/runtime/server/log-terminal',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          odysseus_session_id: sessionId,
-        }),
-      }
-    );
-    setHealthMessage(
-      payload.scope === 'session'
-        ? 'Session log terminal opened'
-        : 'Server log terminal opened'
-    );
-    return payload;
-  } catch (error) {
-    setHealthMessage(`Log terminal failed: ${error.message || error}`, true);
-    return null;
-  }
+async function openOpenCodeLogTerminal() {
+  const sessionId = currentOdysseusSessionId();
+  const payload = await runtimeJsonRequest(
+    '/api/opencode/runtime/server/log-terminal',
+    {
+      method: 'POST',
+      body: JSON.stringify(
+        sessionId ? { odysseus_session_id: sessionId } : {}
+      ),
+    }
+  );
+
+  const scope = payload.scope === 'session' ? 'active chat' : 'server';
+  setHealthMessage(
+    `Opened OpenCode ${scope} logs${payload?.path ? `: ${payload.path}` : ''}`
+  );
+  return payload;
 }
 
 function wireRuntimeSettings() {

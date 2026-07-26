@@ -305,3 +305,16 @@ def test_runtime_console_styles_are_native_single_block():
     assert ".runtime-action-dock" in style
     assert ".runtime-quick-reset-btn" in style
     assert "@keyframes runtime-spin" in style
+
+def test_opencode_terminal_logs_use_active_chat_and_descriptive_title():
+    runtime_source = (
+        ROOT / "static" / "js" / "runtimeControl.js"
+    ).read_text(encoding="utf-8")
+    manager_source = (
+        ROOT / "src" / "opencode_runtime" / "process_manager.py"
+    ).read_text(encoding="utf-8")
+
+    assert "odysseus_session_id: sessionId" in runtime_source
+    assert "active chat" in runtime_source
+    assert "Following {scope_label} log for {model_label}" in manager_source
+    assert "Odysseus OpenCode — {scope_label} — {model_label}" in manager_source
