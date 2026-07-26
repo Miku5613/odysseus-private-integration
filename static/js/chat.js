@@ -1,3 +1,4 @@
+import multiGraphTracker from './multiGraphTracker.js';
 // static/js/chat.js
 
 /**
@@ -2447,6 +2448,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
               } else if (json.type === 'metrics') {
                 metrics = json.data;
+                multiGraphTracker.handleMetrics(json.data, { background: _isBg });
                 if (!_isBg && holder && metrics) {
                   holder._requestedModel = metrics.requested_model || holder._requestedModel || modelName;
                   holder._actualModel = metrics.model || holder._actualModel || holder._requestedModel;
@@ -2469,6 +2471,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
               } else if (json.type === 'tool_start') {
                 if (_isBg) continue;
+                multiGraphTracker.handleToolStart(json);
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 // Force-close thinking if still open — tools are real content, not thinking
@@ -2608,6 +2611,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
               } else if (json.type === 'tool_output') {
                 if (_isBg) continue;
+                multiGraphTracker.handleToolOutput(json);
                 // --- Update the current thread node ---
                 if (currentToolBubble) {
                   // Stop wave animation + the per-second cooking ticker
@@ -2877,6 +2881,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
+                multiGraphTracker.handlePlanUpdate(json);
                 // Agent wrote back to the plan (ticked a step / revised). Update
                 // the stored plan + live-refresh the docked plan window.
                 const _pu = (json.data && json.data.plan) ? json.data.plan : '';

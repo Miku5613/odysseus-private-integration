@@ -40836,3 +40836,282 @@ body.theme-frosted .modal {
     flex-basis:100%;
   }
 }
+
+/* MULTI_GRAPH_TRACKER_UI_V1_START */
+#multi-graph-tracker {
+  --mg-tracker-max-width: 420px;
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  display: none;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  pointer-events: none;
+  font-family: inherit;
+}
+
+.multi-graph-tracker-chip {
+  pointer-events: auto;
+  min-height: 34px;
+  padding: 7px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--panel, var(--bg)) 94%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background .16s ease, border-color .16s ease, transform .16s ease;
+}
+
+.multi-graph-tracker-chip:hover {
+  background: color-mix(in srgb, var(--panel, var(--bg)) 98%, var(--fg) 2%);
+  border-color: color-mix(in srgb, var(--border) 68%, var(--fg) 32%);
+}
+
+.multi-graph-tracker-spinner {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--fg) 22%, transparent);
+  border-top-color: var(--accent, var(--red));
+  animation: multiGraphTrackerSpin .8s linear infinite;
+}
+
+.multi-graph-tracker-spinner[hidden] { display: none; }
+
+.multi-graph-tracker-caret {
+  opacity: .56;
+  transition: transform .16s ease;
+}
+
+#multi-graph-tracker.is-open .multi-graph-tracker-caret,
+#multi-graph-tracker.is-previewing .multi-graph-tracker-caret {
+  transform: rotate(180deg);
+}
+
+.multi-graph-tracker-panel {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: var(--mg-tracker-max-width);
+  max-width: calc(100vw - 24px);
+  max-height: min(280px, 34vh);
+  overflow: auto;
+  transform: translate(-50%, 7px) scale(.985);
+  transform-origin: bottom center;
+  padding: 10px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--panel, var(--bg)) 97%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  border-radius: 14px;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, .24);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .14s ease, transform .14s ease, visibility .14s ease;
+}
+
+#multi-graph-tracker.is-open .multi-graph-tracker-panel,
+#multi-graph-tracker.is-previewing .multi-graph-tracker-panel {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0) scale(1);
+}
+
+.multi-graph-tracker-panel-head {
+  padding: 3px 4px 8px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
+}
+
+.multi-graph-tracker-heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.multi-graph-tracker-status {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, var(--red)) 9%, transparent);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1;
+  opacity: .72;
+}
+
+.multi-graph-tracker-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.multi-graph-tracker-subtitle {
+  margin-top: 3px;
+  font-size: 10px;
+  line-height: 1.35;
+  opacity: .56;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.multi-graph-tracker-subtitle:empty { display: none; }
+
+.multi-graph-tracker-list {
+  display: flex;
+  flex-direction: column;
+  padding-top: 6px;
+}
+
+.multi-graph-tracker-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 5px;
+  border-radius: 8px;
+}
+
+.multi-graph-tracker-step.is-running {
+  background: color-mix(in srgb, var(--accent, var(--red)) 7%, transparent);
+}
+
+.multi-graph-tracker-step.is-failed {
+  background: color-mix(in srgb, var(--red, #e06c75) 7%, transparent);
+}
+
+.multi-graph-tracker-step.is-cancelled,
+.multi-graph-tracker-step.is-skipped {
+  opacity: .62;
+}
+
+.mg-step-glyph {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  margin-top: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.mg-step-glyph.is-pending {
+  width: 9px;
+  height: 9px;
+  flex-basis: 9px;
+  margin: 4px 3px 0;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  opacity: .36;
+}
+
+.mg-step-glyph.is-completed { opacity: .68; }
+
+.mg-step-glyph.is-running > span {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid color-mix(in srgb, var(--fg) 25%, transparent);
+  border-top-color: var(--accent, var(--red));
+  border-radius: 50%;
+  animation: multiGraphTrackerSpin .8s linear infinite;
+}
+
+.mg-step-glyph.is-failed { color: var(--red, #e06c75); }
+.mg-step-glyph.is-partial { color: var(--accent, var(--red)); }
+.mg-step-glyph.is-cancelled,
+.mg-step-glyph.is-skipped { opacity: .52; }
+
+.mg-step-copy { min-width: 0; flex: 1; }
+
+.mg-step-line {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.mg-step-number { opacity: .42; flex: 0 0 auto; }
+.mg-step-objective { min-width: 0; }
+.multi-graph-tracker-step.is-completed .mg-step-objective { opacity: .58; }
+
+.mg-step-deps {
+  margin-top: 2px;
+  font-size: 9px;
+  opacity: .38;
+}
+
+#multi-graph-tracker.is-complete .multi-graph-tracker-chip {
+  opacity: .82;
+  border-color: color-mix(in srgb, var(--color-save-green, #4caf50) 38%, var(--border));
+}
+
+#multi-graph-tracker.is-failed .multi-graph-tracker-chip {
+  border-color: color-mix(in srgb, var(--red, #e06c75) 52%, var(--border));
+}
+
+#multi-graph-tracker.is-cancelled .multi-graph-tracker-chip {
+  opacity: .72;
+}
+
+#multi-graph-tracker.is-complete .multi-graph-tracker-status {
+  background: color-mix(in srgb, var(--color-save-green, #4caf50) 13%, transparent);
+}
+
+#multi-graph-tracker.is-failed .multi-graph-tracker-status {
+  color: var(--red, #e06c75);
+  background: color-mix(in srgb, var(--red, #e06c75) 12%, transparent);
+}
+
+@keyframes multiGraphTrackerSpin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 768px) {
+  .multi-graph-tracker-chip {
+    min-height: 32px;
+    padding: 6px 10px;
+  }
+
+  .multi-graph-tracker-panel {
+    max-height: min(220px, 30vh);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .multi-graph-tracker-spinner,
+  .mg-step-glyph.is-running > span {
+    animation: none;
+  }
+
+  .multi-graph-tracker-chip,
+  .multi-graph-tracker-panel,
+  .multi-graph-tracker-caret {
+    transition: none;
+  }
+}
+/* MULTI_GRAPH_TRACKER_UI_V1_END */
