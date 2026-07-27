@@ -10,23 +10,8 @@ def runtime_source() -> str:
     ).read_text(encoding="utf-8")
 
 
-def test_runtime_control_exposes_three_peer_runtime_states_and_toggles():
-    source = runtime_source()
-
-    assert "new Set(['legacy', 'langgraph', 'opencode'])" in source
-    assert "Enable LangGraph" in source
-    assert "Enable OpenCode" in source
-    assert 'role="switch"' in source
-    assert "runtime-toggle-track" in source
-    assert "Legacy remains available from the composer runtime control." in source
 
 
-def test_runtime_selector_remains_mutually_exclusive():
-    source = runtime_source()
-
-    assert "if (openCode && langGraph.checked) openCode.checked = false" in source
-    assert "if (langGraph && openCode.checked) langGraph.checked = false" in source
-    assert "await setCurrentRuntime('legacy')" in source
 
 
 def test_runtime_panel_is_inserted_next_to_indexes():
@@ -49,26 +34,8 @@ def test_runtime_indicator_lives_beside_agent_chat_toggle_and_cycles_all_states(
     assert "runtime-indicator-x" not in source
 
 
-def test_opencode_model_workspace_and_restart_controls_exist():
-    source = runtime_source()
-
-    assert "runtime-opencode-model" in source
-    assert "runtime-opencode-workspace" in source
-    assert "Use active chat model" in source
-    assert "Use active workspace" in source
-    assert "Apply &amp; restart OpenCode" in source
-    assert "/api/opencode/runtime/server/restart" in source
 
 
-def test_opencode_server_and_session_controls_exist():
-    source = runtime_source()
-
-    assert "Restart current session" in source
-    assert "Close OpenCode" in source
-    assert "Open log terminal" in source
-    assert "/api/opencode/runtime/server/stop" in source
-    assert "/api/opencode/runtime/server/log-terminal" in source
-    assert "/api/opencode/runtime/conversation/" in source
 
 
 def test_opencode_ui_uses_native_bridge_without_fallback():
@@ -172,27 +139,6 @@ def test_opencode_tools_reuse_native_odysseus_tool_thread_ui():
     assert "node.classList.toggle('open')" in chat_source
 
 
-def test_permission_handler_settings_and_session_routes_exist():
-    runtime_source = (
-        ROOT / "static" / "js" / "runtimeControl.js"
-    ).read_text(encoding="utf-8")
-    route_source = (
-        ROOT / "routes" / "opencode_runtime_routes.py"
-    ).read_text(encoding="utf-8")
-
-    assert "Ask for Approval" in runtime_source
-    assert "Allow safe workspace file handling" in runtime_source
-    assert "runtime-opencode-permission-mode" in runtime_source
-    assert "runtime-clear-permission-approvals-btn" in runtime_source
-    assert "permission_mode: permissionMode()" in runtime_source
-
-    assert '@router.get("/permissions/{odysseus_session_id}")' in route_source
-    assert '@router.put("/permissions/{odysseus_session_id}/mode")' in route_source
-    assert '@router.post("/permissions/reply")' in route_source
-    assert (
-        '@router.delete("/permissions/{odysseus_session_id}/approvals")'
-        in route_source
-    )
 
 
 def test_permission_prompt_reuses_native_tool_thread_ui():
@@ -246,37 +192,6 @@ def test_workspace_policy_keeps_risky_actions_gated():
     assert "self._resource_is_sensitive" in service_source
 
 
-def test_runtime_console_redesign_preserves_controls_and_ids():
-    source = runtime_source()
-
-    for marker in (
-        "runtime-selector-card",
-        "runtime-console-card",
-        "runtime-default-pill",
-        "runtime-health-pill",
-        "runtime-console-layout",
-        "runtime-environment-section",
-        "runtime-permission-section",
-        "runtime-behavior-section",
-        "runtime-action-dock",
-        "runtime-primary-action",
-    ):
-        assert marker in source
-
-    for control_id in (
-        "set-runtime-langgraph",
-        "set-runtime-opencode",
-        "runtime-opencode-model",
-        "runtime-opencode-workspace",
-        "runtime-opencode-permission-mode",
-        "set-opencode-reuse-session",
-        "set-opencode-reset-on-switch",
-        "runtime-health-btn",
-        "runtime-reset-session-btn",
-        "runtime-stop-server-btn",
-        "runtime-log-terminal-btn",
-    ):
-        assert control_id in source
 
 
 def test_composer_has_quick_opencode_session_reset():
@@ -284,27 +199,12 @@ def test_composer_has_quick_opencode_session_reset():
 
     assert "runtime-quick-reset-btn" in source
     assert "createRuntimeQuickReset()" in source
-    assert "Start a fresh OpenCode session" in source
+    assert "Start OpenCode or open OpenCode Session Manager" in source
     assert "await resetOpenCodeSession(id)" in source
-    assert "resetVisible = visible && runtime === 'opencode'" in source
-    assert "_quickResetButton.disabled = !!_activeRun" in source
+    assert "managerVisible = visible && runtime === 'opencode'" in source
+    assert "!!_activeRun || _openCodeSessionManagerBusy" in source
 
 
-def test_runtime_console_styles_are_native_single_block():
-    style = (ROOT / "static" / "style.css").read_text(
-        encoding="utf-8"
-    )
-
-    assert style.count(
-        "/* ── OpenCode / Agent runtime control v3"
-    ) == 1
-    assert style.count(
-        "/* ── End OpenCode / Agent runtime control v3"
-    ) == 1
-    assert ".runtime-console-layout" in style
-    assert ".runtime-action-dock" in style
-    assert ".runtime-quick-reset-btn" in style
-    assert "@keyframes runtime-spin" in style
 
 def test_opencode_terminal_logs_use_active_chat_and_descriptive_title():
     runtime_source = (
@@ -318,3 +218,126 @@ def test_opencode_terminal_logs_use_active_chat_and_descriptive_title():
     assert "active chat" in runtime_source
     assert "Following {scope_label} log for {model_label}" in manager_source
     assert "Odysseus OpenCode — {scope_label} — {model_label}" in manager_source
+
+def test_live_session_manager_controls_are_native_sized_and_single_instance():
+    runtime_js = runtime_source()
+    style = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    manager_source = (
+        ROOT / "src" / "opencode_runtime" / "process_manager.py"
+    ).read_text(encoding="utf-8")
+
+    assert "_quickResetButton.classList.toggle('active', ready)" in runtime_js
+    assert "_indicator.classList.toggle(" in runtime_js
+    assert "height: 32px !important" in style
+    assert "_focus_existing_session_manager" in manager_source
+    assert '"existing-window"' in manager_source
+
+def test_prepare_materializes_pending_chat_before_reading_session_id():
+    source = runtime_source()
+    pending_index = source.index("sessionModule.hasPendingChat")
+    current_index = source.index("sessionModule.getCurrentSessionId", pending_index)
+    assert pending_index < current_index
+    assert "await sessionModule.materializePendingSession()" in source
+
+
+def test_model_selection_accepts_unique_registry_suffix_match():
+    source = runtime_source()
+    assert "normalizeOpenCodeModelId" in source
+    assert "modelId.endsWith(`/${visibleModel}`)" in source
+    assert "visibleModel.endsWith(`/${modelId}`)" in source
+    assert "matches.length === 1" in source
+
+def test_session_manager_control_routes_bypass_outer_auth_middleware():
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    app_path = root / "app.py"
+    app_source = app_path.read_text(encoding="utf-8-sig")
+    app_tree = ast.parse(app_source, filename=str(app_path))
+
+    prefixes = None
+    dispatch_source = ""
+    for node in ast.walk(app_tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "AUTH_EXEMPT_PREFIXES":
+                    prefixes = ast.literal_eval(node.value)
+        if isinstance(node, ast.ClassDef) and node.name == "AuthMiddleware":
+            for item in node.body:
+                if isinstance(item, ast.AsyncFunctionDef) and item.name == "dispatch":
+                    dispatch_source = ast.get_source_segment(app_source, item) or ""
+
+    assert "/api/opencode/runtime/session-manager-control" in (prefixes or [])
+    assert "_is_auth_exempt(path)" in dispatch_source
+    assert "request.cookies.get(SESSION_COOKIE)" in dispatch_source
+    assert dispatch_source.index("_is_auth_exempt(path)") < dispatch_source.index(
+        "request.cookies.get(SESSION_COOKIE)"
+    )
+
+    routes_path = root / "routes" / "opencode_runtime_routes.py"
+    routes_source = routes_path.read_text(encoding="utf-8-sig")
+    routes_tree = ast.parse(routes_source, filename=str(routes_path))
+    helper_source = ""
+    for node in ast.walk(routes_tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_session_manager_control":
+            helper_source = ast.get_source_segment(routes_source, node) or ""
+            break
+
+    lowered = helper_source.lower()
+    assert "authorization" in lowered
+    assert "scheme.lower()" in helper_source
+    assert '"bearer"' in lowered
+    assert "resolve_session_manager_control" in helper_source
+
+def test_runtime_settings_ui_is_minimal_and_lifecycle_focused():
+    source = runtime_source()
+    panel_start = source.index("function createRuntimePanel() {")
+    panel_end = source.index("\nfunction activateRuntimePanel()", panel_start)
+    panel = source[panel_start:panel_end]
+
+    assert 'id="set-runtime-default"' in panel
+    assert '<option value="legacy">Legacy</option>' in panel
+    assert '<option value="langgraph">LangGraph</option>' in panel
+    assert '<option value="opencode">OpenCode</option>' in panel
+    assert "normalizeRuntime(runtimeSelect.value, 'legacy')" in source
+    assert "Conversation Lifecycle" in panel
+    assert "Reuse conversation per chat" in panel
+    assert "Reset after switching runtime" in panel
+    assert "<h3>OpenCode Session Manager</h3>" in panel
+    assert 'id="runtime-session-manager-settings-btn"' in panel
+
+    for removed in (
+        "set-runtime-langgraph",
+        "set-runtime-opencode",
+        "runtime-health-pill",
+        "runtime-environment-section",
+        "runtime-permission-section",
+        "runtime-action-dock",
+        "Apply changes &amp; restart",
+    ):
+        assert removed not in panel
+
+
+def test_runtime_settings_minimal_styles_exist_once():
+    style = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert style.count("/* ── Runtime settings minimal layout v1") == 1
+    assert ".runtime-select-row" in style
+    assert ".runtime-lifecycle-panel" in style
+    assert ".runtime-session-manager-copy h3" in style
+    assert ".runtime-session-manager-launch" in style
+
+def test_runtime_session_manager_control_is_visible_and_wired():
+    runtime = runtime_source()
+    style = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "<h3>OpenCode Session Manager</h3>" in runtime
+    assert '<button id="runtime-session-manager-settings-btn"' in runtime
+    assert "const sessionManagerButton = document.getElementById(" in runtime
+    assert "sessionManagerButton.addEventListener('click'" in runtime
+    assert "handleOpenCodeSessionManagerClick().catch(() => {});" in runtime
+    assert ".runtime-session-manager-copy h3" in style
+    assert "font-size: 14px;" in style
+    assert "var(--accent-primary)" in style
+    assert "background:" in style
+    assert "border:" in style

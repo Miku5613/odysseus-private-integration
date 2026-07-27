@@ -270,7 +270,12 @@ if AUTH_ENABLED:
         "/api/version",
         "/login",
     }
-    AUTH_EXEMPT_PREFIXES = ["/static"]
+    AUTH_EXEMPT_PREFIXES = [
+        "/static",
+        # Session Manager control routes authenticate with their own
+        # short-lived Bearer grant after this outer middleware.
+        "/api/opencode/runtime/session-manager-control",
+    ]
     # Dynamic paths whose own handler proves identity via a path-embedded
     # secret instead of the session/bearer auth. The route handler at
     # routes/task_routes.py validates the per-task `webhook_token` itself

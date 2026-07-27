@@ -41708,4 +41708,200 @@ body.theme-frosted .modal {
     flex: 1 1 140px;
   }
 }
+
+.runtime-indicator-btn,
+.runtime-quick-reset-btn {
+  height: 32px !important;
+  min-height: 32px !important;
+  border-radius: 10px !important;
+  box-sizing: border-box;
+}
+
+.runtime-indicator-btn {
+  min-width: max-content;
+  padding: 0 10px !important;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.runtime-quick-reset-btn {
+  width: 32px !important;
+  min-width: 32px !important;
+  padding: 0 !important;
+}
+
+.runtime-indicator-btn svg,
+.runtime-quick-reset-btn svg {
+  width: 17px;
+  height: 17px;
+}
+
+.runtime-indicator-btn.active,
+.runtime-quick-reset-btn.active {
+  color: var(--accent, var(--red));
+}
+
 /* ── End OpenCode / Agent runtime control v3 ───────────────────────── */
+
+/* ── Runtime settings minimal layout v1 ───────────────────────── */
+.runtime-settings-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.runtime-minimal-card {
+  padding: 18px 20px;
+}
+
+.runtime-minimal-heading {
+  margin-bottom: 16px;
+}
+
+.runtime-select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+}
+
+.runtime-select-copy,
+.runtime-choice-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.runtime-select-copy small,
+.runtime-choice-copy small,
+.runtime-lifecycle-heading p,
+.runtime-session-manager-copy p {
+  color: color-mix(in srgb, var(--fg) 62%, transparent);
+  line-height: 1.45;
+}
+
+.runtime-select-control {
+  min-width: 190px;
+  height: 38px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: normal;
+}
+
+.runtime-lifecycle-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.runtime-lifecycle-heading h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.runtime-lifecycle-heading p,
+.runtime-session-manager-copy p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.runtime-lifecycle-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.runtime-lifecycle-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 74px;
+  padding: 13px 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.runtime-session-manager-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.runtime-session-manager-copy h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.runtime-session-manager-launch {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid color-mix(
+    in srgb,
+    var(--accent-primary) 72%,
+    var(--border)
+  ) !important;
+  border-radius: 9px;
+  background: color-mix(
+    in srgb,
+    var(--accent-primary) 16%,
+    var(--panel)
+  ) !important;
+  color: var(--fg) !important;
+  box-shadow: 0 2px 8px color-mix(
+    in srgb,
+    var(--accent-primary) 12%,
+    transparent
+  );
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  appearance: none;
+}
+
+.runtime-session-manager-launch:hover {
+  border-color: var(--accent-primary) !important;
+  background: color-mix(
+    in srgb,
+    var(--accent-primary) 24%,
+    var(--panel)
+  ) !important;
+}
+
+@media (max-width: 760px) {
+  .runtime-select-row,
+  .runtime-session-manager-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .runtime-select-control {
+    width: 100%;
+  }
+
+  .runtime-lifecycle-options {
+    grid-template-columns: 1fr;
+  }
+}
+/* ── End Runtime settings minimal layout v1 ───────────────────── */

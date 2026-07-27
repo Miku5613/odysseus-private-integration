@@ -717,6 +717,496 @@ class OpenCodeServerManager:
             "odysseus_session_id": session_id,
         }
 
+
+
+    @staticmethod
+    def _focus_existing_session_manager(
+        title: str = "OpenCode Session Manager",
+    ) -> bool:
+        if os.name != "nt":
+            return False
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            matches: list[int] = []
+            callback_type = ctypes.WINFUNCTYPE(
+                wintypes.BOOL,
+                wintypes.HWND,
+                wintypes.LPARAM,
+            )
+
+            def visit(hwnd, _):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                length = int(user32.GetWindowTextLengthW(hwnd))
+                if length <= 0:
+                    return True
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buffer, length + 1)
+                if str(title).casefold() in buffer.value.casefold():
+                    matches.append(int(hwnd))
+                return True
+
+            user32.EnumWindows(callback_type(visit), 0)
+            if not matches:
+                return False
+
+            hwnd = wintypes.HWND(matches[0])
+            user32.ShowWindow(hwnd, 9)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            return True
+        except Exception:
+            return False
+
+    def _write_session_manager_launch_ticket(
+        self,
+        control_token: str = "",
+    ) -> Path:
+        ticket_root = self.log_root / "session-manager-tickets"
+        ticket_root.mkdir(parents=True, exist_ok=True)
+        ticket_name = hashlib.sha256(os.urandom(32)).hexdigest() + ".json"
+        ticket_path = ticket_root / ticket_name
+
+        payload = {
+            "username": (
+                self.config.username
+                or os.environ.get("OPENCODE_SERVER_USERNAME", "")
+            ),
+            "password": (
+                self.config.password
+                or os.environ.get("OPENCODE_SERVER_PASSWORD", "")
+            ),
+            "control_token": str(control_token or "").strip(),
+        }
+
+        descriptor = os.open(
+            str(ticket_path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(
+            descriptor,
+            "w",
+            encoding="utf-8",
+            newline="\n",
+        ) as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.write("\n")
+        return ticket_path
+
+    def _write_session_manager_handoff(
+        self,
+        handoff_path: Path,
+        launch_ticket: Path,
+        *,
+        workspace: Path,
+        native_session_id: str,
+        control_url: str,
+        log_path: Path,
+    ) -> None:
+        temporary = handoff_path.with_name(
+            handoff_path.name
+            + "."
+            + hashlib.sha256(os.urandom(16)).hexdigest()
+            + ".tmp"
+        )
+        payload = {
+            "launch_ticket": str(launch_ticket),
+            "server": self.config.base_url,
+            "workspace": str(workspace),
+            "model": self.config.model_id,
+            "session_id": str(native_session_id or "").strip(),
+            "control_url": str(control_url or "").strip(),
+            "log_path": str(log_path),
+        }
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, handoff_path)
+
+    @staticmethod
+    def _ensure_session_manager_terminal_profile() -> str:
+        profile_name = 'Odysseus OpenCode Session Manager'
+        if os.name != "nt":
+            return ""
+        local_app_data = str(os.environ.get("LOCALAPPDATA") or "").strip()
+        if not local_app_data:
+            return ""
+        try:
+            import json
+            import uuid
+
+            fragment_path = (
+                Path(local_app_data)
+                / "Microsoft"
+                / "Windows Terminal"
+                / "Fragments"
+                / "Odysseus"
+                / "session-manager.json"
+            )
+            fragment_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "profiles": [
+                    {
+                        "name": profile_name,
+                        "hidden": True,
+                        "scrollbarState": "hidden",
+                        "historySize": 0,
+                        "padding": "0",
+                    }
+                ]
+            }
+            temporary = fragment_path.with_name(
+                fragment_path.name + "." + uuid.uuid4().hex + ".tmp"
+            )
+            try:
+                temporary.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                os.replace(temporary, fragment_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return profile_name
+        except Exception:
+            return ""
+
+
+    def open_session_manager_terminal(
+        self,
+        opencode_session_id: str = "",
+        *,
+        control_url: str = "",
+        control_token: str = "",
+        odysseus_session_id: str = "",
+    ) -> dict[str, Any]:
+        launch = self.ensure_running()
+        workspace = (
+            Path(self.config.workspace).expanduser().resolve()
+            if self.config.workspace
+            else Path.cwd().resolve()
+        )
+        if not workspace.is_dir():
+            raise OpenCodeServerLifecycleError(
+                f"OpenCode workspace does not exist: {workspace}"
+            )
+
+        script_path = Path(__file__).with_name("session_manager_tui.py")
+        if not script_path.is_file():
+            raise OpenCodeServerLifecycleError(
+                f"OpenCode Session Manager is missing: {script_path}"
+            )
+
+        native_session_id = str(opencode_session_id or "").strip()
+        bridge_url = str(control_url or "").strip().rstrip("/")
+        bridge_token = str(control_token or "").strip()
+        if bool(bridge_url) != bool(bridge_token):
+            raise OpenCodeServerLifecycleError(
+                "Session Manager control URL and token must be provided together."
+            )
+        if bridge_url:
+            parsed = urlparse(bridge_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or str(parsed.hostname or "").lower()
+                not in {"127.0.0.1", "localhost", "::1"}
+            ):
+                raise OpenCodeServerLifecycleError(
+                    "Session Manager control bridge must use a loopback URL."
+                )
+
+        log_session_id = str(
+            odysseus_session_id or ""
+        ).strip()
+        log_path = (
+            self.session_log_path(log_session_id)
+            if log_session_id
+            else self.log_path
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch(exist_ok=True)
+        launch_ticket = self._write_session_manager_launch_ticket(
+            bridge_token
+        )
+        handoff_path = (
+            self.log_root
+            / "session-manager-handoff.json"
+        )
+
+        if self._focus_existing_session_manager():
+            self._write_session_manager_handoff(
+                handoff_path,
+                launch_ticket,
+                workspace=workspace,
+                native_session_id=native_session_id,
+                control_url=bridge_url,
+                log_path=log_path,
+            )
+            self.log_event(
+                "SESSION_MANAGER_TERMINAL_FOCUSED",
+                configured_workspace=str(workspace),
+                odysseus_session_id=log_session_id,
+                opencode_session_id=native_session_id,
+            )
+            return {
+                "opened": False,
+                "focused": True,
+                "terminal": "existing-window",
+                "endpoint": self.config.base_url,
+                "workspace": str(workspace),
+                "opencode_session_id": native_session_id,
+                "client": "odysseus-custom-tui",
+            }
+
+        handoff_path.unlink(missing_ok=True)
+        tui_args = [
+            sys.executable,
+            str(script_path),
+            "--server",
+            self.config.base_url,
+            "--workspace",
+            str(workspace),
+            "--model",
+            self.config.model_id,
+            "--log-path",
+            str(log_path),
+            "--launch-ticket",
+            str(launch_ticket),
+            "--handoff-path",
+            str(handoff_path),
+        ]
+        if native_session_id:
+            tui_args.extend(["--session", native_session_id])
+        if bridge_url:
+            tui_args.extend(["--control-url", bridge_url])
+
+        environment = os.environ.copy()
+        if self.config.username:
+            environment["OPENCODE_SERVER_USERNAME"] = self.config.username
+        if self.config.password:
+            environment["OPENCODE_SERVER_PASSWORD"] = self.config.password
+        if bridge_token:
+            environment["ODYSSEUS_SESSION_MANAGER_TOKEN"] = bridge_token
+
+        terminal = "console"
+        creationflags = 0
+        command = list(tui_args)
+
+        if os.name == "nt":
+            windows_terminal = shutil.which("wt.exe")
+            if windows_terminal:
+                terminal = "windows-terminal"
+                terminal_profile = (
+                    self._ensure_session_manager_terminal_profile()
+                )
+                command = [
+                    windows_terminal,
+                    "--window",
+                    "new",
+                    "--focus",
+                    "--size",
+                    "121,37",
+                    "new-tab",
+                    *(
+                        ["--profile", terminal_profile]
+                        if terminal_profile
+                        else []
+                    ),
+                    "--title",
+                    "OpenCode Session Manager",
+                    "--suppressApplicationTitle",
+                    "-d",
+                    str(workspace),
+                    *tui_args,
+                ]
+                creationflags = getattr(
+                    subprocess,
+                    "CREATE_NEW_PROCESS_GROUP",
+                    0,
+                )
+            else:
+                terminal = "windows-console"
+                creationflags = (
+                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                )
+
+        try:
+            self.process_factory(
+                command,
+                cwd=str(workspace),
+                env=environment,
+                creationflags=creationflags,
+                start_new_session=(os.name != "nt"),
+            )
+        except Exception:
+            handoff_path.unlink(missing_ok=True)
+            launch_ticket.unlink(missing_ok=True)
+            raise
+        self.log_event(
+            "SESSION_MANAGER_TERMINAL_OPENED",
+            terminal=terminal,
+            endpoint=self.config.base_url,
+            configured_workspace=str(workspace),
+            odysseus_session_id=log_session_id,
+            opencode_session_id=native_session_id,
+            command=command,
+            server_mode=launch.get("mode"),
+            control_enabled=bool(bridge_url),
+        )
+        return {
+            "opened": True,
+            "terminal": terminal,
+            "endpoint": self.config.base_url,
+            "workspace": str(workspace),
+            "opencode_session_id": native_session_id,
+            "client": "odysseus-custom-tui",
+            "control_enabled": bool(bridge_url),
+        }
+
+    def open_package_terminal(
+        self,
+        package: str,
+        action: str,
+        argument: str = "",
+    ) -> dict[str, Any]:
+        package_value = str(package or "").strip().lower()
+        action_value = str(action or "").strip().lower()
+        argument_value = str(argument or "").strip()
+
+        commands = {
+            ("mcp", "add"): ("mcp", "add"),
+            ("mcp", "list"): ("mcp", "list"),
+            ("mcp", "auth"): ("mcp", "auth"),
+            ("mcp", "logout"): ("mcp", "logout"),
+            ("mcp", "debug"): ("mcp", "debug"),
+            ("plugin", "install"): ("plugin",),
+        }
+        command_tail = commands.get((package_value, action_value))
+        if command_tail is None:
+            raise OpenCodeServerLifecycleError(
+                "Unsupported OpenCode package action."
+            )
+
+        if len(argument_value) > 300 or any(
+            marker in argument_value
+            for marker in ("\x00", "\r", "\n")
+        ):
+            raise OpenCodeServerLifecycleError(
+                "OpenCode package argument is invalid."
+            )
+        if (
+            (package_value, action_value)
+            in {
+                ("mcp", "auth"),
+                ("mcp", "logout"),
+                ("mcp", "debug"),
+                ("plugin", "install"),
+            }
+            and not argument_value
+        ):
+            raise OpenCodeServerLifecycleError(
+                "This OpenCode package action requires an argument."
+            )
+
+        workspace = (
+            Path(self.config.workspace).expanduser().resolve()
+            if self.config.workspace
+            else Path.cwd().resolve()
+        )
+        if not workspace.is_dir():
+            raise OpenCodeServerLifecycleError(
+                f"OpenCode workspace does not exist: {workspace}"
+            )
+
+        executable = self._resolve_executable()
+        cli_args = [executable, *command_tail]
+        if argument_value:
+            cli_args.append(argument_value)
+
+        environment = os.environ.copy()
+        config_path = str(self.config.config_path or "").strip()
+        if config_path:
+            environment["OPENCODE_CONFIG"] = str(
+                Path(config_path).expanduser().resolve()
+            )
+
+        terminal = "direct"
+        creationflags = 0
+        command = list(cli_args)
+        title = (
+            f"OpenCode {package_value} {action_value}"
+        ).strip()
+
+        if os.name == "nt":
+            comspec = os.environ.get("COMSPEC", "cmd.exe")
+            command_line = subprocess.list2cmdline(cli_args)
+            console_command = [
+                comspec,
+                "/d",
+                "/s",
+                "/k",
+                command_line,
+            ]
+            windows_terminal = shutil.which("wt.exe")
+            if windows_terminal:
+                terminal = "windows-terminal"
+                command = [
+                    windows_terminal,
+                    "new-tab",
+                    "--title",
+                    title,
+                    "-d",
+                    str(workspace),
+                    *console_command,
+                ]
+                creationflags = getattr(
+                    subprocess,
+                    "CREATE_NEW_PROCESS_GROUP",
+                    0,
+                )
+            else:
+                terminal = "windows-console"
+                command = console_command
+                creationflags = (
+                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                )
+
+        process = self.process_factory(
+            command,
+            cwd=str(workspace),
+            env=environment,
+            creationflags=creationflags,
+            start_new_session=(os.name != "nt"),
+        )
+        terminal_pid = getattr(process, "pid", None)
+        self.log_event(
+            "PACKAGE_TERMINAL_OPENED",
+            package=package_value,
+            action=action_value,
+            argument_length=len(argument_value),
+            terminal=terminal,
+            terminal_pid=terminal_pid,
+            configured_workspace=str(workspace),
+        )
+        return {
+            "opened": True,
+            "terminal": terminal,
+            "pid": terminal_pid,
+            "package": package_value,
+            "action": action_value,
+            "workspace": str(workspace),
+        }
+
+
     def _close_log_handle(self) -> None:
         handle = self._log_handle
         self._log_handle = None

@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass, field, replace
 import fnmatch
 import os
+import secrets
 import json
 from pathlib import Path
 import threading
@@ -21,6 +22,7 @@ from .process_manager import (
     OpenCodeServerManager,
 )
 from .transport import OpenCodeHttpTransport, OpenCodeTransportError
+import hashlib
 
 TranscriptPersister = Callable[
     [str, str, str, dict[str, Any]],
@@ -101,6 +103,13 @@ class SessionApproval:
         }
 
 
+
+@dataclass(slots=True)
+class SessionManagerControlGrant:
+    odysseus_session_id: str
+    expires_at: float
+
+
 class OpenCodeRuntimeService:
     """Standalone OpenCode runtime lifecycle, without fallback routing."""
 
@@ -163,8 +172,550 @@ class OpenCodeRuntimeService:
             list[SessionApproval],
         ] = {}
         self._pending_permissions: dict[str, PendingPermission] = {}
+        self._session_manager_controls: dict[
+            str,
+            SessionManagerControlGrant,
+        ] = {}
         self._lock = threading.RLock()
 
+
+    SESSION_MANAGER_CONTROL_TTL_SECONDS = 7200.0
+
+    def _session_manager_control_root(
+        self,
+    ) -> Path:
+        manager_root = getattr(
+            self.server_manager,
+            "log_root",
+            None,
+        )
+        if manager_root:
+            base = Path(manager_root)
+        else:
+            manager_log = getattr(
+                self.server_manager,
+                "log_path",
+                None,
+            )
+            if manager_log:
+                base = Path(manager_log).parent
+            else:
+                workspace = str(
+                    getattr(
+                        self.config,
+                        "workspace",
+                        "",
+                    )
+                    or ""
+                ).strip()
+                base = (
+                    Path(workspace)
+                    if workspace
+                    else Path.cwd()
+                )
+
+        root = (
+            base.expanduser().resolve()
+            / "session-manager-controls"
+        )
+        root.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        return root
+
+    def _session_manager_control_path(
+        self,
+        token: str,
+    ) -> Path:
+        value = str(token or "").strip()
+        digest = hashlib.sha256(
+            value.encode(
+                "utf-8",
+                errors="replace",
+            )
+        ).hexdigest()
+        return (
+            self._session_manager_control_root()
+            / f"{digest}.json"
+        )
+
+    def _write_session_manager_control(
+        self,
+        token: str,
+        grant: SessionManagerControlGrant,
+    ) -> None:
+        path = self._session_manager_control_path(
+            token
+        )
+        temporary = path.with_name(
+            path.name
+            + "."
+            + secrets.token_hex(8)
+            + ".tmp"
+        )
+        payload = {
+            "odysseus_session_id": (
+                grant.odysseus_session_id
+            ),
+            "expires_at": grant.expires_at,
+        }
+
+        descriptor = os.open(
+            str(temporary),
+            (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+            ),
+            0o600,
+        )
+        try:
+            with os.fdopen(
+                descriptor,
+                "w",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                json.dump(
+                    payload,
+                    handle,
+                    ensure_ascii=False,
+                )
+                handle.write("\n")
+            os.replace(
+                temporary,
+                path,
+            )
+        except Exception:
+            try:
+                temporary.unlink(
+                    missing_ok=True
+                )
+            except Exception:
+                pass
+            raise
+
+    def _read_session_manager_control(
+        self,
+        token: str,
+    ) -> SessionManagerControlGrant | None:
+        value = str(token or "").strip()
+        if not value:
+            return None
+
+        path = self._session_manager_control_path(
+            value
+        )
+        try:
+            payload = json.loads(
+                path.read_text(
+                    encoding="utf-8"
+                )
+            )
+            conversation_id = str(
+                payload.get(
+                    "odysseus_session_id"
+                )
+                or ""
+            ).strip()
+            expires_at = float(
+                payload.get("expires_at")
+                or 0.0
+            )
+        except Exception:
+            return None
+
+        if (
+            not conversation_id
+            or expires_at <= time.time()
+        ):
+            try:
+                path.unlink(
+                    missing_ok=True
+                )
+            except Exception:
+                pass
+            return None
+
+        return SessionManagerControlGrant(
+            odysseus_session_id=(
+                conversation_id
+            ),
+            expires_at=expires_at,
+        )
+
+    def _purge_expired_session_manager_controls(
+        self,
+    ) -> int:
+        removed = 0
+        now = time.time()
+        for path in (
+            self._session_manager_control_root()
+            .glob("*.json")
+        ):
+            try:
+                payload = json.loads(
+                    path.read_text(
+                        encoding="utf-8"
+                    )
+                )
+                expires_at = float(
+                    payload.get("expires_at")
+                    or 0.0
+                )
+            except Exception:
+                expires_at = 0.0
+
+            if expires_at > now:
+                continue
+            try:
+                path.unlink(
+                    missing_ok=True
+                )
+                removed += 1
+            except Exception:
+                pass
+        return removed
+
+    def issue_session_manager_control(
+        self,
+        odysseus_session_id: str,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        conversation_id = str(
+            odysseus_session_id or ""
+        ).strip()
+        if not conversation_id:
+            raise ValueError(
+                "Odysseus session id is required."
+            )
+
+        now = time.time()
+        ttl = (
+            self.SESSION_MANAGER_CONTROL_TTL_SECONDS
+            if ttl_seconds is None
+            else max(
+                30.0,
+                float(ttl_seconds),
+            )
+        )
+        token = secrets.token_urlsafe(32)
+        grant = SessionManagerControlGrant(
+            odysseus_session_id=(
+                conversation_id
+            ),
+            expires_at=now + ttl,
+        )
+
+        self._purge_expired_session_manager_controls()
+        self._write_session_manager_control(
+            token,
+            grant,
+        )
+        with self._lock:
+            self._session_manager_controls[
+                token
+            ] = grant
+
+        self._log(
+            "SESSION_MANAGER_CONTROL_ISSUED",
+            odysseus_session_id=(
+                conversation_id
+            ),
+            expires_at=grant.expires_at,
+            persistence="file-backed",
+        )
+        return {
+            "token": token,
+            "expires_at": grant.expires_at,
+            "odysseus_session_id": (
+                conversation_id
+            ),
+        }
+
+    def resolve_session_manager_control(
+        self,
+        token: str,
+    ) -> str:
+        value = str(token or "").strip()
+        if not value:
+            raise PermissionError(
+                "Session Manager control "
+                "token is required."
+            )
+
+        grant = (
+            self._read_session_manager_control(
+                value
+            )
+        )
+        if grant is None:
+            with self._lock:
+                self._session_manager_controls.pop(
+                    value,
+                    None,
+                )
+            raise PermissionError(
+                "Session Manager control token "
+                "is invalid or expired."
+            )
+
+        with self._lock:
+            self._session_manager_controls[
+                value
+            ] = grant
+        return grant.odysseus_session_id
+
+    def release_session_manager_control(
+        self,
+        token: str,
+    ) -> bool:
+        value = str(token or "").strip()
+        if not value:
+            return False
+
+        grant = (
+            self._read_session_manager_control(
+                value
+            )
+        )
+        try:
+            self._session_manager_control_path(
+                value
+            ).unlink(
+                missing_ok=True
+            )
+        except Exception:
+            pass
+
+        with self._lock:
+            cached = (
+                self._session_manager_controls.pop(
+                    value,
+                    None,
+                )
+            )
+        grant = grant or cached
+        if grant is None:
+            return False
+
+        self._log(
+            "SESSION_MANAGER_CONTROL_RELEASED",
+            odysseus_session_id=(
+                grant.odysseus_session_id
+            ),
+        )
+        return True
+
+    def revoke_session_manager_controls(
+        self,
+    ) -> int:
+        with self._lock:
+            memory_count = len(
+                self._session_manager_controls
+            )
+            self._session_manager_controls.clear()
+
+        file_count = 0
+        for path in (
+            self._session_manager_control_root()
+            .glob("*.json")
+        ):
+            try:
+                path.unlink(
+                    missing_ok=True
+                )
+                file_count += 1
+            except Exception:
+                pass
+
+        removed = max(
+            memory_count,
+            file_count,
+        )
+        if removed:
+            self._log(
+                "SESSION_MANAGER_CONTROLS_REVOKED",
+                removed=removed,
+            )
+        return removed
+
+    def session_manager_control_state(
+        self,
+        token: str,
+    ) -> dict[str, Any]:
+        value = str(token or "").strip()
+        conversation_id = (
+            self.resolve_session_manager_control(
+                value
+            )
+        )
+        grant = (
+            self._read_session_manager_control(
+                value
+            )
+        )
+        with self._lock:
+            native_session_id = (
+                self._sessions.get(
+                    conversation_id,
+                    "",
+                )
+            )
+
+        return {
+            "ok": True,
+            "odysseus_session_id": (
+                conversation_id
+            ),
+            "opencode_session_id": (
+                native_session_id
+            ),
+            "model_id": (
+                self.config.model_id
+            ),
+            "endpoint_id": (
+                self.config.endpoint_id
+            ),
+            "workspace": str(
+                self._workspace_root()
+            ),
+            "server_owned": (
+                self.server_manager.owns_process
+            ),
+            "permission": (
+                self.permission_state(
+                    conversation_id
+                )
+            ),
+            "expires_at": (
+                grant.expires_at
+                if grant is not None
+                else 0.0
+            ),
+        }
+
+    async def replace_conversation_session(
+        self,
+        odysseus_session_id: str,
+        *,
+        title: str = "",
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise ValueError("Odysseus session id is required.")
+
+        session_title = str(title or "").strip() or "OpenCode Session"
+        created = await asyncio.to_thread(
+            self.transport.create_session,
+            session_title,
+        )
+        with self._lock:
+            previous = self._sessions.get(conversation_id, "")
+            self._sessions[conversation_id] = created
+
+        if previous and previous != created:
+            try:
+                await asyncio.to_thread(
+                    self.transport.delete_session,
+                    previous,
+                )
+            except Exception:
+                self._log(
+                    "SESSION_REPLACED_OLD_DELETE_FAILED",
+                    odysseus_session_id=conversation_id,
+                    opencode_session_id=previous,
+                )
+
+        self._persist_transcript_message(
+            conversation_id,
+            "assistant",
+            f"OpenCode started a new native session: {created}.",
+            {
+                "runtime": "opencode",
+                "kind": "native_session_replaced",
+                "deterministic": True,
+                "opencode_session_id": created,
+            },
+        )
+        self._log(
+            "SESSION_REPLACED",
+            odysseus_session_id=conversation_id,
+            previous_opencode_session_id=previous,
+            opencode_session_id=created,
+        )
+        return {
+            "ok": True,
+            "odysseus_session_id": conversation_id,
+            "opencode_session_id": created,
+            "previous_opencode_session_id": previous,
+        }
+
+    async def open_package_terminal(
+        self,
+        odysseus_session_id: str,
+        *,
+        package: str,
+        action: str,
+        argument: str = "",
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise ValueError("Odysseus session id is required.")
+
+        await self.health()
+        result = await asyncio.to_thread(
+            self.server_manager.open_package_terminal,
+            package,
+            action,
+            argument,
+        )
+        self._log(
+            "PACKAGE_CONTROL_OPENED",
+            odysseus_session_id=conversation_id,
+            package=result.get("package"),
+            action=result.get("action"),
+            terminal=result.get("terminal"),
+            terminal_pid=result.get("pid"),
+        )
+        return {
+            "ok": True,
+            "odysseus_session_id": conversation_id,
+            **result,
+        }
+
+    async def restart_current_server(
+        self,
+        odysseus_session_id: str,
+    ) -> dict[str, Any]:
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise ValueError("Odysseus session id is required.")
+
+        result = await self.restart_server(
+            endpoint_id=self.config.endpoint_id,
+            provider_id=self.config.provider_id,
+            provider_name=self.config.provider_name,
+            provider_base_url=self.config.provider_base_url,
+            provider_models=self.config.provider_models,
+            provider_api_key=self.config.provider_api_key,
+            model_id=self.config.model_id,
+            workspace=str(self._workspace_root()),
+        )
+        native_session_id = await self._get_or_create_session(
+            conversation_id,
+            title="OpenCode Session",
+        )
+        return {
+            **result,
+            "ok": True,
+            "odysseus_session_id": conversation_id,
+            "opencode_session_id": native_session_id,
+        }
 
     @classmethod
     def _normalize_permission_mode(cls, mode: str) -> str:
@@ -1600,6 +2151,7 @@ class OpenCodeRuntimeService:
             workspace=str(workspace_path),
             launch=result.get("launch"),
         )
+        self.revoke_session_manager_controls()
         return result
 
     async def stop_server(self) -> dict[str, Any]:
@@ -1625,6 +2177,190 @@ class OpenCodeRuntimeService:
             "ok": True,
             "stopped": bool(stopped),
             "owned": True,
+        }
+
+
+
+    async def prepare_runtime(
+        self,
+        *,
+        odysseus_session_id: str,
+        title: str,
+        permission_mode: str,
+        model_id: str,
+        workspace: str,
+        endpoint_id: str = "",
+        provider_id: str = "",
+        provider_name: str = "",
+        provider_base_url: str = "",
+        provider_models: tuple[str, ...] = (),
+        provider_api_key: str = "",
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise OpenCodeServerLifecycleError(
+                "Odysseus session id is required."
+            )
+
+        selected_model = str(model_id or "").strip()
+        selected_workspace = str(workspace or "").strip()
+        if not selected_model:
+            raise OpenCodeServerLifecycleError(
+                "OpenCode model must not be empty."
+            )
+        if not selected_workspace:
+            raise OpenCodeServerLifecycleError(
+                "OpenCode workspace must not be empty."
+            )
+
+        workspace_path = Path(selected_workspace).expanduser().resolve()
+        if not workspace_path.is_dir():
+            raise OpenCodeServerLifecycleError(
+                f"OpenCode workspace does not exist: {workspace_path}"
+            )
+
+        current_workspace = self._workspace_root()
+        config_matches = (
+            self.config.model_id == selected_model
+            and (
+                not str(endpoint_id or "").strip()
+                or self.config.endpoint_id == str(endpoint_id).strip()
+            )
+            and os.path.normcase(str(current_workspace))
+            == os.path.normcase(str(workspace_path))
+        )
+
+        if config_matches:
+            result = await self.health()
+            restarted = False
+        else:
+            result = await self.restart_server(
+                endpoint_id=endpoint_id,
+                provider_id=provider_id,
+                provider_name=provider_name,
+                provider_base_url=provider_base_url,
+                provider_models=provider_models,
+                provider_api_key=provider_api_key,
+                model_id=selected_model,
+                workspace=str(workspace_path),
+            )
+            restarted = True
+
+        normalized_permission = self._normalize_permission_mode(
+            permission_mode
+        )
+        with self._lock:
+            self._permission_modes[conversation_id] = normalized_permission
+
+        native_session_id = await self._get_or_create_session(
+            conversation_id,
+            title=title or "OpenCode Session",
+        )
+        ready_message = (
+            f"OpenCode is live with {self.config.model_id} in "
+            f"{self._workspace_root()}. The current chat is connected "
+            f"to native session {native_session_id}."
+        )
+        self._persist_transcript_message(
+            conversation_id,
+            "assistant",
+            ready_message,
+            {
+                "runtime": "opencode",
+                "kind": "runtime_ready",
+                "deterministic": True,
+                "opencode_session_id": native_session_id,
+                "provider_id": self.config.provider_id,
+                "model_id": self.config.model_id,
+                "workspace": str(self._workspace_root()),
+            },
+        )
+        self._log(
+            "RUNTIME_PREPARED",
+            odysseus_session_id=conversation_id,
+            opencode_session_id=native_session_id,
+            restarted=restarted,
+            model_id=self.config.model_id,
+            configured_workspace=str(self._workspace_root()),
+        )
+        return {
+            **result,
+            "ok": True,
+            "ready": True,
+            "restarted": restarted,
+            "message": ready_message,
+            "odysseus_session_id": conversation_id,
+            "opencode_session_id": native_session_id,
+            "permission_mode": normalized_permission,
+            "model": {
+                "endpoint_id": self.config.endpoint_id,
+                "provider_id": self.config.provider_id,
+                "model_id": self.config.model_id,
+                "agent": self.config.agent,
+            },
+            "workspace": str(self._workspace_root()),
+        }
+
+
+    async def open_session_manager_terminal(
+        self,
+        odysseus_session_id: str,
+        *,
+        control_base_url: str = "",
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise OpenCodeServerLifecycleError(
+                "Odysseus session id is required."
+            )
+
+        await self.health()
+        native_session_id = await self._get_or_create_session(
+            conversation_id,
+            title="OpenCode Session",
+        )
+
+        control = None
+        manager_kwargs: dict[str, Any] = {
+            "odysseus_session_id": conversation_id,
+        }
+        if str(control_base_url or "").strip():
+            control = self.issue_session_manager_control(conversation_id)
+            manager_kwargs.update({
+                "control_url": str(control_base_url).strip(),
+                "control_token": control["token"],
+            })
+
+        try:
+            result = await asyncio.to_thread(
+                self.server_manager.open_session_manager_terminal,
+                native_session_id,
+                **manager_kwargs,
+            )
+        except Exception:
+            if control is not None:
+                self.release_session_manager_control(control["token"])
+            raise
+
+        self._log(
+            "SESSION_MANAGER_TERMINAL_OPENED",
+            odysseus_session_id=conversation_id,
+            opencode_session_id=native_session_id,
+            terminal=result.get("terminal"),
+            endpoint=result.get("endpoint"),
+            control_enabled=bool(control),
+        )
+        return {
+            "ok": True,
+            "odysseus_session_id": conversation_id,
+            "opencode_session_id": native_session_id,
+            "control_enabled": bool(control),
+            "control_expires_at": (
+                control["expires_at"] if control is not None else 0.0
+            ),
+            **result,
         }
 
     async def open_log_terminal(

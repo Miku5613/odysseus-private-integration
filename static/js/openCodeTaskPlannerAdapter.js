@@ -576,8 +576,39 @@ function translateOpenCodeRuntimeEvent(event, context = {}) {
   }
 
   if (type === 'tool.started') {
+    const data = eventData(event);
+    const stepId = stringValue(
+      event?.step_id,
+      data.step_id,
+      event?.tool_call_id,
+      data.tool_call_id,
+      event?.toolCallId,
+      data.toolCallId,
+    );
+    const objective = stringValue(
+      event?.objective,
+      data.objective,
+      event?.tool,
+      data.tool,
+      'Tool activity',
+    );
+
+    if (
+      stepId &&
+      !adapterState.steps.some(step => step.id === stepId)
+    ) {
+      adapterState.steps.push({
+        id: stepId,
+        objective,
+        status: 'pending',
+      });
+      adapterState.revision += 1;
+    }
+
     return translateStatus({
       ...event,
+      step_id: stepId,
+      objective,
       status: 'running',
     });
   }
@@ -596,6 +627,21 @@ function translateOpenCodeRuntimeEvent(event, context = {}) {
 
     return translateStatus({
       ...event,
+      step_id: stringValue(
+        event?.step_id,
+        data.step_id,
+        event?.tool_call_id,
+        data.tool_call_id,
+        event?.toolCallId,
+        data.toolCallId,
+      ),
+      objective: stringValue(
+        event?.objective,
+        data.objective,
+        event?.tool,
+        data.tool,
+        'Tool activity',
+      ),
       status: completedStatus,
     });
   }
@@ -608,7 +654,13 @@ function translateOpenCodeRuntimeEvent(event, context = {}) {
     adapterState.currentStepId = '';
     adapterState.status = 'completed';
     adapterState.revision += 1;
-    return [planAction('completed', 'Completed')];
+
+    const action = planAction('completed', 'Completed');
+    action.event = {
+      type: 'task.plan.completed',
+      runtime: 'opencode',
+    };
+    return [action];
   }
 
   if (type === 'runtime.failed') {

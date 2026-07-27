@@ -8,6 +8,7 @@ import uiModule from './ui.js';
 import sessionModule from './sessions.js';
 import chatRenderer from './chatRenderer.js';
 import markdownModule from './markdown.js';
+import { getWorkspace } from './workspace.js';
 
 import openCodeTaskPlannerAdapter from './openCodeTaskPlannerAdapter.js';
 
@@ -22,6 +23,10 @@ const OPENCODE_PERMISSION_MODE_KEY = 'odysseus-opencode-permission-mode-v1';
 
 const RUNTIMES = new Set(['legacy', 'langgraph', 'opencode']);
 let _pendingRuntime = null;
+let _openCodeReadySessions = new Map();
+let _openCodeSessionManagerBusy = false;
+let _openCodePreparePromise = null;
+let _lastOpenCodeFailure = { key: '', timestamp: 0 };
 let _activeRun = null;
 let _initialized = false;
 let _runtimePanel = null;
@@ -293,257 +298,101 @@ function createRuntimePanel() {
   panel.dataset.settingsPanel = 'runtime';
   panel.className = 'hidden admin-only runtime-settings-panel';
   panel.innerHTML = `
-    <div class="admin-card runtime-settings-card runtime-selector-card">
-      <div class="runtime-card-head">
-        <div class="runtime-card-heading">
-          <span class="runtime-card-kicker">Agent orchestration</span>
-          <h2 class="runtime-card-title">
-            ${runtimeIconSvg(15)}
-            <span>Runtime Selector</span>
-          </h2>
-          <p class="settings-help-text">
-            Choose the default Agent engine for newly created chats.
-            Legacy remains available from the composer runtime control.
-          </p>
-        </div>
-        <div class="runtime-default-pill" aria-live="polite">
-          <span class="runtime-status-dot"></span>
-          <span>Default</span>
-          <strong id="runtime-default-label">Legacy</strong>
-        </div>
+    <div class="admin-card runtime-settings-card runtime-selector-card runtime-minimal-card">
+      <div class="runtime-minimal-heading">
+        <span class="runtime-card-kicker">Agent orchestration</span>
+        <h2 class="runtime-card-title">
+          ${runtimeIconSvg(16)}
+          <span>Runtime Selector</span>
+        </h2>
+        <p class="settings-help-text">
+          Choose the default runtime used by newly created chats.
+        </p>
       </div>
 
-      <div class="runtime-selector-grid">
-        <label class="runtime-choice-row runtime-choice-langgraph">
-          <span class="runtime-choice-icon">
-            ${runtimeIconSvg(17)}
-          </span>
-          <span class="runtime-choice-copy">
-            <strong>LangGraph</strong>
-            <small>Odysseus-native supervised Agent runtime.</small>
-          </span>
-          <span class="runtime-toggle">
-            <input id="set-runtime-langgraph" type="checkbox"
-                   role="switch" aria-label="Enable LangGraph">
-            <span class="runtime-toggle-track" aria-hidden="true">
-              <span class="runtime-toggle-thumb"></span>
-            </span>
-          </span>
-        </label>
-
-        <label class="runtime-choice-row runtime-choice-opencode">
-          <span class="runtime-choice-icon">
-            <svg width="17" height="17" viewBox="0 0 24 24"
-                 fill="none" stroke="currentColor" stroke-width="2"
-                 stroke-linecap="round" stroke-linejoin="round"
-                 aria-hidden="true">
-              <path d="M8 9 4 12l4 3"></path>
-              <path d="m16 9 4 3-4 3"></path>
-              <path d="m14 5-4 14"></path>
-            </svg>
-          </span>
-          <span class="runtime-choice-copy">
-            <strong>OpenCode</strong>
-            <small>Standalone coding runtime with native tools.</small>
-          </span>
-          <span class="runtime-toggle">
-            <input id="set-runtime-opencode" type="checkbox"
-                   role="switch" aria-label="Enable OpenCode">
-            <span class="runtime-toggle-track" aria-hidden="true">
-              <span class="runtime-toggle-thumb"></span>
-            </span>
-          </span>
-        </label>
-      </div>
+      <label class="runtime-select-row" for="set-runtime-default">
+        <span class="runtime-select-copy">
+          <strong>Runtime</strong>
+          <small>Select Legacy, LangGraph, or OpenCode.</small>
+        </span>
+        <select id="set-runtime-default" class="runtime-select-control"
+                aria-label="Default runtime">
+          <option value="legacy">Legacy</option>
+          <option value="langgraph">LangGraph</option>
+          <option value="opencode">OpenCode</option>
+        </select>
+      </label>
 
       <div id="runtime-default-message"
            class="runtime-settings-message runtime-inline-message"></div>
     </div>
 
-    <div class="admin-card runtime-settings-card runtime-console-card">
-      <div class="runtime-card-head runtime-console-head">
-        <div class="runtime-card-heading">
-          <span class="runtime-card-kicker">Standalone runtime</span>
-          <h2 class="runtime-card-title">
-            <svg width="15" height="15" viewBox="0 0 24 24"
-                 fill="none" stroke="currentColor" stroke-width="2"
-                 stroke-linecap="round" stroke-linejoin="round"
-                 aria-hidden="true">
-              <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
-              <path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5"></path>
-              <path d="M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7"></path>
-            </svg>
-            <span>OpenCode Console</span>
-          </h2>
-          <p class="settings-help-text">
-            Configure the managed server, workspace policy, and native
-            conversation lifecycle.
-          </p>
-        </div>
-        <div class="runtime-health-pill">
-          <span class="runtime-health-dot"></span>
-          <span>Server</span>
-          <strong id="runtime-health-message">Not checked</strong>
-        </div>
+    <div class="admin-card runtime-settings-card runtime-console-card runtime-minimal-card">
+      <div class="runtime-minimal-heading">
+        <span class="runtime-card-kicker">Standalone runtime</span>
+        <h2 class="runtime-card-title">OpenCode Console</h2>
+        <p class="settings-help-text">
+          Control how OpenCode conversation context is retained.
+        </p>
       </div>
 
-      <div class="runtime-console-layout">
-        <section class="runtime-section runtime-environment-section">
-          <div class="runtime-section-head">
-            <div>
-              <strong>Environment</strong>
-              <small>Applied when the managed server restarts.</small>
-            </div>
-          </div>
+      <section class="runtime-lifecycle-panel" aria-labelledby="runtime-lifecycle-title">
+        <div class="runtime-lifecycle-heading">
+          <h3 id="runtime-lifecycle-title">Conversation Lifecycle</h3>
+          <p>Choose whether each chat keeps or refreshes its native OpenCode context.</p>
+        </div>
 
-          <div class="runtime-config-grid">
-            <label class="runtime-field">
-              <span>Model</span>
-              <div class="runtime-field-shell">
-                <select id="runtime-opencode-model" aria-label="OpenCode model"></select>
-                <button id="runtime-use-active-model-btn" type="button"
-                        class="runtime-field-action"
-                        title="Use active chat model">
-                  Use chat
-                </button>
-              </div>
-            </label>
-
-            <label class="runtime-field">
-              <span>Workspace</span>
-              <div class="runtime-field-shell">
-                <input id="runtime-opencode-workspace" type="text"
-                       placeholder="D:\\path\\to\\workspace"
-                       autocomplete="off">
-                <button id="runtime-use-active-workspace-btn" type="button"
-                        class="runtime-field-action"
-                        title="Use active workspace">
-                  Use active
-                </button>
-              </div>
-            </label>
-          </div>
-
-          <div class="runtime-primary-row">
-            <button id="runtime-apply-restart-btn" type="button"
-                    class="runtime-primary-action"
-                    aria-label="Apply &amp; restart OpenCode">
-              Apply changes &amp; restart
-            </button>
-            <div id="runtime-config-message"
-                 class="runtime-settings-message"></div>
-          </div>
-        </section>
-
-        <section class="runtime-section runtime-permission-section">
-          <div class="runtime-section-head">
-            <div>
-              <strong>Permission policy</strong>
-              <small>Odysseus owns approvals across OpenCode restarts.</small>
-            </div>
-            <span class="runtime-section-badge">Session scoped</span>
-          </div>
-
-          <label class="runtime-field">
-            <span>Handling mode</span>
-            <select id="runtime-opencode-permission-mode"
-                    class="runtime-permission-select">
-              <option value="ask">Ask for Approval</option>
-              <option value="workspace">
-                Allow safe workspace file handling
-              </option>
-            </select>
+        <div class="runtime-lifecycle-options">
+          <label class="runtime-lifecycle-option">
+            <span class="runtime-choice-copy">
+              <strong>Reuse conversation per chat</strong>
+              <small>Continue the same native OpenCode conversation for each Odysseus chat.</small>
+            </span>
+            <span class="runtime-toggle">
+              <input id="set-opencode-reuse-session" type="checkbox" checked
+                     role="switch" aria-label="Reuse OpenCode conversation per chat">
+              <span class="runtime-toggle-track" aria-hidden="true">
+                <span class="runtime-toggle-thumb"></span>
+              </span>
+            </span>
           </label>
 
-          <p class="runtime-policy-note">
-            Workspace mode auto-approves ordinary file operations only when
-            their resolved paths remain inside the configured workspace.
-            Shell, external, sensitive, repeated, and unknown actions still
-            require approval.
-          </p>
-
-          <div class="runtime-approval-row">
-            <div id="runtime-permission-message"
-                 class="runtime-settings-message">
-              New chats ask for approval.
-            </div>
-            <button id="runtime-clear-permission-approvals-btn"
-                    type="button" class="runtime-subtle-action">
-              Clear approvals
-            </button>
-          </div>
-        </section>
-
-        <section class="runtime-section runtime-behavior-section">
-          <div class="runtime-section-head">
-            <div>
-              <strong>Conversation lifecycle</strong>
-              <small>Control how native OpenCode context is retained.</small>
-            </div>
-          </div>
-
-          <div class="runtime-session-options">
-            <label class="runtime-choice-row runtime-compact-choice">
-              <span class="runtime-choice-copy">
-                <strong>Reuse per chat</strong>
-                <small>Continue the same native conversation.</small>
+          <label class="runtime-lifecycle-option">
+            <span class="runtime-choice-copy">
+              <strong>Reset after switching runtime</strong>
+              <small>Start a fresh OpenCode conversation after leaving and returning.</small>
+            </span>
+            <span class="runtime-toggle">
+              <input id="set-opencode-reset-on-switch" type="checkbox"
+                     role="switch" aria-label="Reset OpenCode after switching runtime">
+              <span class="runtime-toggle-track" aria-hidden="true">
+                <span class="runtime-toggle-thumb"></span>
               </span>
-              <span class="runtime-toggle">
-                <input id="set-opencode-reuse-session" type="checkbox"
-                       checked role="switch"
-                       aria-label="Reuse OpenCode session">
-                <span class="runtime-toggle-track" aria-hidden="true">
-                  <span class="runtime-toggle-thumb"></span>
-                </span>
-              </span>
-            </label>
-
-            <label class="runtime-choice-row runtime-compact-choice">
-              <span class="runtime-choice-copy">
-                <strong>Reset when leaving</strong>
-                <small>Start fresh after switching runtimes.</small>
-              </span>
-              <span class="runtime-toggle">
-                <input id="set-opencode-reset-on-switch" type="checkbox"
-                       role="switch"
-                       aria-label="Reset when leaving OpenCode">
-                <span class="runtime-toggle-track" aria-hidden="true">
-                  <span class="runtime-toggle-thumb"></span>
-                </span>
-              </span>
-            </label>
-          </div>
-        </section>
-      </div>
-
-      <div class="runtime-action-dock">
-        <div class="runtime-action-dock-copy">
-          <strong>Runtime controls</strong>
-          <small>New session preserves the Odysseus chat.</small>
+            </span>
+          </label>
         </div>
-        <div class="runtime-session-actions">
-          <button id="runtime-health-btn" type="button">
-            Check server
-          </button>
-          <button id="runtime-reset-session-btn" type="button"
-                  title="Restart current session">
-            New session
-          </button>
-          <button id="runtime-log-terminal-btn" type="button"
-                  title="Open log terminal">
-            Open logs
-          </button>
-          <button id="runtime-stop-server-btn" type="button"
-                  class="runtime-danger-action"
-                  title="Close OpenCode">
-            Close server
-          </button>
+      </section>
+
+      <section class="runtime-session-manager-card">
+        <div class="runtime-session-manager-copy">
+          <h3>OpenCode Session Manager</h3>
+          <p>Open the full native console for sessions, lifecycle, permissions, MCP, plugins, extensions, and commands.</p>
         </div>
+        <button id="runtime-session-manager-settings-btn" type="button"
+                class="runtime-session-manager-launch">
+          Open Session Manager
+        </button>
+      </section>
+
+      <!-- Keep configuration state available to existing runtime code without
+           exposing model or workspace controls in this minimal settings view. -->
+      <div class="runtime-internal-controls" hidden aria-hidden="true">
+        <select id="runtime-opencode-model" tabindex="-1"></select>
+        <input id="runtime-opencode-workspace" type="text" tabindex="-1">
       </div>
     </div>`;
   return panel;
 }
-
 function activateRuntimePanel() {
   const modal = document.getElementById('settings-modal');
   if (!modal || !_runtimePanel || !_runtimeTab) return;
@@ -624,13 +473,10 @@ function buildRuntimeSettings() {
 
 function syncSettingsControls() {
   const runtime = getDefaultRuntime();
-  const langGraph = document.getElementById('set-runtime-langgraph');
-  const openCode = document.getElementById('set-runtime-opencode');
-  const label = document.getElementById('runtime-default-label');
-
-  if (langGraph) langGraph.checked = runtime === 'langgraph';
-  if (openCode) openCode.checked = runtime === 'opencode';
-  if (label) label.textContent = runtimeLabel(runtime);
+  const runtimeSelect = document.getElementById('set-runtime-default');
+  if (runtimeSelect && document.activeElement !== runtimeSelect) {
+    runtimeSelect.value = runtime;
+  }
 
   const reuse = document.getElementById('set-opencode-reuse-session');
   const reset = document.getElementById('set-opencode-reset-on-switch');
@@ -977,10 +823,12 @@ async function openOpenCodeLogTerminal() {
 }
 
 function wireRuntimeSettings() {
-  const langGraph = document.getElementById('set-runtime-langgraph');
-  const openCode = document.getElementById('set-runtime-opencode');
+  const runtimeSelect = document.getElementById('set-runtime-default');
   const reuse = document.getElementById('set-opencode-reuse-session');
   const reset = document.getElementById('set-opencode-reset-on-switch');
+  const sessionManagerButton = document.getElementById(
+    'runtime-session-manager-settings-btn'
+  );
   const modelInput = document.getElementById('runtime-opencode-model');
   const workspaceInput = document.getElementById(
     'runtime-opencode-workspace'
@@ -1011,26 +859,15 @@ function wireRuntimeSettings() {
     'runtime-clear-permission-approvals-btn'
   );
 
-  if (langGraph) {
-    langGraph.addEventListener('change', async () => {
+  if (runtimeSelect) {
+    runtimeSelect.addEventListener('change', async () => {
+      const runtime = normalizeRuntime(runtimeSelect.value, 'legacy');
       showDefaultMessage('Saving…');
-      const runtime = langGraph.checked ? 'langgraph' : 'legacy';
-      if (openCode && langGraph.checked) openCode.checked = false;
       await setDefaultRuntime(runtime);
+      runtimeSelect.value = runtime;
       showDefaultMessage(`New chats will use ${runtimeLabel(runtime)}.`);
     });
   }
-
-  if (openCode) {
-    openCode.addEventListener('change', async () => {
-      showDefaultMessage('Saving…');
-      const runtime = openCode.checked ? 'opencode' : 'legacy';
-      if (langGraph && openCode.checked) langGraph.checked = false;
-      await setDefaultRuntime(runtime);
-      showDefaultMessage(`New chats will use ${runtimeLabel(runtime)}.`);
-    });
-  }
-
   if (reuse) {
     reuse.addEventListener('change', () => {
       safeStorageSet(REUSE_SESSION_KEY, String(!!reuse.checked));
@@ -1040,6 +877,12 @@ function wireRuntimeSettings() {
   if (reset) {
     reset.addEventListener('change', () => {
       safeStorageSet(RESET_ON_SWITCH_KEY, String(!!reset.checked));
+    });
+  }
+
+  if (sessionManagerButton) {
+    sessionManagerButton.addEventListener('click', () => {
+      handleOpenCodeSessionManagerClick().catch(() => {});
     });
   }
 
@@ -1268,6 +1111,317 @@ function createRuntimeIndicator() {
   refreshRuntimeIndicator();
 }
 
+function activeOpenCodeWorkspace() {
+  return String(getWorkspace() || '').trim();
+}
+
+function normalizeOpenCodeModelId(value) {
+  return String(value || '').trim();
+}
+
+function activeOpenCodeSelection() {
+  const pending = sessionModule.getPendingChat
+    ? sessionModule.getPendingChat()
+    : null;
+  const pendingModel = normalizeOpenCodeModelId(pending?.modelId);
+  const pendingEndpoint = String(pending?.endpointId || '').trim();
+  if (pendingModel) {
+    return { modelId: pendingModel, endpointId: pendingEndpoint };
+  }
+
+  const visibleModel = normalizeOpenCodeModelId(activeChatModel());
+  if (!visibleModel) return { modelId: '', endpointId: '' };
+
+  const exact = [];
+  const suffix = [];
+  for (const endpoint of _openCodeModelEndpoints) {
+    const models = Array.isArray(endpoint?.models) ? endpoint.models : [];
+    for (const rawModel of models) {
+      const modelId = normalizeOpenCodeModelId(rawModel);
+      if (!modelId) continue;
+      const item = {
+        modelId,
+        endpointId: String(endpoint?.id || '').trim(),
+      };
+      if (modelId === visibleModel) {
+        exact.push(item);
+      } else if (
+        modelId.endsWith(`/${visibleModel}`)
+        || visibleModel.endsWith(`/${modelId}`)
+      ) {
+        suffix.push(item);
+      }
+    }
+  }
+
+  const matches = exact.length ? exact : suffix;
+  return matches.length === 1
+    ? matches[0]
+    : { modelId: visibleModel, endpointId: '' };
+}
+
+function activeOpenCodeEndpointId(modelId) {
+  if (!selectOpenCodeModel(modelId)) return '';
+  const option = selectedOpenCodeModelOption();
+  return String(option?.dataset.endpointId || '').trim();
+}
+
+async function materializedOpenCodeSessionId() {
+  if (
+    sessionModule.hasPendingChat
+    && sessionModule.hasPendingChat()
+    && sessionModule.materializePendingSession
+  ) {
+    const created = await sessionModule.materializePendingSession();
+    if (!created) {
+      throw new Error('The new Odysseus chat could not be created.');
+    }
+  }
+
+  const sessionId = String(
+    sessionModule.getCurrentSessionId
+      ? sessionModule.getCurrentSessionId()
+      : ''
+  ).trim();
+  if (!sessionId) {
+    throw new Error('OpenCode requires an Odysseus chat session.');
+  }
+  return sessionId;
+}
+
+function openCodeReadyKey(sessionId, modelId, workspace) {
+  return [
+    String(sessionId || '').trim(),
+    String(modelId || '').trim(),
+    String(workspace || '').trim().toLowerCase(),
+  ].join('|');
+}
+
+function currentOpenCodeReadyState() {
+  const sessionId = String(
+    sessionModule.getCurrentSessionId
+      ? sessionModule.getCurrentSessionId()
+      : ''
+  ).trim();
+  const modelId = activeChatModel();
+  const workspace = activeOpenCodeWorkspace();
+  if (!sessionId || !modelId || !workspace) return null;
+
+  const key = openCodeReadyKey(sessionId, modelId, workspace);
+  return _openCodeReadySessions.get(key) || null;
+}
+
+function renderOpenCodeRuntimeStatus(message, metadata = {}) {
+  const text = String(message || '').trim();
+  if (!text) return false;
+
+  if (metadata.failed) {
+    const sessionId = String(
+      sessionModule.getCurrentSessionId
+        ? sessionModule.getCurrentSessionId()
+        : ''
+    ).trim();
+    const key = [sessionId, text].join('|');
+    const now = Date.now();
+    if (
+      _lastOpenCodeFailure.key === key
+      && now - _lastOpenCodeFailure.timestamp < 5000
+    ) {
+      return false;
+    }
+    _lastOpenCodeFailure = { key, timestamp: now };
+  }
+
+  chatRenderer.addMessage('assistant', text, 'OpenCode', {
+    runtime: 'opencode',
+    kind: 'runtime_status',
+    deterministic: true,
+    timestamp: new Date().toISOString(),
+    ...metadata,
+  });
+  const box = document.getElementById('chat-history');
+  if (box) box.scrollTop = box.scrollHeight;
+  return true;
+}
+
+async function prepareOpenCodeForCurrentChat() {
+  if (_openCodePreparePromise) return _openCodePreparePromise;
+
+  _openCodePreparePromise = (async () => {
+    const sessionId = await materializedOpenCodeSessionId();
+    const workspace = activeOpenCodeWorkspace();
+    if (!workspace) {
+      throw new Error('Select an active workspace before starting OpenCode.');
+    }
+    if (!_openCodeModelEndpoints.length) {
+      await loadOpenCodeModelOptions();
+    }
+
+    const selection = activeOpenCodeSelection();
+    if (!selection.modelId) {
+      throw new Error('Select a chat model before starting OpenCode.');
+    }
+    if (!selection.endpointId) {
+      throw new Error(
+        'The active chat model is not enabled in the Odysseus registry.'
+      );
+    }
+
+    const payload = await runtimeJsonRequest(
+      '/api/opencode/runtime/prepare',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          odysseus_session_id: sessionId,
+          title: 'OpenCode Session',
+          permission_mode: permissionMode(),
+          endpoint_id: selection.endpointId,
+          model_id: selection.modelId,
+          workspace,
+        }),
+      }
+    );
+
+    const ready = {
+      sessionId,
+      modelId: selection.modelId,
+      workspace,
+      payload,
+    };
+    _openCodeReadySessions.set(
+      openCodeReadyKey(sessionId, selection.modelId, workspace),
+      ready
+    );
+    renderOpenCodeRuntimeStatus(
+      payload.message || 'OpenCode is ready for this chat.',
+      { ready: true, model_id: selection.modelId, workspace }
+    );
+    refreshRuntimeIndicator();
+    return ready;
+  })();
+
+  try {
+    return await _openCodePreparePromise;
+  } finally {
+    _openCodePreparePromise = null;
+  }
+}
+
+async function openOpenCodeSessionManagerTerminal(sessionId) {
+  return runtimeJsonRequest(
+    '/api/opencode/runtime/server/session-manager-terminal',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        odysseus_session_id: sessionId,
+      }),
+    }
+  );
+}
+
+async function handleOpenCodeSessionManagerClick() {
+  if (_activeRun) return null;
+  if (_openCodePreparePromise) return _openCodePreparePromise;
+  if (_openCodeSessionManagerBusy) return null;
+
+  _openCodeSessionManagerBusy = true;
+  refreshRuntimeIndicator();
+  try {
+    let ready = currentOpenCodeReadyState();
+    if (!ready) {
+      ready = await prepareOpenCodeForCurrentChat();
+      return { action: 'prepared', ...ready };
+    }
+
+    const payload = await openOpenCodeSessionManagerTerminal(ready.sessionId);
+    return {
+      action: payload.focused ? 'focused' : 'opened',
+      ...payload,
+    };
+  } catch (error) {
+    renderOpenCodeRuntimeStatus(
+      `OpenCode could not start: ${error.message || error}`,
+      { failed: true }
+    );
+    throw error;
+  } finally {
+    _openCodeSessionManagerBusy = false;
+    refreshRuntimeIndicator();
+  }
+}
+
+function simplifyOpenCodeSettings() {
+  const workspaceInput = document.getElementById(
+    'runtime-opencode-workspace'
+  );
+  const workspaceField = workspaceInput?.closest('.runtime-field');
+  if (workspaceField) {
+    workspaceField.innerHTML = `
+      <span>Workspace</span>
+      <output id="runtime-opencode-active-workspace"
+              class="runtime-field-readonly"></output>
+    `;
+  }
+
+  const output = document.getElementById(
+    'runtime-opencode-active-workspace'
+  );
+  if (output) {
+    output.textContent = activeOpenCodeWorkspace()
+      || 'No active workspace selected';
+  }
+
+  document.getElementById(
+    'runtime-apply-restart-btn'
+  )?.closest('.runtime-primary-row')?.remove();
+
+  document.querySelector(
+    '.runtime-permission-section'
+  )?.remove();
+
+  const actionDock = document.querySelector('.runtime-action-dock');
+  if (actionDock) {
+    actionDock.innerHTML = `
+      <div class="runtime-action-dock-copy">
+        <strong>OpenCode Session Manager</strong>
+        <small>Live session, lifecycle, permissions, MCP, plugins,
+        extensions, and commands.</small>
+      </div>
+      <div class="runtime-session-actions">
+        <button id="runtime-session-manager-settings-btn"
+                type="button">
+          Open Session Manager
+        </button>
+      </div>
+    `;
+    actionDock.querySelector(
+      '#runtime-session-manager-settings-btn'
+    )?.addEventListener(
+      'click',
+      () => handleOpenCodeSessionManagerClick().catch(() => {})
+    );
+  }
+
+  document.addEventListener(
+    'workspace-changed',
+    event => {
+      const current = document.getElementById(
+        'runtime-opencode-active-workspace'
+      );
+      if (current) {
+        current.textContent = String(
+          event?.detail?.path || activeOpenCodeWorkspace()
+          || 'No active workspace selected'
+        );
+      }
+      _openCodeReadySessions.clear();
+      refreshRuntimeIndicator();
+    },
+    { passive: true }
+  );
+}
+
+
 function createRuntimeQuickReset() {
   if (
     _quickResetButton
@@ -1288,45 +1442,23 @@ function createRuntimeQuickReset() {
   button.className =
     'input-icon-btn tool-indicator runtime-quick-reset-btn';
   button.style.display = 'none';
-  button.title = 'Start a fresh OpenCode session';
+  button.title = 'Start OpenCode for this chat';
   button.setAttribute(
     'aria-label',
-    'Start a fresh OpenCode session'
+    'Start OpenCode or open OpenCode Session Manager'
   );
   button.innerHTML = `
-    <svg width="14" height="14" viewBox="0 0 24 24"
+    <svg width="15" height="15" viewBox="0 0 24 24"
          fill="none" stroke="currentColor" stroke-width="2"
          stroke-linecap="round" stroke-linejoin="round"
          aria-hidden="true">
-      <path d="M20 11a8.1 8.1 0 0 0-15.5-2"></path>
-      <path d="M4 4v5h5"></path>
-      <path d="M4 13a8.1 8.1 0 0 0 15.5 2"></path>
-      <path d="M20 20v-5h-5"></path>
-    </svg>`;
-
-  button.addEventListener('click', async event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (_activeRun) return;
-
-    const id = sessionModule.getCurrentSessionId
-      ? sessionModule.getCurrentSessionId()
-      : '';
-    if (!id) return;
-
-    button.disabled = true;
-    button.classList.add('is-busy');
-    const ok = await resetOpenCodeSession(id);
-    button.classList.remove('is-busy');
-    button.classList.toggle('is-success', !!ok);
-    button.disabled = false;
-    button.title = ok
-      ? 'Fresh OpenCode session ready'
-      : 'OpenCode session reset failed';
-    setTimeout(() => {
-      button.classList.remove('is-success');
-      button.title = 'Start a fresh OpenCode session';
-    }, 1800);
+      <rect x="3" y="4" width="18" height="16" rx="1"></rect>
+      <path d="m7 9 3 3-3 3"></path>
+      <path d="M13 15h4"></path>
+    </svg>
+  `;
+  button.addEventListener('click', () => {
+    handleOpenCodeSessionManagerClick().catch(() => {});
   });
 
   const modeToggle = right.querySelector('.mode-toggle');
@@ -1353,6 +1485,7 @@ export function refreshRuntimeIndicator() {
 
   _indicator.style.display = visible ? '' : 'none';
   _indicator.classList.toggle('runtime-opencode', runtime === 'opencode');
+  _indicator.classList.toggle('active', runtime === 'opencode');
   _indicator.classList.toggle('runtime-langgraph', runtime === 'langgraph');
   _indicator.classList.toggle('runtime-legacy', runtime === 'legacy');
 
@@ -1373,9 +1506,20 @@ export function refreshRuntimeIndicator() {
     );
   }
   if (_quickResetButton) {
-    const resetVisible = visible && runtime === 'opencode';
-    _quickResetButton.style.display = resetVisible ? '' : 'none';
-    _quickResetButton.disabled = !!_activeRun;
+    const managerVisible = visible && runtime === 'opencode';
+    const ready = !!currentOpenCodeReadyState();
+    _quickResetButton.style.display = managerVisible ? '' : 'none';
+    _quickResetButton.disabled =
+      !!_activeRun || _openCodeSessionManagerBusy;
+    _quickResetButton.classList.toggle('is-ready', ready);
+    _quickResetButton.classList.toggle('active', ready);
+    _quickResetButton.setAttribute(
+      'aria-pressed',
+      ready ? 'true' : 'false'
+    );
+    _quickResetButton.title = ready
+      ? 'Open OpenCode Session Manager'
+      : 'Start OpenCode for this chat';
   }
 }
 
@@ -2040,6 +2184,7 @@ export async function initRuntimeControl() {
   await hydrateDefaultRuntime();
   hideLegacyLangGraphSetting();
   buildRuntimeSettings();
+  simplifyOpenCodeSettings();
   createRuntimeIndicator();
   createRuntimeQuickReset();
   watchComposerState();
