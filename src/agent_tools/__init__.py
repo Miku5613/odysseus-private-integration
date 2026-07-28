@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
-from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .coding_tools import TodoWriteTool
+from .atlas_tools import ManageAtlasTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
@@ -32,7 +34,6 @@ from .admin_tools import (
     do_manage_endpoints, do_manage_mcp, do_manage_webhooks,
     do_manage_tokens, do_manage_settings,
 )
-from .atlas_tools import ManageAtlasTool
 
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
@@ -42,6 +43,9 @@ TOOL_HANDLERS = {
     "read_file": ReadFileTool().execute,
     "write_file": WriteFileTool().execute,
     "edit_file": EditFileTool().execute,
+    "apply_patch": ApplyPatchTool().execute,
+    "todowrite": TodoWriteTool().execute,
+    "manage_atlas": ManageAtlasTool().execute,
     "ls": LsTool().execute,
     "glob": GlobTool().execute,
     "grep": GrepTool().execute,
@@ -50,7 +54,6 @@ TOOL_HANDLERS = {
     "edit_document": EditDocumentTool().execute,
     "suggest_document": SuggestDocumentTool().execute,
     "manage_documents": ManageDocumentTool().execute,
-    "manage_atlas": ManageAtlasTool().execute,
     "get_workspace": GetWorkspaceTool().execute,
     "ask_user": AskUserTool().execute,
     "update_plan": UpdatePlanTool().execute,
@@ -76,6 +79,7 @@ PYTHON_TIMEOUT = 30
 
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
+             "apply_patch", "todowrite",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",

@@ -280,7 +280,30 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
     except ValueError:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
+    if not args.get("action") and any(args.get(k) is not None for k in ("task", "description", "schedule", "time", "day_of_week")):
+        args["action"] = "create"
+    if args.get("task") and not args.get("name"):
+        args["name"] = args["task"]
+    if args.get("task") and not args.get("prompt"):
+        args["prompt"] = args["task"]
     action = args.get("action", "list")
+    if args.get("description") and not args.get("prompt"):
+        args["prompt"] = args["description"]
+    if args.get("time") and not args.get("scheduled_time"):
+        args["scheduled_time"] = args["time"]
+    if args.get("day_of_week") is not None and args.get("scheduled_day") is None:
+        day = str(args.get("day_of_week")).strip().lower()
+        days = {
+            "monday": 0, "mon": 0,
+            "tuesday": 1, "tue": 1, "tues": 1,
+            "wednesday": 2, "wed": 2,
+            "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+            "friday": 4, "fri": 4,
+            "saturday": 5, "sat": 5,
+            "sunday": 6, "sun": 6,
+        }
+        if day in days:
+            args["scheduled_day"] = days[day]
     db = SessionLocal()
     try:
         if action == "list":
@@ -291,7 +314,9 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             task_list = []
             for t in tasks:
                 task_list.append({
-                    "id": t.id, "name": t.name, "status": t.status,
+                    "id": t.id,
+                    "name": t.name,
+                    "status": t.status,
                     "task_type": t.task_type or "llm",
                     "action": t.action,
                     "trigger_type": t.trigger_type or "schedule",
@@ -302,7 +327,30 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                     "last_run": t.last_run.isoformat() + "Z" if t.last_run else None,
                     "run_count": t.run_count or 0,
                 })
-            return {"response": f"Found {len(task_list)} tasks", "tasks": task_list, "exit_code": 0}
+
+            if not tasks:
+                return {
+                    "response": "No scheduled tasks found.",
+                    "tasks": task_list,
+                    "exit_code": 0,
+                }
+
+            lines = [f"Found {len(tasks)} tasks:"]
+            for idx, t in enumerate(tasks, 1):
+                bits = [t.status or "unknown"]
+                if t.schedule:
+                    bits.append(str(t.schedule))
+                if t.scheduled_time:
+                    bits.append(str(t.scheduled_time))
+                if t.next_run:
+                    bits.append(f"next {t.next_run.isoformat()}Z")
+                detail = ", ".join(bits)
+                lines.append(f"{idx}. {t.name} ({t.id}) — {detail}")
+            return {
+                "response": "\n".join(lines),
+                "tasks": task_list,
+                "exit_code": 0,
+            }
 
         elif action == "create":
             task_type = args.get("task_type", "llm")
@@ -356,7 +404,11 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
             if not task:
                 return {"error": f"Task {task_id} not found", "exit_code": 1}
-            if owner and task.owner and task.owner != owner:
+            # Strict ownership: the old `task.owner and task.owner != owner`
+            # skipped the check on an owner-less task (created in no-login mode
+            # or before the legacy-owner sweep), letting any authenticated user
+            # reach it. `list` already scopes to an exact owner match.
+            if owner and task.owner != owner:
                 return {"error": "Access denied", "exit_code": 1}
 
             changed = []
@@ -402,7 +454,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
             if not task:
                 return {"error": f"Task {task_id} not found", "exit_code": 1}
-            if owner and task.owner and task.owner != owner:
+            if owner and task.owner != owner:
                 return {"error": "Access denied", "exit_code": 1}
             name = task.name
             db.delete(task)
@@ -416,7 +468,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
             if not task:
                 return {"error": f"Task {task_id} not found", "exit_code": 1}
-            if owner and task.owner and task.owner != owner:
+            if owner and task.owner != owner:
                 return {"error": "Access denied", "exit_code": 1}
 
             if action == "pause":
@@ -437,7 +489,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
             if not task:
                 return {"error": f"Task {task_id} not found", "exit_code": 1}
-            if owner and task.owner and task.owner != owner:
+            if owner and task.owner != owner:
                 return {"error": "Access denied", "exit_code": 1}
 
             from src.event_bus import get_task_scheduler

@@ -766,6 +766,36 @@ def apply_kimi_code_headers(headers: Optional[Dict], url: str) -> Dict[str, str]
     return h
 
 
+async def apply_kimi_code_headers_async(client, headers: Optional[Dict], url: str) -> Dict[str, str]:
+    """Pick a Kimi Code User-Agent without blocking the event loop."""
+    h = dict(headers or {})
+    if not _is_kimi_code_url(url):
+        return h
+    base_key = _kimi_code_base_key(url)
+    cached = _kimi_code_ua_cache.get(base_key)
+    if cached:
+        h["User-Agent"] = cached
+        return h
+    models_url = base_key.rstrip("/") + "/models"
+    for ua in KIMI_CODE_USER_AGENTS:
+        trial = dict(h)
+        trial["User-Agent"] = ua
+        try:
+            r = await client.get(models_url, headers=trial, timeout=8)
+        except Exception:
+            continue
+        if _is_kimi_code_access_denied(r.status_code, r.content):
+            logger.debug("Kimi Code rejected User-Agent %s (403), trying next", ua)
+            continue
+        if r.status_code < 400:
+            _remember_kimi_code_user_agent(url, ua)
+            h["User-Agent"] = ua
+            return h
+        break
+    h.setdefault("User-Agent", KIMI_CODE_USER_AGENT)
+    return h
+
+
 def httpx_get_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
     h = apply_kimi_code_headers(headers, url)
     if not _is_kimi_code_url(url):
@@ -799,7 +829,7 @@ def httpx_post_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
 
 
 async def httpx_post_kimi_aware_async(client, url: str, headers: Optional[Dict], **kwargs):
-    h = apply_kimi_code_headers(headers, url)
+    h = await apply_kimi_code_headers_async(client, headers, url)
     if not _is_kimi_code_url(url):
         return await client.post(url, headers=h, **kwargs)
     last = None
@@ -950,7 +980,7 @@ def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str
     if isinstance(headers, dict):
         h.update(headers)
     if provider == "openrouter":
-        h.setdefault("HTTP-Referer", "https://github.com/pewdiepie-archdaemon/odysseus")
+        h.setdefault("HTTP-Referer", "https://github.com/odysseus-dev/odysseus")
         h.setdefault("X-OpenRouter-Title", "Odysseus")
     if provider == "copilot":
         # Ensure the Copilot-required headers are present even when the caller
@@ -1008,6 +1038,31 @@ def _provider_label(url: str) -> str:
         # discovery (see ModelDiscovery._fingerprint_provider); this stays neutral.
         return "local endpoint"
     return host or "provider"
+
+
+def _is_openai_hosted_chat_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url or "")
+    except Exception:
+        return False
+    path = (parsed.path or "").rstrip("/")
+    return _host_match(url, "openai.com") and path.endswith("/chat/completions")
+
+
+def _model_disallows_reasoning_effort_with_chat_tools(model: str) -> bool:
+    """OpenAI GPT 5.x variants reject reasoning_effort + tools on chat completions."""
+    m = (model or "").strip().lower()
+    return bool(re.match(r"^(?:openai/)?gpt-5(?:[.\-]\d+)?(?:[-_:].*)?$", m))
+
+
+def _scrub_openai_chat_tool_reasoning(payload: Dict, target_url: str, model: str) -> None:
+    if not payload.get("tools"):
+        return
+    if not _is_openai_hosted_chat_url(target_url):
+        return
+    if not _model_disallows_reasoning_effort_with_chat_tools(model):
+        return
+    payload["reasoning_effort"] = "none"
 
 
 def _normalize_chatgpt_subscription_url(url: str) -> str:
@@ -2220,6 +2275,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload["think"] = False
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
+        _scrub_openai_chat_tool_reasoning(payload, target_url, model)
         h = _provider_headers(provider, headers)
         if provider == "copilot":
             from src.copilot import apply_request_headers
@@ -2514,6 +2570,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     h = apply_kimi_code_headers(h, target_url)
     try:
         client = _get_http_client()
+        h = await apply_kimi_code_headers_async(client, h, target_url)
         async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
             _clear_host_dead(target_url)
             if r.status_code != 200:
@@ -2784,8 +2841,9 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
     `candidates` is a list of (url, model, headers). Each is tried in order,
-    but only retried on a *pre-content* failure — i.e. an ``event: error``
-    that arrives before any assistant text / tool-call data has been yielded.
+    but only retried on a *pre-content* failure — an ``event: error`` or an
+    empty completion before any assistant text / completed tool call is yielded.
+    Metadata is held until substantive output commits the candidate.
     Once a candidate has emitted real output we never switch (that would
     duplicate streamed tokens); a later error from that candidate passes
     through unchanged. The dead-host cooldown in stream_llm makes repeat
@@ -2804,6 +2862,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         is_last = (i == len(cands) - 1)
         emitted = False
         retried = False
+        pending_metadata = []
         async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
             if chunk.startswith("event: error"):
                 if not emitted and not is_last:
@@ -2816,34 +2875,67 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                     else:
                         logger.warning(f"[fallback] candidate {model} failed; trying next")
                     break
+                if not emitted:
+                    # A last-candidate error is already the clearest terminal
+                    # result; do not append an empty-completion error as well.
+                    yield chunk
+                    return
                 yield chunk
                 continue
-            # Any data chunk other than the terminal [DONE] means real output.
-            if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+
+            event_data = {}
+            is_done = chunk.startswith("data: [DONE]")
+            if chunk.startswith("data: ") and not is_done:
                 try:
                     event_data = json.loads(chunk[6:])
                 except Exception:
-                    event_data = {}
-                if event_data.get("type") == "model_actual":
-                    yield chunk
-                    continue
+                    pass
+
+            delta = event_data.get("delta")
+            event_type = event_data.get("type")
+            substantive = (
+                isinstance(delta, str) and bool(delta)
+            ) or (
+                event_type == "tool_call_delta"
+            ) or (
+                event_type == "tool_calls"
+                and bool(event_data.get("calls"))
+            )
+
+            if substantive and not emitted:
                 # First real output from a NON-primary candidate: tell the client
                 # the selected model failed and another answered. Without this the
                 # fallback is invisible — a misconfigured provider looks like it
                 # works because the reply is shown under the originally selected
                 # model's name (e.g. a Bedrock/Claude endpoint that 400s every
                 # request but appears fine because another model silently answered).
-                if not emitted and i > 0:
+                if i > 0:
                     yield ('data: ' + json.dumps({
                         "type": "fallback",
                         "selected_model": primary_model,
                         "answered_by": model,
                         "reason": _summarize_stream_error(last_error),
                     }) + '\n\n')
+                # Metadata must not commit a candidate. Once real output arrives,
+                # flush it after any fallback notice and before the output itself.
+                for metadata_chunk in pending_metadata:
+                    yield metadata_chunk
+                pending_metadata.clear()
                 emitted = True
-            yield chunk
-        if not retried:
-            return  # candidate finished (success, or terminal error already sent)
-    # Every candidate failed pre-content — surface the last error.
-    if last_error:
-        yield last_error
+
+            if substantive or emitted:
+                yield chunk
+            elif not is_done:
+                pending_metadata.append(chunk)
+
+        if emitted:
+            return
+        if retried:
+            continue
+        if not is_last:
+            last_error = f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502})}\n\n'
+            tag = "primary" if i == 0 else "candidate"
+            logger.warning(f"[fallback] {tag} {model} returned no substantive output; trying next")
+            continue
+        yield f'event: error\ndata: {json.dumps({"error": "All model candidates returned no substantive output", "status": 502})}\n\n'
+        return

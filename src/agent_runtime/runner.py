@@ -31,10 +31,7 @@ def run_once(
 
     bind_workspace(workspace_path)
 
-    scope = infer_tool_scope(
-        question,
-        workspace_path,
-    )
+    scope = infer_tool_scope(question, workspace_path)
 
     graph = build_graph(scope=scope)
 

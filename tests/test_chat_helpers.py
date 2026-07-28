@@ -233,6 +233,10 @@ def test_build_uploaded_file_manifest_filters_and_nulls_unreadable_paths(monkeyp
         )
 
         assert [item["id"] for item in manifest] == ["good", "outside", "missing"]
+        assert manifest[0]["type"] == "attachment_ref"
+        assert manifest[0]["attachment_id"] == "good"
+        assert manifest[0]["uri"] == "odysseus://attachment/good"
+        assert manifest[0]["read_policy"] == "owner_checked_upload"
         assert os.path.realpath(manifest[0]["path"]) == os.path.realpath(good)
         assert manifest[1]["path"] is None
         assert manifest[2]["path"] is None
@@ -338,10 +342,28 @@ def test_clean_thinking_for_save_extracts_thought_tag():
     assert metadata["thinking"] == "internal reasoning"
 
 
+
 def test_save_assistant_response_preserves_actual_and_requested_model():
     sess = _FakeSession("selected-model")
 
     save_assistant_response(
+        sess,
+        session_manager=None,
+        session_id="s1",
+        assistant_content="hello",
+        requested_model="selected-model",
+        actual_model="actual-model",
+        incognito=False,
+    )
+
+    assert sess.history[-1].metadata["requested_model"] == "selected-model"
+    assert sess.history[-1].metadata["model"] == "actual-model"
+
+
+def test_save_assistant_response_incognito_does_not_mutate_session_history():
+    sess = _FakeSession("selected-model")
+
+    saved_id = save_assistant_response(
         sess,
         session_manager=None,
         session_id="s1",
@@ -350,8 +372,24 @@ def test_save_assistant_response_preserves_actual_and_requested_model():
         incognito=True,
     )
 
-    assert sess.history[-1].metadata["requested_model"] == "selected-model"
-    assert sess.history[-1].metadata["model"] == "actual-model"
+    assert saved_id is None
+    assert sess.history == []
+
+
+def test_add_user_message_incognito_does_not_mutate_session_history():
+    sess = _FakeSession("selected-model")
+    chat_handler = SimpleNamespace(update_session_name_if_needed=lambda *_args, **_kwargs: None)
+    preprocessed = PreprocessedMessage(
+        enhanced_message="secret",
+        user_content="secret",
+        text_for_context="secret",
+        youtube_transcripts=[],
+        attachment_meta=[],
+    )
+
+    chat_helpers.add_user_message(sess, chat_handler, preprocessed, incognito=True)
+
+    assert sess.history == []
 
 
 class _SpinMsg:
