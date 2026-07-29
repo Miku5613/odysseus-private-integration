@@ -86,13 +86,15 @@ def test_approve_executes_exact_call_once(monkeypatch):
         "body": "hello",
     }]
 
-    with pytest.raises(KeyError):
-        execution.resolve_and_execute_tool_confirmation(
-            session_id=record.session_id,
-            call_id=record.call_id,
-            fingerprint=record.fingerprint,
-            approved=True,
-        )
+    duplicate = execution.resolve_and_execute_tool_confirmation(
+        session_id=record.session_id,
+        call_id=record.call_id,
+        fingerprint=record.fingerprint,
+        approved=True,
+    )
+    assert duplicate["status"] == "already_processed"
+    assert duplicate["executed"] is False
+    assert duplicate["idempotent_replay"] is True
 
     assert len(fake.calls) == 1
 

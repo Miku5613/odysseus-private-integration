@@ -36,10 +36,10 @@ legacy = (ROOT / "src/agent_loop.py").read_text(
 
 def test_session_identity_reaches_live_graph():
     assert "session_id: str | None = None" in streaming
-    assert (
-        "build_graph(scope=scope, session_id=session_id)"
-        in streaming
-    )
+    assert "graph = build_graph(" in streaming
+    assert "session_id=session_id" in streaming
+    assert "run_id=identity.run_id" in streaming
+    assert "owner=identity.owner" in streaming
     assert "session_id=session_id" in runner
 
 

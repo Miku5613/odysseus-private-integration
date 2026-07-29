@@ -621,6 +621,12 @@ export function modelRouteLabel(requestedModel, actualModel) {
 
 export function replyModelPair(modelName, metadata) {
   const meta = metadata || {};
+  if (meta.response_origin === 'controlled_runtime_failure') {
+    return {
+      requestedModel: modelValue(meta.selected_model || meta.requested_model),
+      actualModel: '',
+    };
+  }
   const actualFromMeta = modelValue(meta.model || meta.actual_model);
   const requestedFromMeta = modelValue(meta.requested_model || meta.selected_model);
   if (actualFromMeta || requestedFromMeta) {
@@ -2499,7 +2505,13 @@ export function addMessage(role, content, modelName, metadata) {
     const isCompacted = metadata?.compacted;
     const replyModels = replyModelPair(modelName, metadata);
     const resolvedModel = replyModels.actualModel || replyModels.requestedModel;
-    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? 'Odysseus' : modelRouteLabel(replyModels.requestedModel, resolvedModel);
+    var _roleText = role === 'user'
+      ? 'You'
+      : (isSlash || isCompacted)
+        ? 'Odysseus'
+        : metadata?.response_origin === 'controlled_runtime_failure'
+          ? 'LangGraph runtime failure'
+          : modelRouteLabel(replyModels.requestedModel, resolvedModel);
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';
     }

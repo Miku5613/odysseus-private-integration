@@ -1293,6 +1293,13 @@ async def _shutdown_event():
         await mcp_manager.disconnect_all()
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
+    try:
+        from src.agent_runtime.durable_checkpoint import (
+            reset_default_checkpoint_store_for_tests,
+        )
+        reset_default_checkpoint_store_for_tests()
+    except Exception as e:
+        logger.warning(f"LangGraph checkpoint shutdown error: {e}")
     logger.info("Application shutdown complete")
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import dataclass
-from typing import Any, Awaitable, Iterable, Literal, Protocol
+from typing import Any, Awaitable, Iterable, Literal, Mapping, Protocol
 
 from src.agent_runtime.capability_registry import (
     build_capability_registry,
@@ -352,6 +352,7 @@ def build_execution_resolver_prompt(
         ExecutionSurfaceDescriptor,
         ...,
     ],
+    source_contract: Mapping[str, Any] | None = None,
 ) -> str:
     """Ask the model only for semantic compatibility, not final selection."""
 
@@ -411,6 +412,9 @@ def build_execution_resolver_prompt(
         "11. Set clarification_needed only when missing user/source/scope "
         "information prevents determining a viable execution surface.",
         "12. Return only one JSON object matching the schema. No markdown.",
+        "13. The admitted source contract is authoritative. A surface backed by "
+        "a different source system is not compatible merely because it can "
+        "perform a similar read, search, or retrieval verb.",
         "",
         "PLAN STEP:",
         json.dumps(
@@ -434,6 +438,14 @@ def build_execution_resolver_prompt(
                 ),
             },
             ensure_ascii=False,
+            default=str,
+        ),
+        "",
+        "ADMITTED SOURCE CONTRACT:",
+        json.dumps(
+            dict(source_contract or {}),
+            ensure_ascii=False,
+            indent=2,
             default=str,
         ),
         "",
@@ -690,6 +702,62 @@ def _canonical_dependency_resolution(
     return None
 
 
+_SOURCE_SURFACE_IDS = {
+    "authorized_workspace_files": "langgraph:code_inspection",
+    "indexed_workspace_knowledge": "langgraph:knowledge_search",
+    "personal_memory": "langgraph:knowledge_search",
+    "completed_research": "langgraph:deep_research",
+    "public_web": "langgraph:web_search",
+}
+
+
+def _canonical_source_resolution(
+    step: PlanStep,
+    catalog: tuple[ExecutionSurfaceDescriptor, ...],
+    source_contract: Mapping[str, Any] | None,
+) -> ExecutionResolution | None:
+    """Lock a single admitted external source to its owning native surface."""
+
+    if (
+        not step.requires_external_state
+        or step.requires_mutation
+        or not source_contract
+    ):
+        return None
+
+    requested = {
+        str(source).strip()
+        for source in source_contract.get("requested_sources", ())
+        if str(source).strip() in _SOURCE_SURFACE_IDS
+    }
+    if len(requested) != 1:
+        return None
+
+    source = next(iter(requested))
+    surface_id = _SOURCE_SURFACE_IDS[source]
+    for surface in catalog:
+        if surface.id == surface_id and _hard_compatible(step, surface):
+            return ExecutionResolution(
+                step_id=step.id,
+                status="resolved",
+                selected_surface=surface,
+                compatible_surface_ids=(surface.id,),
+                reasoning_summary=(
+                    f"Semantic admission authorized only {source}; "
+                    f"{surface.id} owns that source."
+                ),
+            )
+    return ExecutionResolution(
+        step_id=step.id,
+        status="unsupported",
+        selected_surface=None,
+        reasoning_summary=(
+            f"Semantic admission authorized only {source}, but its owning "
+            f"surface {surface_id} is unavailable."
+        ),
+    )
+
+
 def resolve_plan_step(
     step: PlanStep,
     *,
@@ -698,6 +766,7 @@ def resolve_plan_step(
         ExecutionSurfaceDescriptor,
         ...,
     ] | None = None,
+    source_contract: Mapping[str, Any] | None = None,
 ) -> ExecutionResolution:
     """Resolve one semantic PlanStep to a validated execution surface.
 
@@ -739,9 +808,18 @@ def resolve_plan_step(
     if canonical is not None:
         return canonical
 
+    canonical = _canonical_source_resolution(
+        step,
+        catalog,
+        source_contract,
+    )
+    if canonical is not None:
+        return canonical
+
     prompt = build_execution_resolver_prompt(
         step,
         catalog,
+        source_contract,
     )
     response = model.invoke(prompt)
 
@@ -894,6 +972,7 @@ async def resolve_plan_step_async(
         ExecutionSurfaceDescriptor,
         ...,
     ] | None = None,
+    source_contract: Mapping[str, Any] | None = None,
 ) -> ExecutionResolution:
     """Resolve one PlanStep while supporting async production model adapters.
 
@@ -917,6 +996,7 @@ async def resolve_plan_step_async(
                 {}
             ),
             surfaces=catalog,
+            source_contract=source_contract,
         )
 
     ids = [
@@ -935,9 +1015,18 @@ async def resolve_plan_step_async(
     if canonical is not None:
         return canonical
 
+    canonical = _canonical_source_resolution(
+        step,
+        catalog,
+        source_contract,
+    )
+    if canonical is not None:
+        return canonical
+
     prompt = build_execution_resolver_prompt(
         step,
         catalog,
+        source_contract,
     )
 
     def validate_response(
@@ -949,6 +1038,7 @@ async def resolve_plan_step_async(
                 response
             ),
             surfaces=catalog,
+            source_contract=source_contract,
         )
 
     return await invoke_structured_model_async(

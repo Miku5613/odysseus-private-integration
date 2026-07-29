@@ -1,4 +1,9 @@
 const MULTI_GRAPH_RUNTIME = 'p3c5b2-multi-graph-v1';
+const SINGLE_GRAPH_RUNTIME = 'general-supervisor-v1';
+const TASK_PLANNER_RUNTIMES = new Set([
+  MULTI_GRAPH_RUNTIME,
+  SINGLE_GRAPH_RUNTIME,
+]);
 
 const TASK_EVENT_TYPES = Object.freeze({
   PLAN_UPDATED: 'task.plan.updated',
@@ -18,6 +23,7 @@ const TERMINAL_STEP_STATUSES = new Set([
   'completed',
   'failed',
   'partial',
+  'blocked',
   'cancelled',
   'skipped',
 ]);
@@ -99,7 +105,7 @@ function normalizePlanUpdate(payload) {
   const data = payload?.data || payload || {};
 
   if (
-    data.runtime !== MULTI_GRAPH_RUNTIME ||
+    !TASK_PLANNER_RUNTIMES.has(data.runtime) ||
     !Array.isArray(data.steps) ||
     !data.steps.length
   ) {
@@ -117,6 +123,9 @@ function normalizePlanUpdate(payload) {
       work_domains: Array.isArray(step?.work_domains)
         ? step.work_domains.map(String)
         : [],
+      worker_label: String(step?.worker_label || ''),
+      progress: String(step?.progress || ''),
+      result_summary: String(step?.result_summary || ''),
       status: normalizeStatus(step?.status, 'pending'),
     }))
     .filter((step) => step.id);
@@ -124,7 +133,7 @@ function normalizePlanUpdate(payload) {
   if (!steps.length) return null;
 
   return {
-    runtime: MULTI_GRAPH_RUNTIME,
+    runtime: data.runtime,
     planKey: planKeyFor(data, objective),
     revision: normalizedRevision(data.revision),
     status: normalizeStatus(data.status, 'planned'),
@@ -657,6 +666,9 @@ function statusGlyph(status) {
   if (status === 'partial') {
     return '<span class="mg-step-glyph is-partial">!</span>';
   }
+  if (status === 'blocked') {
+    return '<span class="mg-step-glyph is-partial">!</span>';
+  }
   if (status === 'cancelled') {
     return '<span class="mg-step-glyph is-cancelled">−</span>';
   }
@@ -759,6 +771,12 @@ function render() {
           '</div>'
         )
         : '';
+      const context = [
+        step.worker_label,
+        status === 'completed'
+          ? step.result_summary
+          : step.progress,
+      ].filter(Boolean).join(' · ');
 
       return `
         <div
@@ -774,6 +792,7 @@ function render() {
               }</span>
             </div>
             ${dependencies}
+            ${context ? `<div class="mg-step-deps">${escapeHtml(context)}</div>` : ''}
           </div>
         </div>
       `;
@@ -872,7 +891,7 @@ function handleToolOutput(payload) {
 function handleMetrics(metrics, options = {}) {
   if (options.background) return;
 
-  if (!metrics?.multi_graph) {
+  if (!metrics?.multi_graph && !metrics?.task_planner) {
     if (state.active) reset();
     return;
   }
@@ -942,6 +961,7 @@ function getStateSnapshot() {
 
 export {
   MULTI_GRAPH_RUNTIME,
+  SINGLE_GRAPH_RUNTIME,
   TASK_EVENT_TYPES,
   createInitialState,
   getStateSnapshot,

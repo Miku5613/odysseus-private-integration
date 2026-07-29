@@ -21,6 +21,34 @@ _LOCAL_MODEL_WAITING_FOREGROUND = 0
 _LOCAL_MODEL_CURRENT: Dict[str, object] = {}
 
 
+class StructuredOutputIncomplete(ValueError):
+    """The provider did not finish a usable structured response."""
+
+    def __init__(self, reason: str, *, finish_reason: str = "") -> None:
+        super().__init__(reason)
+        self.finish_reason = finish_reason
+
+
+def _complete_json_object_from_text(value: object) -> str:
+    """Return one complete JSON object embedded in text, never reasoning prose."""
+
+    if not isinstance(value, str) or not value.strip():
+        return ""
+
+    decoder = json.JSONDecoder()
+    text = value.strip()
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            payload, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return text[index:index + end]
+    return ""
+
+
 def _local_model_gate_enabled() -> bool:
     return os.getenv("ODYSSEUS_LOCAL_MODEL_GATE", "true").lower() not in {"0", "false", "no", "off"}
 
@@ -2003,6 +2031,8 @@ async def llm_call_async(
     prompt_type: Optional[str] = None,
     session_id: Optional[str] = None,
     workload: str = "foreground",
+    structured_output: bool = False,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
@@ -2022,6 +2052,14 @@ async def llm_call_async(
         messages_copy = non_sys
 
     cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    if structured_output or reasoning_effort:
+        cache_key = hashlib.sha256(
+            (
+                cache_key
+                + f"|structured={structured_output}"
+                + f"|reasoning_effort={reasoning_effort or ''}"
+            ).encode()
+        ).hexdigest()
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -2100,10 +2138,14 @@ async def llm_call_async(
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        if structured_output:
+            payload["response_format"] = {"type": "json_object"}
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
         # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
-        if provider == "mistral" and _supports_thinking(model):
+        if provider == "mistral" and _supports_thinking(model) and not reasoning_effort:
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
@@ -2141,10 +2183,40 @@ async def llm_call_async(
                 elif provider == "ollama":
                     response = _parse_ollama_response(data)
                 else:
-                    msg = data["choices"][0]["message"]
-                    response = msg.get("content") or msg.get("reasoning_content") or ""
+                    choice = data["choices"][0]
+                    msg = choice["message"]
+                    content = msg.get("content")
+                    if structured_output:
+                        finish_reason = str(choice.get("finish_reason") or "")
+                        if finish_reason == "length":
+                            raise StructuredOutputIncomplete(
+                                "Structured provider response was truncated",
+                                finish_reason=finish_reason,
+                            )
+                        response = content if isinstance(content, str) else ""
+                        if not response.strip():
+                            reasoning_json = _complete_json_object_from_text(
+                                msg.get("reasoning_content")
+                                or msg.get("reasoning")
+                            )
+                            if not reasoning_json:
+                                raise StructuredOutputIncomplete(
+                                    "Structured provider response had no complete JSON object",
+                                    finish_reason=finish_reason,
+                                )
+                            response = reasoning_json
+                    else:
+                        # Preserve the established reasoning_content compatibility
+                        # path; the newer message.reasoning field is never promoted.
+                        response = (
+                            content
+                            if isinstance(content, str) and content
+                            else msg.get("reasoning_content") or ""
+                        )
                 _set_cached_response(cache_key, response)
                 return response
+            except StructuredOutputIncomplete:
+                raise
             except Exception:
                 raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:

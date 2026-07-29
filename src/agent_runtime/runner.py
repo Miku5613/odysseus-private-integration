@@ -8,6 +8,10 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 
 from src.agent_runtime.graph import RUNTIME_VERSION, build_graph
+from src.agent_runtime.durable_checkpoint import (
+    get_default_checkpoint_store,
+)
+from src.agent_runtime.run_lifecycle import LangGraphRunIdentity
 from src.agent_runtime.legacy_sse_adapter import to_legacy_sse_frame
 from src.agent_runtime.legacy_runner import stream_langgraph_agent_legacy_sse
 from src.agent_runtime.sse_adapter import to_sse_frame, to_sse_payload
@@ -32,6 +36,10 @@ def run_once(
     bind_workspace(workspace_path)
 
     scope = infer_tool_scope(question, workspace_path)
+    identity = LangGraphRunIdentity.create(
+        session_id=None,
+        runtime_mode="single_graph",
+    )
 
     graph = build_graph(scope=scope)
 
@@ -44,7 +52,13 @@ def run_once(
             "events": [],
             "evidence_hits": [],
         },
-        config={"recursion_limit": 30},
+        config={
+            "recursion_limit": 30,
+            **get_default_checkpoint_store().config(
+                thread_id=identity.thread_id,
+                checkpoint_ns=identity.checkpoint_ns,
+            ),
+        },
     )
 
     final = result["messages"][-1]

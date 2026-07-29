@@ -518,6 +518,34 @@ def test_code_inspection_recovery_preserves_resolved_capability_without_reclassi
     assert "multi_graph_coordinator.py" in state.final_answer
 
 
+def test_code_inspection_recovery_reads_explicit_workspace_file_directly(
+    tmp_path,
+):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(
+        "fastapi\nuvicorn\npytest\n",
+        encoding="utf-8",
+    )
+
+    state = run_code_inspection_recovery(
+        "Read requirements.txt and summarize its dependencies.",
+        str(tmp_path),
+    )
+
+    assert state.metrics["direct_file_inspection"] is True
+    assert "requirements.txt:1: fastapi" in state.final_answer
+    assert any(
+        observation.tool == "read_file"
+        and observation.args["path"] == "requirements.txt"
+        and observation.success
+        for observation in state.observations
+    )
+    assert not any(
+        observation.tool == "grep"
+        for observation in state.observations
+    )
+
+
 def test_code_worker_recovery_receives_only_step_objective_and_workspace():
     captured = {}
 
@@ -649,6 +677,132 @@ def test_code_recovery_prioritizes_semantic_paths_before_bounded_content_scan():
     assert selected.index(
         "src/agent_runtime/multi_graph_coordinator.py"
     ) < 4
+
+
+def test_code_recovery_reserves_scan_capacity_across_source_roots():
+    from src.agent_runtime.general_graph import _prioritize_inspection_candidates
+
+    frontend = [
+        f"static/js/runtime-selection-{index:04d}.js"
+        for index in range(400)
+    ]
+    backend = [
+        "src/agent_runtime/agent_admission.py",
+        "src/agent_runtime/intent_complexity.py",
+    ]
+
+    selected = _prioritize_inspection_candidates(
+        frontend + backend,
+        ["runtime", "selection", "admission"],
+        limit=40,
+    )
+
+    assert "src/agent_runtime/agent_admission.py" in selected
+
+
+def test_code_recovery_does_not_narrow_source_roots_from_query_substrings(
+    monkeypatch,
+    tmp_path,
+):
+    from src.agent_runtime import general_graph
+
+    observed_patterns = []
+
+    def fake_glob(_workspace, pattern, **_kwargs):
+        observed_patterns.append(pattern)
+        return ""
+
+    monkeypatch.setattr(general_graph.tools, "glob_files", fake_glob)
+
+    general_graph.run_code_inspection_recovery(
+        "Acquire details on runtime admission.",
+        str(tmp_path),
+        semantic_terms=("runtime", "admission"),
+    )
+
+    assert "src/**/*.py" in observed_patterns
+    assert "static/js/**/*.js" in observed_patterns
+
+
+def test_code_claim_support_does_not_infer_ui_from_acquire_substring():
+    from src.agent_runtime.claim_support import (
+        _context_has_concrete_call_site,
+        _is_probably_prompt_or_header,
+        _path_obligation_ok,
+    )
+
+    supported, reason = _path_obligation_ok(
+        "src/agent_runtime/agent_admission.py",
+        "Acquire details on runtime admission.",
+    )
+
+    assert supported is True
+    assert reason == "no path-specific obligation"
+    assert _context_has_concrete_call_site(
+        {
+            "content": (
+                "async def assess_runtime():\n"
+                "    result = await assess_intent_complexity()\n"
+                "    return result\n"
+            )
+        },
+        "Acquire details on runtime admission.",
+    )
+    assert not _is_probably_prompt_or_header(
+        {
+            "line_start": 1,
+            "content": (
+                "from package import dependency\n\n"
+                "async def assess_runtime():\n"
+                "    result = await dependency()\n"
+                "    return result\n"
+            ),
+        }
+    )
+
+
+def test_code_worker_scopes_multi_goal_retrieval_concepts_to_step_objective(
+    tmp_path,
+):
+    captured = {}
+
+    def incomplete_stream(_query, **_kwargs):
+        return [{"type": "metrics", "data": {"tool_calls": 0}}]
+
+    def recovery(_query, _workspace, *, semantic_terms=()):
+        captured["semantic_terms"] = semantic_terms
+        return type(
+            "Recovery",
+            (),
+            {
+                "final_answer": "No evidence.",
+                "observations": [],
+                "metrics": {},
+            },
+        )()
+
+    run_code_worker(
+        WorkerHandoff(
+            capability="code_inspection",
+            objective="Acquire runtime admission and workspace source selection.",
+            context={
+                "workspace": str(tmp_path),
+                "retrieval_concepts": [
+                    "write approval enforcement",
+                    "runtime admission policy",
+                    "workspace source selection",
+                    "mutation authorization",
+                ],
+            },
+        ),
+        stream_factory=incomplete_stream,
+        recovery_factory=recovery,
+    )
+
+    assert "admission" in captured["semantic_terms"]
+    assert "workspace" in captured["semantic_terms"]
+    assert "approval" not in captured["semantic_terms"]
+    assert "mutation" not in captured["semantic_terms"]
 
 
 def test_code_worker_recovery_expands_source_context_before_semantic_completion(

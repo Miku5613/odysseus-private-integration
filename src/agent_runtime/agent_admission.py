@@ -47,6 +47,8 @@ async def assess_explicit_agent_admission(
     langgraph_enabled: bool,
     llm_candidates: Sequence[Any],
     prompt_type: str | None = None,
+    active_workspace: bool = False,
+    workspace_label: str | None = None,
 ) -> AgentAdmissionDecision:
     """Classify explicit Agent work without deterministic demotion."""
 
@@ -59,6 +61,8 @@ async def assess_explicit_agent_admission(
         query,
         llm_candidates=llm_candidates,
         prompt_type=prompt_type,
+        active_workspace=active_workspace,
+        workspace_label=workspace_label,
     )
 
     path_by_class: dict[str, AdmissionPath] = {

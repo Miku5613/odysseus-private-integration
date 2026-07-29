@@ -15,6 +15,10 @@ from src.agent_runtime.multi_graph_coordinator import (
     _RuntimeFallbackModel,
     stream_multi_graph_coordinator_sse,
 )
+from src.agent_runtime.run_lifecycle import (
+    LangGraphCancellationScope,
+)
+from src.agent_runtime.research_worker import run_research_worker
 from src.agent_runtime.supervisor_contracts import WorkerResult
 
 
@@ -42,6 +46,7 @@ def _assessment():
                 objective="Gather evidence.",
                 work_domains=("knowledge",),
                 requires_external_state=True,
+                retrieval_concepts=("runtime admission", "workspace source"),
             ),
             IntentGoal(
                 id="combine",
@@ -151,6 +156,9 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
                     "combine_cap": combine,
                 },
                 surfaces=surfaces,
+                session_id="session-1",
+                run_id="run-1",
+                thread_id="thread-1",
             )
         )
     )
@@ -164,6 +172,14 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     ]
     assert any(item.get("type") == "plan_update" for item in payloads)
     assert any(item.get("delta") == "Final answer" for item in payloads)
+    runtime_run = next(
+        item["data"]
+        for item in payloads
+        if item.get("type") == "runtime_run"
+    )
+    assert runtime_run["run_id"] == "run-1"
+    assert runtime_run["session_id"] == "session-1"
+    assert runtime_run["thread_id"] == "thread-1"
     metrics = next(
         item["data"]
         for item in payloads
@@ -173,6 +189,230 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     assert metrics["execution_order"] == ["gather", "combine"]
     assert metrics["multi_graph"] is True
     assert captured["dependency_outputs"]["gather"]["summary"] == "Evidence A"
+    assert captured["retrieval_concepts"] == [
+        "runtime admission",
+        "workspace source",
+    ]
+
+
+def test_planner_exhaustion_emits_one_controlled_terminal_result():
+    invalid = _plan()
+    invalid["steps"][1]["depends_on"] = ["missing"]
+    planner = Model(lambda prompt: invalid)
+
+    frames = asyncio.run(
+        _collect(
+            stream_multi_graph_coordinator_sse(
+                "http://example",
+                "model",
+                [{"role": "user", "content": "Gather then combine."}],
+                admission_assessment=_assessment(),
+                planner_model=planner,
+            )
+        )
+    )
+    payloads = [
+        json.loads(frame[6:])
+        for frame in frames
+        if frame.startswith("data: ")
+        and frame != "data: [DONE]\n\n"
+    ]
+    terminals = [
+        item
+        for item in payloads
+        if item.get("type") == "runtime_terminal"
+    ]
+
+    assert len(planner.prompts) == 2
+    assert frames.count("data: [DONE]\n\n") == 1
+    assert len(terminals) == 1
+    assert terminals[0]["data"]["status"] == "FAILED"
+    assert terminals[0]["data"]["stage"] == "planner"
+    assert terminals[0]["data"]["completed_steps"] == []
+    assert terminals[0]["data"]["whole_query_legacy_fallback"] is False
+
+
+def test_coordinator_cancellation_cancels_only_its_run_scope():
+    async def scenario():
+        blocker = asyncio.Event()
+
+        class BlockingPlanner:
+            def invoke(self, prompt):
+                async def wait_forever():
+                    await blocker.wait()
+                    return _plan()
+
+                return wait_forever()
+
+        owned_calls = []
+        scope = LangGraphCancellationScope("run-cancel")
+        scope.own_cancellation(
+            "owned-research-job",
+            lambda: owned_calls.append("owned"),
+        )
+        generator = stream_multi_graph_coordinator_sse(
+            "http://example",
+            "model",
+            [{"role": "user", "content": "Gather then combine."}],
+            admission_assessment=_assessment(),
+            planner_model=BlockingPlanner(),
+            run_id="run-cancel",
+            cancellation_scope=scope,
+        )
+
+        first = await generator.__anext__()
+        assert '"type": "runtime_run"' in first
+
+        pending = asyncio.create_task(generator.__anext__())
+        await asyncio.sleep(0)
+        pending.cancel()
+        try:
+            await pending
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("planner cancellation did not propagate")
+
+        assert scope.cancelled is True
+        assert owned_calls == ["owned"]
+
+    asyncio.run(scenario())
+
+
+def test_completed_research_report_enters_dependency_and_final_synthesis():
+    report = (
+        "LangGraph durable research coordination uses typed job states, "
+        "stable ownership, final-report retrieval, and dependency handoff. "
+        "This complete report explains how isolated cancellation and evidence "
+        "references support reliable coordinator synthesis."
+    )
+    plan = {
+        "objective": "Research and synthesize.",
+        "steps": [
+            {
+                "id": "research",
+                "objective": "Research LangGraph coordination.",
+                "depends_on": [],
+                "work_domains": ["research"],
+                "uses_dependency_state": False,
+                "requires_external_state": True,
+                "requires_mutation": False,
+            },
+            {
+                "id": "combine",
+                "objective": "Synthesize the research report.",
+                "depends_on": ["research"],
+                "work_domains": ["synthesis"],
+                "uses_dependency_state": True,
+                "requires_external_state": False,
+                "requires_mutation": False,
+            },
+        ],
+        "reasoning_summary": "Research before synthesis.",
+    }
+    surfaces = (
+        ExecutionSurfaceDescriptor(
+            id="langgraph:deep_research",
+            kind="langgraph",
+            description="Run deep research.",
+            capability_name="deep_research",
+        ),
+        ExecutionSurfaceDescriptor(
+            id="langgraph:combine_cap",
+            kind="langgraph",
+            description="Combine dependency evidence.",
+            capability_name="combine_cap",
+        ),
+    )
+    captured = {}
+
+    def resolver(prompt):
+        selected = (
+            "langgraph:deep_research"
+            if '"id": "research"' in prompt
+            else "langgraph:combine_cap"
+        )
+        return {
+            "compatible_surface_ids": [selected],
+            "clarification_needed": False,
+            "missing_information": [],
+            "reasoning_summary": "Compatible.",
+        }
+
+    async def research_runner(handoff, *, session_id=None):
+        async def trigger(content, owner=None):
+            return {
+                "research_session_id": "research-final",
+                "exit_code": 0,
+            }
+
+        async def status(job_id, owner=None):
+            return {"status": "completed", "exit_code": 0}
+
+        async def result(job_id, owner=None):
+            return {
+                "result": report,
+                "sources": [{"url": "https://example.test/source"}],
+                "raw_findings": [],
+                "exit_code": 0,
+            }
+
+        return await run_research_worker(
+            handoff,
+            session_id=session_id,
+            trigger_backend=trigger,
+            status_backend=status,
+            result_backend=result,
+        )
+
+    def combine_runner(handoff, *, session_id=None):
+        captured["dependency"] = handoff.context[
+            "dependency_outputs"
+        ]["research"]
+        return WorkerResult(
+            capability="combine_cap",
+            status="completed",
+            summary="Research synthesized.",
+        )
+
+    def final_response(prompt):
+        captured["final_prompt"] = prompt
+        return "Final research synthesis."
+
+    frames = asyncio.run(
+        _collect(
+            stream_multi_graph_coordinator_sse(
+                "http://example",
+                "model",
+                [{"role": "user", "content": "Research then synthesize."}],
+                admission_assessment=_assessment(),
+                planner_model=Model(lambda prompt: plan),
+                resolver_model=Model(resolver),
+                replanner_model=Model(lambda prompt: plan),
+                    action_model=Model(
+                        lambda prompt: {
+                            "action": "trigger_research",
+                        "clarification_needed": False,
+                        "missing_information": [],
+                        "reasoning_summary": "Start new requested research.",
+                    }
+                ),
+                final_model=Model(final_response),
+                worker_runners={
+                    "deep_research": research_runner,
+                    "combine_cap": combine_runner,
+                },
+                surfaces=surfaces,
+            )
+        )
+    )
+
+    assert frames.count("data: [DONE]\n\n") == 1
+    assert "dependency" in captured, frames
+    research_data = captured["dependency"]["data"]
+    assert research_data["dependency_state"]["report"] == report
+    assert research_data["artifacts"][0]["research_id"] == "research-final"
+    assert report in captured["final_prompt"]
 
 
 def test_partial_worker_result_stops_at_replan_boundary_instead_of_crashing():
@@ -435,5 +675,8 @@ def test_multi_graph_configures_code_worker_grounded_finalizer_from_chat_candida
         / "multi_graph_coordinator.py"
     ).read_text(encoding="utf-8")
 
-    assert "code_finalizer_candidates=candidates" in source
+    assert (
+        'code_finalizer_candidates=role_candidates("code_worker")'
+        in source
+    )
     assert "code_finalizer_prompt_type=prompt_type" in source

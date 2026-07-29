@@ -3,6 +3,9 @@ from __future__ import annotations
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
+from src.agent_runtime.durable_checkpoint import (
+    get_default_checkpoint_store,
+)
 
 from src.agent_runtime.action_search import (
     build_assist_searches,
@@ -72,6 +75,12 @@ SYSTEM = SystemMessage(
         "You may only inspect files inside the workspace. "
         "Do not write, edit, delete, run shell commands, or use web search. "
         "Prefer targeted search: use grep/glob before reading many chunks. "
+        "Start with directory-scoped searches in application source roots "
+        "(src, routes, services, core, mcp_servers, and static/js). Exclude "
+        "vendored static/lib bundles from source evidence unless the request "
+        "specifically targets a vendor library. Search documentation, tests, "
+        "generated artifacts, or the repository root only when the application "
+        "source roots are insufficient or the objective requires them. "
         "When a tool result gives a file:line anchor, nearby context may be expanded automatically by the runtime. "
         "When enough source-backed evidence exists, stop searching and give the final answer. "
         "Your final answer must include: file path, function/route/event/call if found, exact evidence, and tools used."
@@ -166,10 +175,20 @@ def _evaluate_support(state: AgentState) -> dict:
     )
 
 
-def build_graph(scope: str = "file_inspection", session_id: str | None = None):
+def build_graph(
+    scope: str = "file_inspection",
+    session_id: str | None = None,
+    *,
+    run_id: str | None = None,
+    owner: str | None = None,
+    step_id: str | None = None,
+    attempt_id: str | None = None,
+):
     llm = make_llm()
     resolved_scope = str(scope or "file_inspection").strip() or "file_inspection"
     runtime_session_id = str(session_id or "").strip()
+    runtime_run_id = str(run_id or "").strip() or None
+    runtime_owner = str(owner or "").strip() or None
     tools = get_tools_for_scope(resolved_scope)
 
     # LangGraph tool risk visibility v1 — LangGraph-only observational policy.
@@ -342,6 +361,10 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
                         session_id=runtime_session_id,
                         original_request=query,
                         question=question,
+                        run_id=runtime_run_id,
+                        owner=runtime_owner,
+                        step_id=step_id,
+                        attempt_id=attempt_id,
                     )
 
                 ask_event = make_event(
@@ -429,6 +452,10 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
                         arguments=args if isinstance(args, dict) else {},
                         reason=_risk_decision.reason,
                         policy_action="confirm",
+                        run_id=runtime_run_id,
+                        owner=runtime_owner,
+                        step_id=step_id,
+                        attempt_id=attempt_id,
                     )
 
                 risk_event = make_event(
@@ -831,6 +858,10 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
                         arguments=args if isinstance(args, dict) else {},
                         reason=_risk_decision.reason,
                         policy_action="confirm",
+                        run_id=runtime_run_id,
+                        owner=runtime_owner,
+                        step_id=step_id,
+                        attempt_id=attempt_id,
                     )
 
                 risk_event = make_event(
@@ -1222,4 +1253,6 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
     graph_builder.add_conditional_edges("targeted_action_search", route_after_tools)
     graph_builder.add_edge("finalizer", END)
 
-    return graph_builder.compile()
+    return graph_builder.compile(
+        checkpointer=get_default_checkpoint_store().checkpointer
+    )

@@ -42143,6 +42143,24 @@ body.theme-frosted .modal {
   color: var(--red);
 }
 
+.runtime-context-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.runtime-advanced {
+  margin-top: 12px;
+}
+
+.runtime-advanced > summary {
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.86rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
 .runtime-permission-select {
   width: 100%;
   min-height: 36px;
@@ -42392,10 +42410,16 @@ body.theme-frosted .modal {
 .runtime-settings-panel {
   display: grid;
   gap: 16px;
+  min-width: 0;
+  max-width: 100%;
+  container-type: inline-size;
 }
 
 .runtime-minimal-card {
   padding: 18px 20px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .runtime-minimal-heading {
@@ -42411,12 +42435,16 @@ body.theme-frosted .modal {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: color-mix(in srgb, var(--panel) 86%, transparent);
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .runtime-select-copy,
 .runtime-choice-copy {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .runtime-select-copy small,
@@ -42428,7 +42456,9 @@ body.theme-frosted .modal {
 }
 
 .runtime-select-control {
-  min-width: 190px;
+  width: min(100%, 260px);
+  min-width: 0;
+  max-width: 100%;
   height: 38px;
   padding: 0 34px 0 12px;
   border: 1px solid var(--border);
@@ -42447,6 +42477,9 @@ body.theme-frosted .modal {
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 12px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .runtime-lifecycle-heading h3 {
@@ -42476,6 +42509,9 @@ body.theme-frosted .modal {
   border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   border-radius: 10px;
   cursor: pointer;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .runtime-session-manager-card {
@@ -42547,6 +42583,26 @@ body.theme-frosted .modal {
 
   .runtime-lifecycle-options {
     grid-template-columns: 1fr;
+  }
+}
+
+@container (max-width: 620px) {
+  .runtime-selector-grid,
+  .runtime-lifecycle-options,
+  .runtime-context-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .runtime-select-row,
+  .runtime-session-manager-card {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .runtime-select-control,
+  .runtime-session-manager-launch {
+    width: 100%;
   }
 }
 /* ── End Runtime settings minimal layout v1 ───────────────────── */

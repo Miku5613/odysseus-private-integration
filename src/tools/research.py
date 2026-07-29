@@ -140,3 +140,84 @@ async def do_trigger_research(content: str, owner: Optional[str] = None) -> Dict
         }
     except Exception as e:
         return {"error": str(e), "exit_code": 1}
+
+
+async def do_research_status(
+    research_session_id: str,
+    owner: Optional[str] = None,
+) -> Dict:
+    import httpx
+    from src.tool_implementations import _internal_headers, _INTERNAL_BASE
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(
+                f"{_INTERNAL_BASE}/api/research/status/"
+                f"{research_session_id}",
+                headers=_internal_headers(owner),
+            )
+        if response.status_code >= 400:
+            return {
+                "error": (
+                    f"research/status returned HTTP "
+                    f"{response.status_code}: {response.text[:200]}"
+                ),
+                "exit_code": 1,
+            }
+        return {**response.json(), "exit_code": 0}
+    except Exception as exc:
+        return {"error": str(exc), "exit_code": 1}
+
+
+async def do_research_result_peek(
+    research_session_id: str,
+    owner: Optional[str] = None,
+) -> Dict:
+    import httpx
+    from src.tool_implementations import _internal_headers, _INTERNAL_BASE
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{_INTERNAL_BASE}/api/research/result-peek/"
+                f"{research_session_id}",
+                headers=_internal_headers(owner),
+            )
+        if response.status_code >= 400:
+            return {
+                "error": (
+                    f"research/result-peek returned HTTP "
+                    f"{response.status_code}: {response.text[:200]}"
+                ),
+                "exit_code": 1,
+            }
+        return {**response.json(), "exit_code": 0}
+    except Exception as exc:
+        return {"error": str(exc), "exit_code": 1}
+
+
+async def do_cancel_research_job(
+    research_session_id: str,
+    owner: Optional[str] = None,
+) -> Dict:
+    import httpx
+    from src.tool_implementations import _internal_headers, _INTERNAL_BASE
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{_INTERNAL_BASE}/api/research/cancel/"
+                f"{research_session_id}",
+                headers=_internal_headers(owner),
+            )
+        if response.status_code >= 400:
+            return {
+                "error": (
+                    f"research/cancel returned HTTP "
+                    f"{response.status_code}: {response.text[:200]}"
+                ),
+                "exit_code": 1,
+            }
+        return {**response.json(), "exit_code": 0}
+    except Exception as exc:
+        return {"error": str(exc), "exit_code": 1}

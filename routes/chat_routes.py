@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, AsyncGenerator, List, Optional
 
 from fastapi import APIRouter, Request, HTTPException, Form, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from core.models import ChatMessage
@@ -23,6 +23,16 @@ from src.agent_runtime.live_supervisor import stream_general_supervisor_sse
 from src.agent_runtime.multi_graph_coordinator import (
     stream_multi_graph_coordinator_sse,
 )
+from src.agent_runtime.run_lifecycle import LangGraphRunLifecycle
+from src.agent_runtime.durable_checkpoint import (
+    CheckpointUnavailableError,
+    get_default_checkpoint_store,
+)
+from src.agent_runtime.research_worker import (
+    cancel_owned_research_jobs,
+    reconcile_owned_research_jobs,
+)
+from src.agent_runtime.step_resume import resume_interrupted_step
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -128,6 +138,19 @@ def _agent_langgraph_architecture_enabled_for_request(chat_mode: str | None) -> 
         return True
 
 
+def _langgraph_multi_graph_allowed_by_settings() -> bool:
+    try:
+        from src.agent_runtime.runtime_settings import (
+            get_langgraph_runtime_settings,
+            runtime_policy,
+        )
+        return bool(
+            runtime_policy(get_langgraph_runtime_settings())["allow_multi_graph"]
+        )
+    except Exception:
+        return False
+
+
 def _route_agent_runtime_for_request(message: str, enabled: bool):
     """Return no LangGraph decision when the request-level kill switch is off.
 
@@ -140,10 +163,13 @@ def _route_agent_runtime_for_request(message: str, enabled: bool):
 
 
 async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
-    """Run native LangGraph first, preserving Legacy as failure fallback."""
-    import inspect
+    """Run native LangGraph without widening a failed request into Legacy.
 
-    emitted_any = False
+    The historical name remains as a compatibility seam for callers and tests.
+    Legacy fallback is permitted only inside an eligible failed PlanStep, never
+    for the whole user query.
+    """
+    import inspect
 
     try:
         allowed = set(
@@ -162,32 +188,107 @@ async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
             *args,
             **langgraph_kwargs,
         ):
-            emitted_any = True
             yield chunk
 
         return
 
-    except Exception:
-        if emitted_any:
-            raise
-
+    except (asyncio.CancelledError, GeneratorExit):
+        raise
+    except Exception as exc:
         logger.exception(
-            "[langgraph-first] native LangGraph failed before output; "
-            "falling back to Legacy agent loop"
+            "[langgraph-first] native LangGraph failed; "
+            "failing closed without whole-query Legacy fallback"
         )
+        failure = (
+            "The native LangGraph runtime could not complete this request "
+            "safely. No Legacy fallback was started. "
+            f"{type(exc).__name__}: {exc}"
+        )
+        yield f"data: {json.dumps({'delta': failure})}\n\n"
+        yield "data: " + json.dumps({
+            "type": "metrics",
+            "data": {
+                "runtime": "general-supervisor-v1",
+                "selected_model": (
+                    kwargs.get("model")
+                    or (args[1] if len(args) > 1 else None)
+                ),
+                "presenting_model": None,
+                "model": None,
+                "worker": None,
+                "fallback_used": False,
+                "fallback_scope": "none",
+                "response_origin": "controlled_runtime_failure",
+                "langgraph_runtime": True,
+                "whole_query_legacy_fallback": False,
+            },
+        }) + "\n\n"
+        yield "data: [DONE]\n\n"
 
-    async for chunk in stream_agent_loop(*args, **kwargs):
-        yield chunk
+
+async def _stream_agent_admission_failure(*args, **kwargs):
+    """Return a typed, fail-closed control-plane failure over the SSE seam."""
+
+    detail = str(
+        kwargs.get("admission_failure")
+        or "Structured Agent admission could not be validated."
+    )
+    yield "data: " + json.dumps({
+        "delta": (
+            "I could not validate the Agent execution plan safely after one "
+            "bounded structured retry. No workspace, web, or Legacy work was "
+            "started."
+        ),
+    }) + "\n\n"
+    yield "data: " + json.dumps({
+        "type": "metrics",
+        "data": {
+            "runtime": "agent-admission-v1",
+            "response_origin": "controlled_runtime_failure",
+            "failure_type": "structured_output_failed",
+            "failure_detail": detail[:800],
+            "fallback_used": False,
+            "fallback_scope": "none",
+            "langgraph_runtime": True,
+        },
+    }) + "\n\n"
+    yield "data: [DONE]\n\n"
 
 
-async def _stream_multi_graph_with_legacy_fallback(*args, **kwargs):
-    """Run the admitted multi-graph coordinator, preserving Legacy fallback."""
+async def _stream_multi_graph_fail_closed(*args, **kwargs):
+    """Run the admitted coordinator without widening into whole-query Legacy."""
     import inspect
 
-    emitted_any = False
     coordinator_kwargs = dict(kwargs)
+    lifecycle = LangGraphRunLifecycle.create(
+        session_id=coordinator_kwargs.get("session_id"),
+        run_id=coordinator_kwargs.get("run_id"),
+        thread_id=coordinator_kwargs.get("thread_id"),
+        checkpoint_ns=coordinator_kwargs.get("checkpoint_ns"),
+        owner=coordinator_kwargs.get("owner"),
+    )
+    coordinator_kwargs.setdefault(
+        "run_id",
+        lifecycle.identity.run_id,
+    )
+    coordinator_kwargs.setdefault(
+        "thread_id",
+        lifecycle.identity.thread_id,
+    )
+    coordinator_kwargs.setdefault(
+        "checkpoint_ns",
+        lifecycle.identity.checkpoint_ns,
+    )
+    coordinator_kwargs.setdefault(
+        "cancellation_scope",
+        lifecycle.cancellation,
+    )
 
     try:
+        coordinator_kwargs.setdefault(
+            "checkpoint_store",
+            get_default_checkpoint_store(),
+        )
         allowed = set(
             inspect.signature(
                 stream_multi_graph_coordinator_sse
@@ -203,28 +304,50 @@ async def _stream_multi_graph_with_legacy_fallback(*args, **kwargs):
             *args,
             **coordinator_kwargs,
         ):
-            emitted_any = True
             yield chunk
 
         return
 
-    except Exception:
-        if emitted_any:
-            raise
-
+    except (asyncio.CancelledError, GeneratorExit):
+        raise
+    except Exception as exc:
         logger.exception(
             "[multi-graph] coordinator failed before output; "
-            "falling back to Legacy agent loop"
+            "failing closed without whole-query Legacy fallback"
         )
 
-    legacy_kwargs = dict(kwargs)
-    legacy_kwargs.pop("admission_assessment", None)
-
-    async for chunk in stream_agent_loop(
-        *args,
-        **legacy_kwargs,
-    ):
-        yield chunk
+        error_text = (
+            "The native multi-step runtime could not start safely. "
+            "No Legacy fallback was started. "
+            f"{type(exc).__name__}: {exc}"
+        )
+        yield f"data: {json.dumps({'delta': error_text})}\n\n"
+        terminal = lifecycle.finish(
+            "FAILED",
+            stage="coordinator_start",
+            reason=f"{type(exc).__name__}: {exc}",
+            retryable=True,
+            completed_steps=[],
+            whole_query_legacy_fallback=False,
+        )
+        if terminal is not None:
+            yield "data: " + json.dumps(terminal) + "\n\n"
+        yield (
+            "data: "
+            + json.dumps({
+                "type": "metrics",
+                "data": {
+                    "runtime": "p3c5b2-multi-graph-v1",
+                    "multi_graph": True,
+                    "plan_status": "coordinator_start_failed",
+                    "terminal_status": "FAILED",
+                    "whole_query_legacy_fallback": False,
+                    "langgraph_runtime": True,
+                },
+            })
+            + "\n\n"
+        )
+        yield "data: [DONE]\n\n"
 
 
 def _append_runtime_tool_event(events, data):
@@ -260,6 +383,45 @@ def _append_runtime_tool_event(events, data):
             ev[key] = data.get(key)
 
     events.append(ev)
+
+
+async def _replay_durable_langgraph_run(
+    state: dict[str, Any],
+    *,
+    after_cursor: int = 0,
+    events: list[dict[str, Any]] | None = None,
+) -> AsyncGenerator[str, None]:
+    for event in events if events is not None else state.get("event_log") or []:
+        if not isinstance(event, dict):
+            continue
+        cursor = int((event.get("data") or {}).get("event_cursor") or 0)
+        if cursor <= after_cursor:
+            continue
+        yield f"data: {json.dumps(event, default=str)}\n\n"
+    replay_complete = {
+        "type": "runtime_replay_complete",
+        "data": {
+            "run_id": state.get("run_id"),
+            "status": state.get("status"),
+            "event_cursor": state.get("event_cursor", 0),
+            "run_completed": str(
+                state.get("status") or ""
+            ).upper() in {"COMPLETED", "FAILED", "CANCELLED"},
+            "transport_complete": True,
+        },
+    }
+    yield f"data: {json.dumps(replay_complete, default=str)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+def _durable_checkpoint_store_or_503():
+    try:
+        return get_default_checkpoint_store()
+    except CheckpointUnavailableError as exc:
+        raise HTTPException(
+            503,
+            f"Durable LangGraph recovery is unavailable: {exc}",
+        ) from exc
 
 
 from src.agent_runtime.contract_bridge import (
@@ -1017,6 +1179,7 @@ def setup_chat_routes(
         _agent_langgraph_architecture_enabled = _agent_langgraph_architecture_enabled_for_request(chat_mode)
         # AGENT_LANGGRAPH_REQUEST_BYPASS_V1_END
         _agent_admission = None
+        _agent_admission_failure = None
         # P3_C5_EXPLICIT_AGENT_ADMISSION_PREP_END
 
 
@@ -1213,6 +1376,7 @@ def setup_chat_routes(
         # P3_C5_EXPLICIT_AGENT_ADMISSION_START
         # Only the user's explicit Agent selection is semantically admitted.
         # Upstream Chat-to-Agent promotion remains owned by action_intents.
+        _agent_admission_task = None
         if user_requested_agent:
             try:
                 from src.endpoint_resolver import resolve_chat_fallback_candidates
@@ -1228,40 +1392,34 @@ def setup_chat_routes(
                     )
                     _admission_fallback_candidates = []
 
-                _agent_admission = await assess_explicit_agent_admission(
-                    message,
-                    langgraph_enabled=_agent_langgraph_architecture_enabled,
-                    llm_candidates=[
-                        (sess.endpoint_url, sess.model, sess.headers),
-                        *_admission_fallback_candidates,
-                    ],
-                    prompt_type=preset_id,
-                )
-                logger.info(
-                    "[agent-admission] explicit Agent path=%s execution_class=%s",
-                    _agent_admission.path,
-                    (
-                        _agent_admission.assessment.execution_class
-                        if _agent_admission.assessment is not None
-                        else None
-                    ),
-                )
-
-                if _agent_admission.use_normal_chat:
-                    chat_mode = "chat"
-                    logger.info(
-                        "[agent-admission] explicit Agent request is "
-                        "conversation-class; reusing normal chat stream"
+                _agent_admission_task = asyncio.create_task(
+                    assess_explicit_agent_admission(
+                        message,
+                        langgraph_enabled=_agent_langgraph_architecture_enabled,
+                        llm_candidates=[
+                            (sess.endpoint_url, sess.model, sess.headers),
+                            *_admission_fallback_candidates,
+                        ],
+                        prompt_type=preset_id,
+                        active_workspace=bool(workspace),
+                        workspace_label=(
+                            os.path.basename(
+                                str(workspace).rstrip("\\/")
+                            )
+                            if workspace
+                            else None
+                        ),
                     )
+                )
             except Exception as _agent_admission_exc:
-                # Never silently demote an explicit Agent request when semantic
-                # admission fails. Preserve existing Agent compatibility/fallback.
                 logger.exception(
-                    "[agent-admission] semantic admission failed; "
-                    "preserving explicit Agent mode: %s",
+                    "[agent-admission] could not start semantic admission: %s",
                     _agent_admission_exc,
                 )
-                _agent_admission = None
+                _agent_admission_failure = (
+                    f"{type(_agent_admission_exc).__name__}: "
+                    f"{_agent_admission_exc}"
+                )
         # P3_C5_EXPLICIT_AGENT_ADMISSION_END
 
         # Check for research_pending BEFORE mode persist overwrites it
@@ -1564,12 +1722,57 @@ def setup_chat_routes(
         # Persist session mode after policy/privilege gates so blocked research
         # turns remain ordinary chat/agent streams and saved messages.
         _effective_mode = 'research' if effective_do_research else (chat_mode or 'chat')
-        if _effective_mode in ('agent', 'research', 'chat'):
-            set_session_mode(session, _effective_mode)
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
-            # _effective_mode is read-only here; closure captures it from
-            # the outer scope. (Was `nonlocal` but never reassigned.)
+            nonlocal chat_mode
+            nonlocal _agent_admission
+            nonlocal _agent_admission_failure
+            nonlocal _effective_mode
+
+            if user_requested_agent:
+                yield "data: " + json.dumps({
+                    "type": "agent_prep",
+                    "data": {
+                        "runtime": "agent-admission-v1",
+                        "label": (
+                            "Understanding the request and selecting permitted sources"
+                        ),
+                    },
+                }) + "\n\n"
+
+            if _agent_admission_task is not None:
+                try:
+                    _agent_admission = await _agent_admission_task
+                    logger.info(
+                        "[agent-admission] explicit Agent path=%s execution_class=%s",
+                        _agent_admission.path,
+                        (
+                            _agent_admission.assessment.execution_class
+                            if _agent_admission.assessment is not None
+                            else None
+                        ),
+                    )
+                    if _agent_admission.use_normal_chat:
+                        chat_mode = "chat"
+                except Exception as _agent_admission_exc:
+                    logger.exception(
+                        "[agent-admission] semantic admission failed closed: %s",
+                        _agent_admission_exc,
+                    )
+                    _agent_admission = None
+                    _agent_admission_failure = (
+                        f"{type(_agent_admission_exc).__name__}: "
+                        f"{_agent_admission_exc}"
+                    )
+
+            _effective_mode = (
+                'research'
+                if effective_do_research
+                else (chat_mode or 'chat')
+            )
+            if _effective_mode in ('agent', 'research', 'chat'):
+                set_session_mode(session, _effective_mode)
+
             research_sources = None
             web_sources = ctx.web_sources
 
@@ -2083,6 +2286,7 @@ def setup_chat_routes(
                         and not effective_do_research
                         and not plan_mode
                         and not approved_plan
+                        and _langgraph_multi_graph_allowed_by_settings()
                     )
                     _langgraph_first_ambiguous_agent = (
                         _agent_langgraph_architecture_enabled
@@ -2107,6 +2311,7 @@ def setup_chat_routes(
                     )
                     _contract_allowed_agent = (
                         _contract_requested_agent
+                        and not _explicit_agent_single_graph
                         and not _explicit_agent_multi_graph
                         and contract_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
@@ -2195,6 +2400,10 @@ def setup_chat_routes(
                         _agent_langgraph_architecture_enabled
                         and _runtime_decision is not None
                         and _runtime_decision.intent == "write_mutation"
+                        and not (
+                            _explicit_agent_single_graph
+                            or _explicit_agent_multi_graph
+                        )
                     ):
                         _policy_result = evaluate_mutation_request(message)
                         _policy_call_id = "mutation-policy-decision"
@@ -2319,6 +2528,7 @@ def setup_chat_routes(
                     )
                     _general_allowed_agent = (
                         _general_requested_agent
+                        and not _explicit_agent_single_graph
                         and not _explicit_agent_multi_graph
                         and general_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
@@ -2399,7 +2609,8 @@ def setup_chat_routes(
 
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_START
                     _legacy_trace_needed = (
-                        not _explicit_agent_multi_graph
+                        not _explicit_agent_single_graph
+                        and not _explicit_agent_multi_graph
                         and _router_agent_runtime_requested
                         and (
                             _runtime_decision.target_runtime == "legacy"
@@ -2419,9 +2630,14 @@ def setup_chat_routes(
                         _runtime_tool_events = [_runtime_trace_tool_event(message, _runtime_decision)]
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_END
 
-                    if _explicit_agent_multi_graph:
+                    if _agent_admission_failure:
                         _selected_agent_stream = partial(
-                            _stream_multi_graph_with_legacy_fallback,
+                            _stream_agent_admission_failure,
+                            admission_failure=_agent_admission_failure,
+                        )
+                    elif _explicit_agent_multi_graph:
+                        _selected_agent_stream = partial(
+                            _stream_multi_graph_fail_closed,
                             admission_assessment=(
                                 _agent_admission.assessment
                             ),
@@ -2431,8 +2647,13 @@ def setup_chat_routes(
                             "dependency-aware coordinator"
                         )
                     elif _langgraph_first_ambiguous_agent:
-                        _selected_agent_stream = (
-                            _stream_langgraph_first_with_legacy_fallback
+                        _selected_agent_stream = partial(
+                            _stream_langgraph_first_with_legacy_fallback,
+                            admission_assessment=(
+                                _agent_admission.assessment
+                                if _agent_admission is not None
+                                else None
+                            ),
                         )
                         logger.info(
                             "[langgraph-first] ambiguous Agent request entering native LangGraph runtime"
@@ -2489,6 +2710,9 @@ def setup_chat_routes(
                                     "intent_nudge_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "runtime_run",
+                                    "runtime_snapshot",
+                                    "runtime_terminal",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
@@ -2512,7 +2736,12 @@ def setup_chat_routes(
                                     last_metrics = data.get("data", {})
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = last_metrics.get("requested_model") or _requested_model
-                                    last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
+                                    if "presenting_model" in last_metrics:
+                                        last_metrics["model"] = last_metrics.get(
+                                            "presenting_model"
+                                        )
+                                    else:
+                                        last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
                                     if ctx.context_trimmed:
                                         last_metrics["context_trimmed"] = True
                                         last_metrics["context_messages_before_trim"] = ctx.context_messages_before_trim
@@ -2621,11 +2850,48 @@ def setup_chat_routes(
     # (e.g. after reopening a session whose agent kept running in the background)
     # ------------------------------------------------------------------ #
     @router.get("/api/chat/resume/{session_id}")
-    async def chat_resume(request: Request, session_id: str) -> StreamingResponse:
+    async def chat_resume(
+        request: Request,
+        session_id: str,
+        after_cursor: int = Query(0, ge=0),
+    ) -> StreamingResponse:
         _verify_session_owner(request, session_id)
-        if not agent_runs.is_active(session_id):
-            raise HTTPException(404, "No active run for this session")
-        return StreamingResponse(agent_runs.subscribe(session_id), media_type="text/event-stream")
+        if agent_runs.is_active(session_id):
+            return StreamingResponse(
+                agent_runs.subscribe(session_id),
+                media_type="text/event-stream",
+            )
+        store = _durable_checkpoint_store_or_503()
+        state = store.recover_latest(
+            session_id=session_id,
+            owner=effective_user(request),
+        )
+        if state is None:
+            raise HTTPException(404, "No recoverable run for this session")
+        state = store.reconcile_state(state, executor_alive=False)
+        recovered = LangGraphRunLifecycle.recover(
+            checkpoint_store=store,
+            thread_id=state["thread_id"],
+            checkpoint_ns=state["checkpoint_namespace"],
+        )
+        if recovered is not None:
+            await reconcile_owned_research_jobs(recovered)
+            state = store.recover_latest(
+                run_id=state["run_id"],
+                owner=effective_user(request),
+            ) or state
+        replay_events = store.events_after(
+            run_id=str(state["run_id"]),
+            after_cursor=after_cursor,
+        )
+        return StreamingResponse(
+            _replay_durable_langgraph_run(
+                state,
+                after_cursor=after_cursor,
+                events=replay_events,
+            ),
+            media_type="text/event-stream",
+        )
 
     # ------------------------------------------------------------------ #
     # POST /api/chat/stop — cancel a detached run (Stop button). Closing the SSE
@@ -2674,6 +2940,15 @@ def setup_chat_routes(
                 call_id=call_id,
                 fingerprint=fingerprint,
                 approved=approved,
+                owner=effective_user(request),
+                run_id=(
+                    get_default_checkpoint_store()
+                    .latest_run_record(
+                        session_id=session_id,
+                        owner=effective_user(request),
+                    )
+                    or {}
+                ).get("run_id"),
             )
 
         except KeyError as exc:
@@ -2686,7 +2961,91 @@ def setup_chat_routes(
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         stopped = agent_runs.stop(session_id)
+        if not stopped:
+            store = _durable_checkpoint_store_or_503()
+            state = store.recover_latest(
+                session_id=session_id,
+                owner=effective_user(request),
+            )
+            if state:
+                state = store.reconcile_state(
+                    state,
+                    executor_alive=False,
+                )
+            if state and state.get("status") in {
+                "PENDING",
+                "RUNNING",
+                "AWAITING_APPROVAL",
+                "AWAITING_CLARIFICATION",
+                "SUSPENDED",
+                "INTERRUPTED",
+            }:
+                recovered = LangGraphRunLifecycle.recover(
+                    checkpoint_store=store,
+                    thread_id=state["thread_id"],
+                    checkpoint_ns=state["checkpoint_namespace"],
+                )
+                if recovered is not None:
+                    owner = effective_user(request)
+                    await cancel_owned_research_jobs(
+                        state,
+                        owner=owner,
+                    )
+                    cancellation_results = (
+                        await recovered.cancellation.cancel_and_wait()
+                    )
+                    recovered.record_child_cancellation(
+                        cancellation_results
+                    )
+                    recovered.finish(
+                        "CANCELLED",
+                        stage="recovered_stop",
+                        reason="Stopped after durable recovery.",
+                        completed_steps=recovered.completed_steps,
+                    )
+                    stopped = True
         return {"stopped": stopped}
+
+    @router.post("/api/chat/resume_step/{session_id}")
+    async def chat_resume_step(
+        request: Request,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """Resume one safe durable PlanStep boundary, never replay or a query."""
+
+        _verify_session_owner(request, session_id)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        step_id = str(body.get("step_id") or "").strip() or None
+        store = _durable_checkpoint_store_or_503()
+        state = store.recover_latest(
+            session_id=session_id,
+            owner=effective_user(request),
+        )
+        if state is None:
+            raise HTTPException(404, "No recoverable run for this session")
+        state = store.reconcile_state(
+            state,
+            executor_alive=agent_runs.is_active(session_id),
+        )
+        try:
+            result = await resume_interrupted_step(
+                checkpoint_store=store,
+                checkpoint_state=state,
+                owner=effective_user(request),
+                step_id=step_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        if result.get("outcome") in {
+            "REQUIRES_VERIFICATION",
+            "REQUIRES_APPROVAL",
+            "NOT_RESUMABLE",
+        }:
+            return JSONResponse(result, status_code=409)
+        return result
 
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session
@@ -2703,6 +3062,42 @@ def setup_chat_routes(
         if rec is None:
             if agent_runs.is_active(session_id):
                 return {"status": "streaming", "detached": True}
+            store = _durable_checkpoint_store_or_503()
+            state = store.recover_latest(
+                session_id=session_id,
+                owner=effective_user(request),
+            )
+            if state is not None:
+                state = store.reconcile_state(
+                    state,
+                    executor_alive=False,
+                )
+                recovered = LangGraphRunLifecycle.recover(
+                    checkpoint_store=store,
+                    thread_id=state["thread_id"],
+                    checkpoint_ns=state["checkpoint_namespace"],
+                )
+                if recovered is not None:
+                    await reconcile_owned_research_jobs(recovered)
+                    state = (
+                        store.recover_latest(
+                            run_id=state["run_id"],
+                            owner=effective_user(request),
+                        )
+                        or state
+                    )
+                return {
+                    "status": str(state.get("status") or "unknown").lower(),
+                    "detached": False,
+                    "durable": True,
+                    "run_id": state.get("run_id"),
+                    "thread_id": state.get("thread_id"),
+                    "checkpoint_ns": state.get("checkpoint_namespace"),
+                    "event_cursor": state.get("event_cursor", 0),
+                    "plan": state.get("current_plan"),
+                    "completed_steps": state.get("completed_steps") or [],
+                    "terminal": state.get("terminal"),
+                }
             raise HTTPException(404, "No active stream for this session")
         return rec
 

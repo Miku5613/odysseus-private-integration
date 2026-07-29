@@ -9,9 +9,10 @@ from src.agent_runtime.intent_complexity import (
 )
 from src.agent_runtime.task_plan import (
     TaskPlan,
-    validate_task_plan_payload,
+    validate_or_repair_task_plan_payload,
 )
 from src.agent_runtime.structured_llm import (
+    build_structured_retry_prompt,
     invoke_structured_model_async,
 )
 
@@ -250,7 +251,7 @@ def parse_task_plan_response(response: Any) -> TaskPlan:
             _response_text(response)
         )
 
-    return validate_task_plan_payload(payload)
+    return validate_or_repair_task_plan_payload(payload)
 
 
 def _validate_multi_graph_plan(
@@ -281,19 +282,31 @@ def plan_task_from_assessment(
         query,
         assessment,
     )
-    response = model.invoke(prompt)
+    current_prompt = prompt
+    for round_index in range(2):
+        response = model.invoke(current_prompt)
 
-    if inspect.isawaitable(response):
-        if inspect.iscoroutine(response):
-            response.close()
-        raise TypeError(
-            "TaskPlannerModel returned an awaitable; use "
-            "plan_task_from_assessment_async"
-        )
+        if inspect.isawaitable(response):
+            if inspect.iscoroutine(response):
+                response.close()
+            raise TypeError(
+                "TaskPlannerModel returned an awaitable; use "
+                "plan_task_from_assessment_async"
+            )
 
-    return _validate_multi_graph_plan(
-        parse_task_plan_response(response)
-    )
+        try:
+            return _validate_multi_graph_plan(
+                parse_task_plan_response(response)
+            )
+        except Exception as exc:
+            if round_index >= 1:
+                raise
+            current_prompt = build_structured_retry_prompt(
+                prompt,
+                exc,
+            )
+
+    raise AssertionError("Task Planner retry loop exited unexpectedly")
 
 
 async def plan_task_from_assessment_async(

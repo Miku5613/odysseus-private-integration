@@ -13,6 +13,8 @@ def _conversation_payload():
         "execution_class": "conversation",
         "goals": [],
         "needs_planning": False,
+        "requested_sources": ["model_knowledge"],
+        "excluded_sources": [],
         "missing_information": [],
         "clarification_needed": False,
         "reasoning_summary": (
@@ -36,6 +38,8 @@ def _single_payload():
             }
         ],
         "needs_planning": False,
+        "requested_sources": ["authorized_workspace_files"],
+        "excluded_sources": [],
         "missing_information": [],
         "clarification_needed": False,
         "reasoning_summary": (
@@ -63,6 +67,11 @@ def _multi_payload():
             }
         ],
         "needs_planning": True,
+        "requested_sources": [
+            "authorized_workspace_files",
+            "personal_memory",
+        ],
+        "excluded_sources": [],
         "missing_information": [],
         "clarification_needed": False,
         "reasoning_summary": (
@@ -253,6 +262,10 @@ def test_prompt_owns_complexity_not_capability_selection():
     assert "Possessive or deictic references to user-owned state" in prompt
     assert "Execution class is determined by prerequisite acquisition" in prompt
     assert "one report or one answer" in prompt
+    assert "does not know a filename" in prompt
+    assert "authorized_workspace_files" in prompt
+    assert "Never substitute public_web" in prompt
+    assert "Do not treat unsupplied repository evidence" in prompt
 
 
 def test_model_call_reuses_canonical_candidate_chain(

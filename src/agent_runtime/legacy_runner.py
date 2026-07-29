@@ -178,6 +178,7 @@ async def stream_langgraph_agent_legacy_sse(
         question,
         workspace=workspace,
         session_id=session_id,
+        owner=owner,
     ):
         if _frame.startswith("data: ") and not _frame.startswith("data: [DONE]"):
             try:
@@ -214,6 +215,7 @@ async def _run_stream_as_legacy_frames(
     *,
     workspace: Optional[str] = None,
     session_id: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Async facade over run_stream(), which currently yields from a thread.
 
@@ -229,6 +231,7 @@ async def _run_stream_as_legacy_frames(
         question,
         workspace=workspace,
         session_id=session_id,
+        owner=owner,
     ):
         frame = to_legacy_sse_frame(event)
         if frame is not None:

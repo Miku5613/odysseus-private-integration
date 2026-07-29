@@ -4,6 +4,8 @@ import inspect
 from collections.abc import Mapping, Sequence
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 
+from src.llm_core import StructuredOutputIncomplete
+
 
 T = TypeVar("T")
 
@@ -21,6 +23,12 @@ StructuredFallbackCaller = Callable[..., Any | Awaitable[Any]]
 
 class StructuredResponseRejected(ValueError):
     """One candidate chain completed without an acceptable structured result."""
+
+
+class StructuredControlFailure(RuntimeError):
+    """A bounded structured control-plane request exhausted its retry."""
+
+    code = "structured_output_failed"
 
 
 def _validated_candidate_acceptor(
@@ -94,6 +102,9 @@ async def invoke_validated_fallback_async(
     current_prompt = prompt
 
     for round_index in range(max_rounds):
+        round_kwargs = dict(kwargs)
+        round_kwargs["structured_output"] = True
+        round_kwargs["reasoning_effort"] = "none"
         try:
             response = llm_caller(
                 list(candidates),
@@ -104,14 +115,17 @@ async def invoke_validated_fallback_async(
                     }
                 ],
                 response_validator=acceptor,
-                **kwargs,
+                **round_kwargs,
             )
             if inspect.isawaitable(response):
                 response = await response
             return response
-        except StructuredResponseRejected as exc:
+        except (StructuredResponseRejected, StructuredOutputIncomplete) as exc:
             if round_index + 1 >= max_rounds:
-                raise
+                raise StructuredControlFailure(
+                    "Structured output remained invalid after one "
+                    "non-thinking retry"
+                ) from exc
             current_prompt = build_structured_retry_prompt(
                 prompt,
                 exc,
@@ -126,6 +140,8 @@ async def invoke_structured_model_async(
     model: StructuredModel,
     prompt: str,
     validator: StructuredValidator[T],
+    *,
+    max_rounds: int = 2,
 ) -> T:
     """Invoke one structured model call through its strongest available seam.
 
@@ -134,6 +150,9 @@ async def invoke_structured_model_async(
     offline models keep the existing ``invoke`` seam and are validated after
     their one response.
     """
+
+    if max_rounds < 1:
+        raise ValueError("max_rounds must be at least 1")
 
     validated_invoke = getattr(
         model,
@@ -146,22 +165,35 @@ async def invoke_structured_model_async(
             prompt,
             validator,
         )
-    else:
-        response = model.invoke(
-            prompt
-        )
+        if inspect.isawaitable(response):
+            response = await response
+        return validator(response)
 
-    if inspect.isawaitable(response):
-        response = await response
+    current_prompt = prompt
+    last_error: Exception | None = None
+    for round_index in range(max_rounds):
+        response = model.invoke(current_prompt)
+        if inspect.isawaitable(response):
+            response = await response
+        try:
+            return validator(response)
+        except Exception as exc:
+            last_error = exc
+            if round_index + 1 >= max_rounds:
+                raise
+            current_prompt = build_structured_retry_prompt(
+                prompt,
+                exc,
+            )
 
-    # Production invoke_validated already used the validator to decide which
-    # fallback candidate won. Validate again to return the typed result and to
-    # preserve identical behavior for simple injected/offline models.
-    return validator(response)
+    raise AssertionError(
+        f"Structured model loop exited without a result: {last_error}"
+    )
 
 
 __all__ = [
     "StructuredFallbackCaller",
+    "StructuredControlFailure",
     "StructuredModel",
     "StructuredResponseRejected",
     "StructuredValidator",

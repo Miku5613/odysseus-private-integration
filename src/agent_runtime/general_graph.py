@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .general_state import GeneralObservation, GeneralState, GeneralTask
 from . import general_tools as tools
+from .tool_policy import has_mutation_intent
 
 
 WRITE_WORDS = {
@@ -87,10 +88,7 @@ def _contains_any(text: str, words: set[str]) -> bool:
 
 
 def _has_write_intent(text: str) -> bool:
-    low = text.lower()
-    if any(p in low for p in WRITE_PHRASES):
-        return True
-    return any(re.search(rf"\b{re.escape(word)}\b", low) for word in WRITE_WORDS)
+    return has_mutation_intent(text)
 
 
 def infer_file_lookup_topic(query: str) -> str:
@@ -1080,11 +1078,41 @@ def _prioritize_inspection_candidates(
     ]
     path_supported.sort(reverse=True)
 
+    # Preserve the strongest global path matches while reserving bounded scan
+    # capacity across source roots. Broad semantic concepts such as runtime,
+    # state, or selection can otherwise let one large frontend subtree consume
+    # the entire scan before an equally authorized backend source root is read.
+    global_limit = max(1, limit // 3)
     selected = [
         item[2]
-        for item in path_supported[:limit]
+        for item in path_supported[:global_limit]
     ]
     selected_set = set(selected)
+
+    by_root: dict[str, list[str]] = {}
+    for _, _, path in path_supported:
+        normalized = path.replace("\\", "/")
+        root = normalized.split("/", 1)[0]
+        if path not in selected_set:
+            by_root.setdefault(root, []).append(path)
+
+    while len(selected) < limit and by_root:
+        progressed = False
+        for root in tuple(sorted(by_root)):
+            candidates = by_root[root]
+            if not candidates:
+                by_root.pop(root, None)
+                continue
+            path = candidates.pop(0)
+            if path in selected_set:
+                continue
+            selected.append(path)
+            selected_set.add(path)
+            progressed = True
+            if len(selected) >= limit:
+                break
+        if not progressed:
+            break
 
     if len(selected) < limit:
         for path in files:
@@ -1103,16 +1131,41 @@ def _execute_broad_source_inspection(
     include_agent_runtime: bool = False,
     discovery_limit: int = 120,
     expand_evidence_context: bool = False,
+    semantic_terms: list[str] | tuple[str, ...] | None = None,
+    use_all_source_roots: bool = False,
 ) -> str | None:
     assert state.task is not None
 
-    terms = _inspection_terms(state.raw_query)
+    terms = list(dict.fromkeys(
+        str(term).strip().lower()
+        for term in (semantic_terms or ())
+        if str(term).strip()
+    ))
+    if not terms:
+        terms = _inspection_terms(state.raw_query)
     if not terms:
         return None
 
-    patterns = _inspection_file_patterns(
-        state.raw_query,
-        state.task.kind,
+    patterns = (
+        [
+            "routes/*.py",
+            "routes/**/*.py",
+            "services/*.py",
+            "services/**/*.py",
+            "src/*.py",
+            "src/**/*.py",
+            "core/*.py",
+            "core/**/*.py",
+            "mcp_servers/*.py",
+            "mcp_servers/**/*.py",
+            "static/js/*.js",
+            "static/js/**/*.js",
+        ]
+        if use_all_source_roots
+        else _inspection_file_patterns(
+            state.raw_query,
+            state.task.kind,
+        )
     )
 
     files = []
@@ -1325,7 +1378,7 @@ def _execute_broad_source_inspection(
                 state.workspace,
                 path,
                 line,
-                radius=36,
+                radius=96,
             )
             _record(
                 state,
@@ -1333,7 +1386,7 @@ def _execute_broad_source_inspection(
                 {
                     "path": path,
                     "line": line,
-                    "radius": 36,
+                    "radius": 96,
                 },
                 around,
                 bool(str(around).strip()),
@@ -1840,6 +1893,8 @@ def finalize(state: GeneralState) -> str:
 def run_code_inspection_recovery(
     query: str,
     workspace: str,
+    *,
+    semantic_terms: list[str] | tuple[str, ...] | None = None,
 ) -> GeneralState:
     """Run bounded source inspection for an already-resolved code capability.
 
@@ -1875,11 +1930,60 @@ def run_code_inspection_recovery(
         bool(workspace_output.strip()),
     )
 
+    named_files = re.findall(
+        r"(?<![A-Za-z0-9_])"
+        r"([A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)*"
+        r"\.(?:txt|md|toml|ya?ml|json|py|js|ts|tsx|jsx))",
+        query,
+        flags=re.IGNORECASE,
+    )
+    if named_files:
+        named_path = named_files[0].replace("\\", "/")
+        file_output = tools.read_file(
+            state.workspace,
+            named_path,
+            offset=0,
+            limit=400,
+        )
+        found = bool(
+            file_output.strip()
+            and not file_output.startswith("NOT_FOUND:")
+        )
+        _record(
+            state,
+            "read_file",
+            {
+                "path": named_path,
+                "offset": 0,
+                "limit": 400,
+            },
+            file_output,
+            found,
+        )
+        if found:
+            state.final_answer = (
+                f"Direct contents of {named_path}:\n\n{file_output}"
+            )
+            state.metrics = {
+                "runtime": "code-inspection-recovery-v1",
+                "model": "deterministic-source-inspection",
+                "elapsed_s": round(time.time() - start, 3),
+                "tool_calls": len(state.observations),
+                "fallback_required": False,
+                "task_kind": state.task.kind,
+                "semantic_capability": "code_inspection",
+                "intent_reclassified": False,
+                "direct_file_inspection": True,
+            }
+            return state
+
     answer = _execute_broad_source_inspection(
         state,
         include_agent_runtime=True,
         discovery_limit=1200,
         expand_evidence_context=True,
+        semantic_terms=semantic_terms,
+        use_all_source_roots=True,
     )
     state.final_answer = (
         answer

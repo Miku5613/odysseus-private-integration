@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+import inspect
+import re
 from typing import Any
 
 from src.agent_runtime.claim_support import (
@@ -71,10 +73,21 @@ def _collect_worker_result(
     claim_support_level: str | None = None
     semantic_support_seen = False
     strong_evidence = False
+    runtime_events: list[dict[str, Any]] = []
 
     for event in events:
         event_count += 1
         event_type = str(event.get("type") or "")
+        if event_type in {
+            "stream_start",
+            "tool_call_start",
+            "tool_call_result",
+            "tool_confirmation_required",
+            "tool_risk_blocked",
+            "stream_error",
+            "stream_done",
+        }:
+            runtime_events.append(dict(event))
 
         if event_type == "evidence_hit":
             evidence.append(dict(event))
@@ -107,6 +120,11 @@ def _collect_worker_result(
     semantic_complete = _semantic_support_complete(
         claim_support_level
     )
+    source_tool_execution_seen = any(
+        event.get("type") == "tool_call_result"
+        and bool(event.get("ok", True))
+        for event in runtime_events
+    )
     base_data = {
         "objective": handoff.objective,
         "events_processed": event_count,
@@ -119,6 +137,8 @@ def _collect_worker_result(
             if semantic_support_seen
             else bool(evidence)
         ),
+        "runtime_events": runtime_events,
+        "source_tool_execution_seen": source_tool_execution_seen,
     }
 
     if error is not None:
@@ -489,24 +509,46 @@ def run_code_worker(
 
     workspace = _normalize_workspace(handoff)
 
-    events = stream_factory(
-        objective,
-        workspace=workspace,
-        session_id=session_id,
-    )
+    stream_kwargs = {
+        "workspace": workspace,
+        "session_id": session_id,
+        "owner": handoff.context.get("owner"),
+    }
+    try:
+        signature = inspect.signature(stream_factory)
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if not accepts_kwargs:
+            stream_kwargs = {
+                key: value
+                for key, value in stream_kwargs.items()
+                if key in signature.parameters
+            }
+    except (TypeError, ValueError):
+        # Some injected callables do not expose a signature. Preserve the older
+        # workspace/session contract in that compatibility case.
+        stream_kwargs.pop("owner", None)
+
+    events = stream_factory(objective, **stream_kwargs)
 
     primary = _collect_worker_result(
         handoff,
         events,
     )
 
-    if primary.status == "failed":
+    if primary.status == "failed" and not workspace:
         return primary
 
     grounded_primary_required = bool(
         primary.status == "completed"
         and workspace
         and finalizer_candidates
+        and not primary.evidence
+        and not bool(
+            primary.data.get("source_tool_execution_seen")
+        )
     )
 
     if primary.status == "completed" and not grounded_primary_required:
@@ -514,9 +556,102 @@ def run_code_worker(
 
     if workspace:
         try:
+            recovery_kwargs = {}
+            try:
+                recovery_signature = inspect.signature(
+                    recovery_factory
+                )
+                if (
+                    "semantic_terms"
+                    in recovery_signature.parameters
+                    or any(
+                        parameter.kind
+                        == inspect.Parameter.VAR_KEYWORD
+                        for parameter
+                        in recovery_signature.parameters.values()
+                    )
+                ):
+                    concepts = tuple(
+                        handoff.context.get(
+                            "retrieval_concepts",
+                            (),
+                        )
+                        or ()
+                    )
+                    objective_terms = {
+                        term.lower()
+                        for term in re.findall(
+                            r"[A-Za-z][A-Za-z0-9]{3,}",
+                            objective,
+                        )
+                    }
+                    ranked_concepts = sorted(
+                        enumerate(concepts),
+                        key=lambda item: (
+                            -len(
+                                objective_terms
+                                & {
+                                    term.lower()
+                                    for term in re.findall(
+                                        r"[A-Za-z][A-Za-z0-9]{3,}",
+                                        str(item[1]),
+                                    )
+                                }
+                            ),
+                            item[0],
+                        ),
+                    )
+                    relevant_concepts = [
+                        concept
+                        for _, concept in ranked_concepts
+                        if objective_terms
+                        & {
+                            term.lower()
+                            for term in re.findall(
+                                r"[A-Za-z][A-Za-z0-9]{3,}",
+                                str(concept),
+                            )
+                        }
+                    ][:4]
+                    semantic_term_counts: dict[str, int] = {}
+                    for concept in (relevant_concepts or concepts):
+                        for term in re.findall(
+                            r"[A-Za-z][A-Za-z0-9]{3,}",
+                            str(concept),
+                        ):
+                            normalized = term.lower()
+                            if (
+                                normalized.endswith("s")
+                                and len(normalized) > 4
+                            ):
+                                normalized = normalized[:-1]
+                            semantic_term_counts[normalized] = (
+                                semantic_term_counts.get(normalized, 0) + 1
+                            )
+                    repeated_terms = [
+                        term
+                        for term, count
+                        in semantic_term_counts.items()
+                        if count > 1
+                    ]
+                    ordered_terms = [
+                        *repeated_terms,
+                        *(
+                            term
+                            for term in semantic_term_counts
+                            if term not in repeated_terms
+                        ),
+                    ]
+                    recovery_kwargs["semantic_terms"] = tuple(
+                        ordered_terms
+                    )
+            except (TypeError, ValueError):
+                pass
+
             recovery_state = recovery_factory(
                 objective,
                 workspace,
+                **recovery_kwargs,
             )
             recovered = _recovery_worker_result(
                 handoff,

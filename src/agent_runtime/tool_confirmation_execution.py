@@ -5,6 +5,7 @@ from typing import Any
 from src.agent_runtime.tool_adapters import TOOL_MAP
 from src.agent_runtime.tool_confirmation_store import (
     consume_approved_confirmation,
+    get_confirmation,
     get_pending_confirmation,
     resolve_pending_confirmation,
 )
@@ -19,12 +20,34 @@ def resolve_and_execute_tool_confirmation(
     call_id: str,
     fingerprint: str,
     approved: bool,
+    owner: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve one exact session-bound caution-level call."""
 
     record = get_pending_confirmation(session_id, call_id)
 
     if record is None:
+        durable = get_confirmation(session_id, call_id)
+        if (
+            durable is not None
+            and durable.fingerprint == str(fingerprint or "").strip()
+            and (owner is None or durable.owner == owner)
+            and (run_id is None or durable.run_id == run_id)
+            and durable.status in {"consumed", "rejected", "cancelled"}
+        ):
+            return {
+                "status": (
+                    "rejected"
+                    if durable.status in {"rejected", "cancelled"}
+                    else "already_processed"
+                ),
+                "executed": False,
+                "idempotent_replay": True,
+                "session_id": durable.session_id,
+                "call_id": durable.call_id,
+                "tool": durable.tool_name,
+            }
         raise KeyError(
             "no pending confirmation for this session/call"
         )
@@ -51,6 +74,8 @@ def resolve_and_execute_tool_confirmation(
             call_id=call_id,
             fingerprint=fingerprint,
             approved=False,
+            owner=owner,
+            run_id=run_id,
         )
 
         return {
@@ -66,6 +91,8 @@ def resolve_and_execute_tool_confirmation(
         call_id=call_id,
         fingerprint=fingerprint,
         approved=True,
+        owner=owner,
+        run_id=run_id,
     )
 
     consumed = consume_approved_confirmation(
@@ -74,6 +101,8 @@ def resolve_and_execute_tool_confirmation(
         fingerprint=fingerprint,
         tool_name=record.tool_name,
         arguments=arguments,
+        owner=owner,
+        run_id=run_id,
     )
 
     tool_obj = TOOL_MAP.get(consumed.tool_name)

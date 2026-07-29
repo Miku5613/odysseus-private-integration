@@ -156,6 +156,18 @@ def get_workspace() -> str:
 
 
 @tool
+def write_file(path: str, content: str) -> str:
+    """Write UTF-8 text inside the active workspace after runtime approval."""
+    try:
+        target = _safe_path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(content), encoding="utf-8")
+        return f"Wrote {len(str(content))} characters to {target}"
+    except Exception as exc:
+        return f"ERROR: {exc}"
+
+
+@tool
 def ls(path: str = ".") -> str:
     """List files and folders under a workspace path."""
     try:
@@ -351,6 +363,7 @@ ask_user = StructuredTool.from_function(
 ALL_TOOLS = [
     ask_user,
     get_workspace,
+    write_file,
     ls,
     glob_files,
     grep,

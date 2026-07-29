@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
@@ -28,6 +29,13 @@ from src.agent_runtime.replan_controller import (
     ReplanContextProvider,
     ReplanControlResult,
     run_task_plan_with_replanning,
+)
+from src.agent_runtime.clarification_store import (
+    register_pending_clarification,
+)
+from src.agent_runtime.run_lifecycle import (
+    LangGraphCancellationScope,
+    LangGraphRunLifecycle,
 )
 from src.agent_runtime.step_action_resolver import (
     CapabilityActionModel,
@@ -195,6 +203,7 @@ def _bounded_value(
         "truncated": True,
         "preview": serialized[:max_chars],
         "original_chars": len(serialized),
+        "full_value_retained_by_runtime_artifact_policy": True,
     }
 
 
@@ -297,7 +306,7 @@ def _synthesis_prompt(
     plan: TaskPlan,
     control: ReplanControlResult,
 ) -> str:
-    return "\n".join([
+    prompt = "\n".join([
         "You are the final-response stage of the Odysseus multi-graph coordinator.",
         "",
         "Answer the user using only the validated plan execution results below.",
@@ -324,6 +333,14 @@ def _synthesis_prompt(
             default=str,
         ),
     ])
+    max_prompt_chars = 120_000
+    if len(prompt) <= max_prompt_chars:
+        return prompt
+    return (
+        prompt[:max_prompt_chars]
+        + "\n\n[Synthesis input was bounded. Full evidence is retained in "
+        "managed runtime artifacts and dependency references.]"
+    )
 
 
 def _clarification_question(
@@ -618,11 +635,44 @@ async def stream_multi_graph_coordinator_sse(
     max_plan_steps: int = MAX_PLAN_STEPS,
     max_step_executions: int = 64,
     max_revisions: int = 3,
+    run_id: str | None = None,
+    thread_id: str | None = None,
+    checkpoint_ns: str | None = None,
+    cancellation_scope: LangGraphCancellationScope | None = None,
+    checkpoint_store: Any = None,
     **kwargs: Any,
 ) -> AsyncGenerator[str, None]:
     """Execute an admitted multi-graph turn through permanent runtime owners."""
 
     started_at = time.time()
+    from src.agent_runtime.runtime_settings import (
+        get_langgraph_runtime_settings,
+        runtime_policy,
+    )
+    runtime_settings = get_langgraph_runtime_settings()
+    configured_policy = runtime_policy(runtime_settings)
+    effort_limits = {
+        "quick": (4, 16, 1),
+        "balanced": (max_plan_steps, max_step_executions, max_revisions),
+        "thorough": (
+            max(max_plan_steps, 12),
+            max(max_step_executions, 96),
+            max(max_revisions, 4),
+        ),
+        "custom": (max_plan_steps, max_step_executions, max_revisions),
+    }
+    max_plan_steps, max_step_executions, max_revisions = effort_limits[
+        runtime_settings["effort_preset"]
+    ]
+    lifecycle = LangGraphRunLifecycle.create(
+        session_id=session_id,
+        run_id=run_id,
+        thread_id=thread_id,
+        checkpoint_ns=checkpoint_ns,
+        owner=owner,
+        cancellation=cancellation_scope,
+        checkpoint_store=checkpoint_store,
+    )
     query = _latest_user_message(messages)
 
     if not query:
@@ -639,6 +689,17 @@ async def stream_multi_graph_coordinator_sse(
         raise ValueError(
             "Multi-graph coordinator requires an admitted multi_graph assessment"
         )
+
+    yield _frame(lifecycle.event({
+        "type": "runtime_run",
+        "data": {
+            "status": lifecycle.status,
+            "admission_result": "multi_graph",
+            "fallback_policy": "plan_step_only",
+            "runtime_settings_version": runtime_settings["version"],
+            "cancellation_scope": lifecycle.identity.run_id,
+        },
+    }))
 
     if assessment.clarification_needed:
         missing = ", ".join(assessment.missing_information)
@@ -670,28 +731,54 @@ async def stream_multi_graph_coordinator_sse(
                 "langgraph_runtime": True,
             },
         })
+        if session_id:
+            register_pending_clarification(
+                session_id=session_id,
+                original_request=query,
+                question=question,
+                run_id=lifecycle.identity.run_id,
+                owner=owner,
+            )
+        terminal = lifecycle.suspend(
+            "AWAITING_CLARIFICATION",
+            stage="admission",
+            reason=question,
+            completed_steps=[],
+            whole_query_legacy_fallback=False,
+        )
+        if terminal is not None:
+            yield _frame(terminal)
         yield "data: [DONE]\n\n"
         return
 
-    candidates = [
-        (endpoint_url, model, headers),
-        *list(fallbacks or ()),
-    ]
+    model_policy = runtime_settings["runtime_model_policy"]
+    configured_runtime_model = str(model_policy.get("model") or "").strip()
+    role_models = dict(model_policy.get("role_models") or {})
+
+    def role_candidates(role: str) -> list[tuple[Any, ...]]:
+        role_model = str(role_models.get(role) or "").strip()
+        selected_model = role_model or configured_runtime_model or model
+        return [
+            (endpoint_url, selected_model, headers),
+            *list(fallbacks or ()),
+        ]
+
+    candidates = role_candidates("general_worker")
 
     planner = planner_model or _RuntimeFallbackModel(
-        candidates,
+        role_candidates("planner"),
         prompt_type=prompt_type,
         max_tokens=2400,
         llm_caller=llm_caller,
     )
     resolver = resolver_model or _RuntimeFallbackModel(
-        candidates,
+        role_candidates("planner"),
         prompt_type=prompt_type,
         max_tokens=1400,
         llm_caller=llm_caller,
     )
     replanner = replanner_model or _RuntimeFallbackModel(
-        candidates,
+        role_candidates("planner"),
         prompt_type=prompt_type,
         max_tokens=2400,
         llm_caller=llm_caller,
@@ -703,26 +790,69 @@ async def stream_multi_graph_coordinator_sse(
         llm_caller=llm_caller,
     )
     synthesizer = final_model or _RuntimeFallbackModel(
-        candidates,
+        role_candidates("final_synthesis"),
         prompt_type=prompt_type,
         max_tokens=max_tokens,
         temperature=temperature,
         llm_caller=llm_caller,
     )
 
-    plan = await plan_task_from_assessment_async(
-        query,
-        assessment,
-        model=planner,
-    )
-
-    if len(plan.steps) > max_plan_steps:
-        raise ValueError(
-            f"Task Planner produced {len(plan.steps)} steps; "
-            f"the safety limit is {max_plan_steps}"
+    response_origin = "selected_model"
+    presenting_model: str | None = model
+    synthesis_error: str | None = None
+    try:
+        plan = await plan_task_from_assessment_async(
+            query,
+            assessment,
+            model=planner,
         )
 
-    yield _frame({
+        if len(plan.steps) > max_plan_steps:
+            raise ValueError(
+                f"Task Planner produced {len(plan.steps)} steps; "
+                f"the safety limit is {max_plan_steps}"
+            )
+    except asyncio.CancelledError:
+        lifecycle.cancellation.cancel()
+        raise
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        error_text = (
+            "I could not construct a valid bounded plan for this multi-step "
+            "request. No work was started and no Legacy fallback was used. "
+            f"{reason}"
+        )
+        yield _frame({"delta": error_text})
+        terminal = lifecycle.finish(
+            "FAILED",
+            stage="planner",
+            reason=reason,
+            retryable=True,
+            completed_steps=[],
+            whole_query_legacy_fallback=False,
+        )
+        if terminal is not None:
+            yield _frame(terminal)
+        yield _frame({
+            "type": "metrics",
+            "data": {
+                "runtime": RUNTIME_VERSION,
+                "model": model,
+                "requested_model": model,
+                "elapsed_s": round(time.time() - started_at, 3),
+                "multi_graph": True,
+                "plan_status": "planner_failed",
+                "terminal_status": "FAILED",
+                "whole_query_legacy_fallback": False,
+                "tool_calls": 0,
+                "tool_events": [],
+                "langgraph_runtime": True,
+            },
+        })
+        yield "data: [DONE]\n\n"
+        return
+
+    yield _frame(lifecycle.event({
         "type": "plan_update",
         "data": {
             "runtime": RUNTIME_VERSION,
@@ -730,7 +860,7 @@ async def stream_multi_graph_coordinator_sse(
             "status": "planned",
             **_plan_payload(plan),
         },
-    })
+    }))
 
     dependency_reasoning_descriptor = (
         dependency_reasoning_capability()
@@ -743,7 +873,7 @@ async def stream_multi_graph_coordinator_sse(
 
     base_runners = (
         builtin_worker_runners(
-            code_finalizer_candidates=candidates,
+            code_finalizer_candidates=role_candidates("code_worker"),
             code_finalizer_prompt_type=prompt_type,
         )
         if worker_runners is None
@@ -791,10 +921,11 @@ async def stream_multi_graph_coordinator_sse(
     )
 
     executors = dict(surface_executors or {})
-    executors.setdefault(
-        LEGACY_SURFACE_ID,
-        legacy_executor,
-    )
+    if configured_policy["allow_legacy_step_fallback"]:
+        executors.setdefault(
+            LEGACY_SURFACE_ID,
+            legacy_executor,
+        )
 
     execution_surfaces = (
         build_execution_surface_catalog(
@@ -805,18 +936,70 @@ async def stream_multi_graph_coordinator_sse(
         else tuple(surfaces)
     )
 
-    context = StepExecutionContext(
-        supervisor_state=_base_supervisor_state(
-            query,
-            owner=owner,
-            workspace=workspace,
-            active_document=active_document,
-            active_email=active_email,
-            disabled_tools=disabled_tools,
-            tool_policy=tool_policy,
-            root_id=root_id or kwargs.get("root_id"),
-            uploaded_files=uploaded_files or (),
+    supervisor_state = _base_supervisor_state(
+        query,
+        owner=owner,
+        workspace=(
+            workspace
+            if runtime_settings["context_source_policy"]["workspace"]
+            else None
         ),
+        active_document=active_document,
+        active_email=active_email,
+        disabled_tools=disabled_tools,
+        tool_policy=tool_policy,
+        root_id=root_id or kwargs.get("root_id"),
+        uploaded_files=uploaded_files or (),
+    )
+    if not configured_policy["allow_legacy_step_fallback"]:
+        execution_surfaces = tuple(
+            surface
+            for surface in execution_surfaces
+            if surface.id != LEGACY_SURFACE_ID
+        )
+    if not configured_policy["allow_research_start"]:
+        execution_surfaces = tuple(
+            surface
+            for surface in execution_surfaces
+            if surface.capability_name != "deep_research"
+        )
+    if not (
+        configured_policy["allow_mutation"]
+        or configured_policy["require_mutation_approval"]
+    ):
+        execution_surfaces = tuple(
+            surface
+            for surface in execution_surfaces
+            if not surface.supports_mutation
+        )
+    retrieval_concepts = [
+        concept
+        for goal in assessment.goals
+        for concept in goal.retrieval_concepts
+    ]
+    supervisor_state["worker_context"].update({
+        "run_id": lifecycle.identity.run_id,
+        "owner": owner,
+        "thread_id": lifecycle.identity.thread_id,
+        "checkpoint_ns": lifecycle.identity.checkpoint_ns,
+        "attempt_store": checkpoint_store,
+        "cancellation_scope": lifecycle.cancellation,
+        "research_job_observer": lifecycle.own_research_job,
+        "langgraph_runtime_settings": runtime_settings,
+        "langgraph_runtime_policy": configured_policy,
+        "source_contract": {
+            "requested_sources": list(assessment.requested_sources),
+            "excluded_sources": list(assessment.excluded_sources),
+            "retrieval_concepts": retrieval_concepts,
+        },
+        # Code-worker recovery consumes this at the handoff-context level.
+        # Keep the same model-derived concepts outside the source-contract
+        # envelope so multi-step objectives do not lose the user's semantic
+        # retrieval targets when the planner paraphrases a step.
+        "retrieval_concepts": retrieval_concepts,
+    })
+    context = StepExecutionContext(
+        supervisor_state=supervisor_state,
         session_id=session_id,
     )
 
@@ -834,12 +1017,26 @@ async def stream_multi_graph_coordinator_sse(
             max_step_executions=max_step_executions,
             max_revisions=max_revisions,
         )
+    except asyncio.CancelledError:
+        lifecycle.cancellation.cancel()
+        raise
     except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
         error_text = (
             "The multi-step plan started but its execution coordinator failed: "
-            f"{type(exc).__name__}: {exc}"
+            f"{reason}"
         )
         yield _frame({"delta": error_text})
+        terminal = lifecycle.finish(
+            "FAILED",
+            stage="coordinator",
+            reason=reason,
+            retryable=True,
+            completed_steps=[],
+            whole_query_legacy_fallback=False,
+        )
+        if terminal is not None:
+            yield _frame(terminal)
         yield _frame({
             "type": "metrics",
             "data": {
@@ -860,6 +1057,43 @@ async def stream_multi_graph_coordinator_sse(
     frames, tool_events = _tool_frames_and_events(
         control
     )
+    completed_step_ids = [
+        step_id
+        for step_id in control.orchestration.execution_order
+        if next(
+            item
+            for item in control.orchestration.state.step_states
+            if item.step_id == step_id
+        ).status == "completed"
+    ]
+    dependency_results = {
+        step_id: {
+            "status": result.status,
+            "summary": result.summary,
+            "data": result.data,
+            "evidence": list(result.evidence),
+            "error": result.error,
+        }
+        for step_id, result in zip(
+            control.orchestration.execution_order,
+            control.orchestration.worker_results,
+        )
+    }
+    artifact_references = [
+        artifact
+        for result in control.orchestration.worker_results
+        for artifact in (
+            result.data.get("artifacts")
+            if isinstance(result.data.get("artifacts"), list)
+            else []
+        )
+        if isinstance(artifact, dict)
+    ]
+    yield _frame(lifecycle.update_runtime_state(
+        completed_steps=completed_step_ids,
+        dependency_results=dependency_results,
+        artifact_references=artifact_references,
+    ))
     for frame in frames:
         yield frame
 
@@ -889,19 +1123,40 @@ async def stream_multi_graph_coordinator_sse(
         )
         response = await _await_if_needed(response)
         final_text = str(response or "").strip()
-    except Exception:
-        final_text = fallback_text
-
-    if not final_text:
-        final_text = fallback_text
+        if not final_text:
+            raise ValueError("final synthesis returned an empty response")
+    except Exception as exc:
+        synthesis_error = f"{type(exc).__name__}: {exc}"
+        response_origin = "controlled_runtime_failure"
+        presenting_model = None
+        final_text = (
+            "The LangGraph plan reached final synthesis, but the selected model "
+            "did not produce a usable answer. The runtime stopped without "
+            "presenting deterministic worker output as a model response."
+        )
 
     yield _frame({"delta": final_text})
+    fallback_used = any(
+        bool(result.data.get("fallback_used"))
+        for result in control.orchestration.worker_results
+    )
     yield _frame({
         "type": "metrics",
         "data": {
             "runtime": RUNTIME_VERSION,
-            "model": model,
+            "model": presenting_model,
             "requested_model": model,
+            "selected_model": model,
+            "presenting_model": presenting_model,
+            "worker": list(control.orchestration.execution_order),
+            "fallback_used": fallback_used,
+            "fallback_scope": (
+                "legacy_plan_step_only"
+                if fallback_used
+                else "none"
+            ),
+            "response_origin": response_origin,
+            "synthesis_error": synthesis_error,
             "elapsed_s": round(time.time() - started_at, 3),
             "multi_graph": True,
             "plan_status": control.orchestration.status,
@@ -919,6 +1174,48 @@ async def stream_multi_graph_coordinator_sse(
             "langgraph_runtime": True,
         },
     })
+    terminal_status = (
+        "COMPLETED"
+        if control.orchestration.status == "completed"
+        else (
+            "AWAITING_CLARIFICATION"
+            if question is not None
+            else "FAILED"
+        )
+    )
+    if question is not None and session_id:
+        register_pending_clarification(
+            session_id=session_id,
+            original_request=query,
+            question=question,
+            run_id=lifecycle.identity.run_id,
+            owner=owner,
+        )
+    terminal = (
+        lifecycle.suspend(
+            terminal_status,
+            stage="coordinator",
+            reason=(
+                control.orchestration.message
+                or control.stopped_reason
+            ),
+            completed_steps=completed_step_ids,
+            whole_query_legacy_fallback=False,
+        )
+        if terminal_status == "AWAITING_CLARIFICATION"
+        else lifecycle.finish(
+            terminal_status,
+            stage="coordinator",
+            reason=(
+                control.orchestration.message
+                or control.stopped_reason
+            ),
+            completed_steps=completed_step_ids,
+            whole_query_legacy_fallback=False,
+        )
+    )
+    if terminal is not None:
+        yield _frame(terminal)
     yield "data: [DONE]\n\n"
 
 

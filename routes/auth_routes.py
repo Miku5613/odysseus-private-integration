@@ -34,6 +34,10 @@ from src.integrations import (
     INTEGRATION_PRESETS,
     migrate_from_settings,
 )
+from src.agent_runtime.runtime_settings import (
+    LangGraphRuntimeSettingsError,
+    validate_langgraph_runtime_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -660,6 +664,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             if key not in body:
                 continue
             val = body[key]
+            if key == "langgraph_runtime":
+                try:
+                    val = validate_langgraph_runtime_settings(val)
+                except LangGraphRuntimeSettingsError as exc:
+                    raise HTTPException(400, str(exc)) from exc
             if key in _INT_RANGES:
                 lo, hi = _INT_RANGES[key]
                 try:

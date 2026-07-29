@@ -16,6 +16,41 @@ ExecutionClass = Literal[
     "single_graph",
     "multi_graph",
 ]
+SideEffectIntent = Literal[
+    "none",
+    "mutation_requested",
+    "approval_gated_mutation",
+]
+
+RequestedSource = Literal[
+    "model_knowledge",
+    "current_conversation",
+    "authorized_workspace_files",
+    "indexed_workspace_knowledge",
+    "personal_memory",
+    "completed_research",
+    "public_web",
+    "attached_document",
+    "clarification_required",
+]
+
+REQUESTED_SOURCES = {
+    "model_knowledge",
+    "current_conversation",
+    "authorized_workspace_files",
+    "indexed_workspace_knowledge",
+    "personal_memory",
+    "completed_research",
+    "public_web",
+    "attached_document",
+    "clarification_required",
+}
+
+EXTERNAL_SOURCES = REQUESTED_SOURCES - {
+    "model_knowledge",
+    "current_conversation",
+    "clarification_required",
+}
 
 
 @dataclass(frozen=True)
@@ -33,6 +68,7 @@ class IntentGoal:
     work_domains: tuple[str, ...] = ()
     requires_external_state: bool = False
     requires_mutation: bool = False
+    retrieval_concepts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,9 +92,17 @@ class IntentComplexityAssessment:
     missing_information: tuple[str, ...]
     clarification_needed: bool
     reasoning_summary: str
+    requested_sources: tuple[RequestedSource, ...] = ()
+    excluded_sources: tuple[RequestedSource, ...] = ()
+    side_effect_intent: SideEffectIntent = "none"
 
 
-def build_intent_complexity_prompt(raw_query: str) -> str:
+def build_intent_complexity_prompt(
+    raw_query: str,
+    *,
+    active_workspace: bool = False,
+    workspace_label: str | None = None,
+) -> str:
     """Build the backend-independent semantic pre-planning prompt."""
 
     schema = {
@@ -74,12 +118,26 @@ def build_intent_complexity_prompt(raw_query: str) -> str:
                 ],
                 "requires_external_state": False,
                 "requires_mutation": False,
+                "retrieval_concepts": [
+                    "short source-native search concept"
+                ],
             }
         ],
         "needs_planning": False,
+        "side_effect_intent": (
+            "none | mutation_requested | approval_gated_mutation"
+        ),
+        "requested_sources": ["model_knowledge"],
+        "excluded_sources": [],
         "missing_information": [],
         "clarification_needed": False,
         "reasoning_summary": "Brief complexity rationale.",
+    }
+    execution_context = {
+        "active_workspace_available": bool(active_workspace),
+        "active_workspace_label": (
+            str(workspace_label or "").strip() or None
+        ),
     }
 
     instructions = [
@@ -92,6 +150,47 @@ def build_intent_complexity_prompt(raw_query: str) -> str:
         "Do not choose capabilities, workers, tools, actions, or backends.",
         "Do not create detailed PlanSteps.",
         "Do not grant permissions.",
+        "Identify the information sources the user is asking the runtime to "
+        "use, and sources the user explicitly excludes.",
+        "",
+        "HIGHEST-PRIORITY ACTIVE WORKSPACE RULE:",
+        "- If ACTIVE_EXECUTION_CONTEXT says an authorized workspace is "
+        "available, a request for the actual source path, current "
+        "implementation location, or the real logic of project behavior "
+        "requires authorized_workspace_files and external-state execution.",
+        "- The user does not need to literally say 'read files', name a file, "
+        "or repeat the workspace name. Locating the actual current "
+        "implementation necessarily requires workspace discovery.",
+        "- Never claim model training knowledge is sufficient to identify the "
+        "actual current source path or current repository implementation.",
+        "- An active project normally contains multiple configuration "
+        "surfaces. A request to inspect 'the configuration' or judge 'its "
+        "defaults' without identifying which subsystem/configuration is not a "
+        "bounded target. It MUST request clarification rather than choosing "
+        "files on the user's behalf.",
+        "- Tracing how a named current project setting, control, request, "
+        "event, or policy moves between UI and backend layers is current "
+        "implementation analysis, not a generic architecture explanation. It "
+        "requires authorized_workspace_files even when the user does not ask "
+        "for a particular filename or source path.",
+        "- If the user explicitly excludes a source, excluded_sources MUST "
+        "record it even when that source would not otherwise have been "
+        "selected.",
+        "- A requested side effect remains an execution goal when the user "
+        "requires approval before it occurs. The approval gate is part of the "
+        "execution lifecycle; it does not turn the request into conversation. "
+        "Set requires_mutation=true and select the target state source, while "
+        "leaving permission enforcement to deterministic runtime policy.",
+        "- side_effect_intent MUST be approval_gated_mutation when the user "
+        "requests a side effect but requires approval before execution. Use "
+        "mutation_requested for a requested side effect without that explicit "
+        "gate, otherwise none.",
+        "- Workspace availability does not resolve an underspecified target. "
+        "If a request refers only to an unspecified configuration, document, "
+        "setting, or other target whose identity materially changes the "
+        "inspection, ask a focused clarification first. Use "
+        "clarification_required as the sole requested source until the target "
+        "is identified.",
         "",
         "Classify the minimum execution structure actually required:",
         "",
@@ -100,6 +199,8 @@ def build_intent_complexity_prompt(raw_query: str) -> str:
         "required.",
         "- The caller can reuse Odysseus's existing normal-chat behavior.",
         "- needs_planning must be false.",
+        "- requested_sources may only be model_knowledge, "
+        "current_conversation, or attached_document.",
         "",
         "single_graph:",
         "- One bounded execution unit can satisfy the request.",
@@ -110,6 +211,16 @@ def build_intent_complexity_prompt(raw_query: str) -> str:
         "public sources inside one bounded research workflow do NOT by "
         "themselves create multiple graphs. Semantic topic count is not the "
         "same thing as provenance/state-system count.",
+        "- Frontend and backend files inside the same authorized workspace are "
+        "one filesystem provenance domain and can be inspected by one Code "
+        "specialist. Multiple files or application layers do not by themselves "
+        "require multi_graph.",
+        "- A single cross-layer trace through one feature remains one Code "
+        "goal. In contrast, a request to independently inspect several "
+        "distinct protection subsystems and then compare their behavior has "
+        "separate acquisition goals plus a synthesis dependency; represent "
+        "those goals explicitly and classify multi_graph when one bounded "
+        "specialist run cannot reliably establish every subsystem.",
         "- Recovering one prior, saved, generated, or persisted artifact that "
         "is not actually supplied in the current request/context is execution, "
         "not conversation; if that retrieval plus transformation is one bounded "
@@ -137,6 +248,46 @@ def build_intent_complexity_prompt(raw_query: str) -> str:
         "- Do not invent exact PlanSteps here. A separate Task Planner owns "
         "decomposition, dependencies, and the final graph count.",
         "",
+        "Source-selection contract:",
+        "- model_knowledge means the answer can come from the model's general "
+        "knowledge without retrieving user or external state.",
+        "- current_conversation means the required evidence is already present "
+        "in the supplied conversation.",
+        "- authorized_workspace_files means direct read-only inspection of the "
+        "active authorized filesystem workspace. It does not require an index.",
+        "- indexed_workspace_knowledge means retrieval from a workspace index.",
+        "- personal_memory means retrieval from the user's persisted memory.",
+        "- completed_research means retrieval of a previously completed "
+        "research artifact.",
+        "- public_web means current public internet retrieval.",
+        "- attached_document means the supplied attachment is the evidence.",
+        "- clarification_required means the requested source or target cannot "
+        "be determined safely enough to proceed.",
+        "- A question asking where or how behavior, policy, configuration, a "
+        "subsystem, or an implementation exists in the active project requires "
+        "authorized_workspace_files even when the user does not know a "
+        "filename. Do not treat unsupplied repository evidence as model "
+        "knowledge or current conversation.",
+        "- When an authorized active workspace is available, resolve an "
+        "otherwise unqualified request about where project behavior is checked "
+        "or implemented against that workspace. Do not reinterpret it as a "
+        "generic operating-system or programming-language explanation.",
+        "- ACTIVE WORKSPACE RESOLUTION INVARIANT: model training knowledge "
+        "cannot establish where current workspace behavior actually lives. "
+        "When the active workspace is available, an unqualified request to "
+        "locate a check, rule, behavior, configuration, or implementation and "
+        "summarize its actual logic must use authorized_workspace_files. This "
+        "remains true when a generic conceptual answer would be possible. Use "
+        "model_knowledge alone only when the user asks for a general concept "
+        "or explicitly says not to access the workspace.",
+        "- A read-only restriction limits side effects; it does not turn "
+        "required source retrieval into model knowledge.",
+        "- Select current_conversation only when the evidence needed to answer "
+        "is actually included in the supplied query/context. A mere topic "
+        "reference is not evidence.",
+        "- Record explicit source restrictions in excluded_sources. Never "
+        "substitute public_web for an unavailable workspace source.",
+        "",
         "Backend-independence invariant:",
         "- Classify the work the user's objective requires, not only the work "
         "currently represented by native LangGraph capabilities.",
@@ -154,8 +305,9 @@ def build_intent_complexity_prompt(raw_query: str) -> str:
         "3. Agent availability does not imply execution is required.",
         "4. General knowledge, conceptual explanation, opinion, and reasoning "
         "answerable from the conversational model's own knowledge are "
-        "conversation. Descriptive work_domains do not by themselves imply "
-        "execution.",
+        "conversation only when the requested truth does not depend on the "
+        "current workspace or another retrieved source. Descriptive "
+        "work_domains do not by themselves imply execution.",
         "5. Access to user-specific persisted state, external/current state, "
         "or mutation counts as execution even when phrased conversationally.",
         "6. A reference to prior/session/history content is NOT automatically "
@@ -190,12 +342,26 @@ def build_intent_complexity_prompt(raw_query: str) -> str:
         "12. work_domains are short semantic labels only. They are NOT "
         "capability names, they do not themselves imply execution, and they "
         "must not depend on the current registry.",
-        "13. Set clarification_needed=true only when ambiguity materially "
+        "13. For a goal that retrieves evidence, provide retrieval_concepts: "
+        "four to eight concise source-search tokens, common API terms, or "
+        "plausible existing symbols that a specialist can search for. Prefer "
+        "simple domain terms and established code vocabulary over invented "
+        "compound identifiers. Include useful semantic alternatives. Exclude "
+        "generic request verbs, prose glue, and actions the user explicitly "
+        "prohibited. These are semantic search inputs, not routing rules.",
+        "14. Set clarification_needed=true only when ambiguity materially "
         "prevents safe or correct progress.",
-        "14. Return only one JSON object matching the required schema.",
+        "15. requested_sources and excluded_sources must contain only source "
+        "names from the source-selection contract and must not overlap.",
+        "16. If clarification_needed is true, include clarification_required "
+        "in requested_sources. Otherwise do not include it.",
+        "17. Return only one JSON object matching the required schema.",
         "",
         "USER_QUERY:",
         raw_query,
+        "",
+        "ACTIVE_EXECUTION_CONTEXT:",
+        json.dumps(execution_context, ensure_ascii=False, indent=2),
         "",
         "REQUIRED_OUTPUT_SCHEMA:",
         json.dumps(
@@ -377,6 +543,13 @@ def _parse_goals(
             ),
             field=f"goals[{index}].requires_mutation",
         )
+        retrieval_concepts = _dedupe_strings(
+            raw_goal.get(
+                "retrieval_concepts",
+                [],
+            ),
+            field=f"goals[{index}].retrieval_concepts",
+        )
 
         goals.append(
             IntentGoal(
@@ -387,6 +560,7 @@ def _parse_goals(
                     requires_external_state
                 ),
                 requires_mutation=requires_mutation,
+                retrieval_concepts=retrieval_concepts,
             )
         )
 
@@ -454,8 +628,77 @@ def validate_intent_complexity_payload(
     goals = _parse_goals(
         payload.get("goals", [])
     )
+    side_effect_intent = payload.get(
+        "side_effect_intent",
+        "none",
+    )
+    if side_effect_intent not in {
+        "none",
+        "mutation_requested",
+        "approval_gated_mutation",
+    }:
+        raise ValueError(
+            "side_effect_intent must be none, mutation_requested, "
+            "or approval_gated_mutation"
+        )
+
+    requested_sources = _dedupe_strings(
+        payload.get("requested_sources"),
+        field="requested_sources",
+    )
+    excluded_sources = _dedupe_strings(
+        payload.get("excluded_sources"),
+        field="excluded_sources",
+    )
+
+    unknown_sources = (
+        set(requested_sources) | set(excluded_sources)
+    ) - REQUESTED_SOURCES
+    if unknown_sources:
+        raise ValueError(
+            "Unknown requested or excluded source: "
+            + ", ".join(sorted(unknown_sources))
+        )
+
+    overlap = set(requested_sources) & set(excluded_sources)
+    if overlap:
+        raise ValueError(
+            "requested_sources and excluded_sources must not overlap"
+        )
+
+    if clarification_needed:
+        requested_sources = ("clarification_required",)
+        execution_class = "single_graph"
+        needs_planning = False
+    elif side_effect_intent != "none":
+        execution_class = "single_graph"
+        needs_planning = False
+        goals = tuple(
+            IntentGoal(
+                id=goal.id,
+                objective=goal.objective,
+                work_domains=goal.work_domains,
+                requires_external_state=goal.requires_external_state,
+                requires_mutation=True,
+                retrieval_concepts=goal.retrieval_concepts,
+            )
+            for goal in goals
+        )
+    elif "clarification_required" in requested_sources:
+        raise ValueError(
+            "clarification_required source requires clarification_needed"
+        )
 
     if execution_class == "conversation":
+        invalid_conversation_sources = set(requested_sources) - {
+            "model_knowledge",
+            "current_conversation",
+            "attached_document",
+        }
+        if invalid_conversation_sources:
+            raise ValueError(
+                "conversation cannot require retrieved or mutable sources"
+            )
         for goal in goals:
             if (
                 goal.requires_external_state
@@ -489,6 +732,11 @@ def validate_intent_complexity_payload(
                 "multi-graph Task Planner"
             )
 
+        if not requested_sources:
+            raise ValueError(
+                "single_graph assessment requires a requested source"
+            )
+
     else:
         if not goals:
             raise ValueError(
@@ -500,6 +748,26 @@ def validate_intent_complexity_payload(
                 "multi_graph assessment must require planning"
             )
 
+        if not requested_sources:
+            raise ValueError(
+                "multi_graph assessment requires requested sources"
+            )
+
+        external_requested = (
+            set(requested_sources) & EXTERNAL_SOURCES
+        )
+        if len(goals) < 2 and len(external_requested) < 2:
+            raise ValueError(
+                "multi_graph requires multiple semantic goals or "
+                "multiple independently acquired source domains"
+            )
+
+    if set(requested_sources) & EXTERNAL_SOURCES:
+        if not any(goal.requires_external_state for goal in goals):
+            raise ValueError(
+                "retrieved sources require an external-state goal"
+            )
+
     return IntentComplexityAssessment(
         execution_class=execution_class,
         goals=goals,
@@ -507,6 +775,9 @@ def validate_intent_complexity_payload(
         missing_information=missing_information,
         clarification_needed=clarification_needed,
         reasoning_summary=reasoning_summary.strip(),
+        requested_sources=requested_sources,
+        excluded_sources=excluded_sources,
+        side_effect_intent=side_effect_intent,
     )
 
 
@@ -526,6 +797,8 @@ async def assess_intent_complexity(
     llm_candidates: Sequence[Any],
     prompt_type: str | None = None,
     max_tokens: int = 1400,
+    active_workspace: bool = False,
+    workspace_label: str | None = None,
 ) -> IntentComplexityAssessment:
     """Run one model-backed semantic complexity assessment.
 
@@ -544,7 +817,9 @@ async def assess_intent_complexity(
         )
 
     prompt = build_intent_complexity_prompt(
-        raw_query.strip()
+        raw_query.strip(),
+        active_workspace=active_workspace,
+        workspace_label=workspace_label,
     )
 
     token_limit = (
@@ -587,6 +862,9 @@ async def assess_intent_complexity(
 
 __all__ = [
     "ExecutionClass",
+    "SideEffectIntent",
+    "RequestedSource",
+    "REQUESTED_SOURCES",
     "IntentGoal",
     "IntentComplexityAssessment",
     "build_intent_complexity_prompt",

@@ -1106,6 +1106,16 @@ def save_assistant_response(
     if full_response is None:
         full_response = assistant_content or ""
     md = dict(last_metrics) if last_metrics else {}
+    successful_langgraph_final = bool(
+        md.get("langgraph_runtime")
+        and md.get("response_origin") == "selected_model"
+    )
+    if successful_langgraph_final:
+        # Runtime evidence remains authoritative in the durable run/event store.
+        # A successful conversation row contains only the final answer and
+        # attribution, never replayable progress/tool bubbles.
+        md.pop("tool_events", None)
+        md.pop("round_texts", None)
     def _model_value(value) -> str:
         if value is None:
             return ""
@@ -1119,16 +1129,26 @@ def save_assistant_response(
         or md.get("selected_model")
         or getattr(sess, "model", "")
     )
+    presenting_is_explicit = "presenting_model" in md
     resolved_actual_model = _model_value(
-        actual_model
-        or md.get("model")
-        or md.get("actual_model")
-        or resolved_requested_model
+        (
+            md.get("presenting_model")
+            if presenting_is_explicit
+            else (
+                actual_model
+                or md.get("model")
+                or md.get("actual_model")
+                or resolved_requested_model
+            )
+        )
     )
     if resolved_requested_model:
         md["requested_model"] = resolved_requested_model
     if resolved_actual_model:
         md["model"] = resolved_actual_model
+    elif presenting_is_explicit:
+        md.pop("model", None)
+        md.pop("actual_model", None)
     if character_name:
         md["character_name"] = character_name
     if web_sources:

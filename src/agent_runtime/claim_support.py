@@ -28,6 +28,16 @@ def _tokens(text: str | None) -> set[str]:
     }
 
 
+def _contains_term(text: str, term: str) -> bool:
+    normalized = _norm(term)
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])",
+            text,
+        )
+    )
+
+
 def _code_like_terms(query: str | None) -> set[str]:
     raw = str(query or "")
     terms = set()
@@ -46,25 +56,25 @@ def _required_semantic_groups(query: str | None) -> list[tuple[str, set[str]]]:
     q = _norm(query)
     groups: list[tuple[str, set[str]]] = []
 
-    if any(word in q for word in ["frontend", "front end", "client", "ui", "browser"]):
+    if any(_contains_term(q, word) for word in ["frontend", "front end", "client", "ui", "browser"]):
         groups.append(("frontend/client handling", {"tool output", "tool_output", "json type", "event", "handler", "if", "elif"}))
 
     if "tool calls" in q or "tool call" in q:
         groups.append(("tool-call concept", {"tool call", "tool_calls", "tool block", "tool_blocks", "toolmessage", "tool message"}))
 
-    if any(word in q for word in ["save", "saves", "saving", "saved"]):
+    if any(_contains_term(q, word) for word in ["save", "saves", "saving", "saved"]):
         groups.append(("save action", {"save", "saves", "saving", "saved", "save_assistant_response", "commit", "message_saved"}))
 
     if "assistant response" in q or "assistant" in q and "response" in q:
         groups.append(("assistant response", {"assistant", "response", "full_response", "reply"}))
 
-    if any(word in q for word in ["execute", "executes", "executing", "execution", "run", "runs", "running"]):
+    if any(_contains_term(q, word) for word in ["execute", "executes", "executing", "execution", "run", "runs", "running"]):
         groups.append(("execution action", {"execute", "executes", "executing", "execution", "invoke", "invoke(", ".invoke(", "await", "tool_obj", "execute_tool_block", "call"}))
 
-    if any(word in q for word in ["handle", "handles", "handling", "handler"]):
+    if any(_contains_term(q, word) for word in ["handle", "handles", "handling", "handler"]):
         groups.append(("handling branch", {"handle", "handler", "if", "elif", "case", "switch", "event", "type", "json type"}))
 
-    if any(word in q for word in ["stream", "streaming", "streamed"]):
+    if any(_contains_term(q, word) for word in ["stream", "streaming", "streamed"]):
         groups.append(("streaming context", {"stream", "streaming", "chunk", "delta", "[done]", "data: [done]", "yield", "stream_with_save"}))
 
     return groups
@@ -74,7 +84,7 @@ def _path_obligation_ok(path: str | None, query: str | None) -> tuple[bool, str]
     p = str(path or "").lower().replace("/", "\\")
     q = _norm(query)
 
-    if any(word in q for word in ["frontend", "front end", "client", "ui", "browser"]):
+    if any(_contains_term(q, word) for word in ["frontend", "front end", "client", "ui", "browser"]):
         if p.startswith("static\\") or "\\static\\" in p or p.endswith((".js", ".jsx", ".ts", ".tsx", ".css", ".html")):
             return True, "frontend/client source path matches query"
         return False, "query asks for frontend/client handling but best evidence is not in frontend/client source"
@@ -110,7 +120,17 @@ def _is_probably_prompt_or_header(obs: dict[str, Any]) -> bool:
 
     # Header/import/docstring windows should not be enough for action claims.
     if int(obs.get("line_start") or 0) <= 50:
-        if any(tok in text for tok in ["import ", "from ", "chat routes", "streamingresponse"]):
+        has_implementation = bool(
+            re.search(r"\b(?:async\s+def|def)\s+[a-z_][a-z0-9_]*\s*\(", content)
+            and (
+                "await " in content
+                or re.search(r"\breturn\b", content)
+            )
+        )
+        if (
+            not has_implementation
+            and any(tok in text for tok in ["import ", "from ", "chat routes", "streamingresponse"])
+        ):
             return True
 
     # Large system prompt/rules blocks are usually instructions about behavior,
@@ -127,7 +147,7 @@ def _context_has_concrete_call_site(obs: dict[str, Any], query: str | None) -> b
     lowered = text.lower()
     q = _norm(query)
 
-    if any(word in q for word in ["execute", "executes", "executing", "execution", "run", "runs", "running"]):
+    if any(_contains_term(q, word) for word in ["execute", "executes", "executing", "execution", "run", "runs", "running"]):
         patterns = [
             r'return\s+await\s+execute_tool_block\s*\(',
             r'await\s+execute_tool_block\s*\(',
@@ -137,13 +157,13 @@ def _context_has_concrete_call_site(obs: dict[str, Any], query: str | None) -> b
         ]
         return any(re.search(p, text) for p in patterns)
 
-    if any(word in q for word in ["save", "saves", "saving", "saved"]):
+    if any(_contains_term(q, word) for word in ["save", "saves", "saving", "saved"]):
         return bool(
             re.search(r'save_assistant_response\s*\(', text)
             and any(term in lowered for term in ["full_response", "message_saved", "data: [done]", "[done]", "stream"])
         )
 
-    if any(word in q for word in ["handle", "handles", "handling", "handler"]):
+    if any(_contains_term(q, word) for word in ["handle", "handles", "handling", "handler"]):
         return bool(
             "tool_output" in lowered
             and any(term in lowered for term in ["json.type", "else if", "elif", "if (", "handler", "event"])
