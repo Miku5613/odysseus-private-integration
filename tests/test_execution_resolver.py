@@ -721,3 +721,71 @@ def test_resolver_prompt_exposes_dependency_state_semantics():
 
     assert '"uses_dependency_state": true' in prompt
     assert "uses_dependency_state is authoritative semantic metadata" in prompt
+
+
+def test_workspace_source_contract_locks_external_step_to_code_inspection():
+    step = PlanStep(
+        id="goal_1",
+        objective="Inspect the implementation in the active workspace.",
+        work_domains=("codebase_inspection",),
+        requires_external_state=True,
+        requires_mutation=False,
+    )
+    code = ExecutionSurfaceDescriptor(
+        id="langgraph:code_inspection",
+        kind="langgraph",
+        description="Inspect repository source.",
+        capability_name="code_inspection",
+    )
+    web = ExecutionSurfaceDescriptor(
+        id="langgraph:web_search",
+        kind="langgraph",
+        description="Search the public web.",
+        capability_name="web_search",
+    )
+
+    model = _Model({})
+    result = resolve_plan_step(
+        step,
+        model=model,
+        surfaces=(web, code),
+        source_contract={
+            "requested_sources": ["authorized_workspace_files"],
+            "excluded_sources": ["public_web"],
+        },
+    )
+
+    assert result.status == "resolved"
+    assert result.selected_surface == code
+    assert result.compatible_surface_ids == ("langgraph:code_inspection",)
+    assert model.prompts == []
+
+
+def test_workspace_source_contract_fails_closed_when_owner_is_unavailable():
+    step = PlanStep(
+        id="goal_1",
+        objective="Inspect the implementation in the active workspace.",
+        requires_external_state=True,
+        requires_mutation=False,
+    )
+    web = ExecutionSurfaceDescriptor(
+        id="langgraph:web_search",
+        kind="langgraph",
+        description="Search the public web.",
+        capability_name="web_search",
+    )
+
+    model = _Model({})
+    result = resolve_plan_step(
+        step,
+        model=model,
+        surfaces=(web,),
+        source_contract={
+            "requested_sources": ["authorized_workspace_files"],
+        },
+    )
+
+    assert result.status == "unsupported"
+    assert result.selected_surface is None
+    assert "langgraph:code_inspection is unavailable" in result.reasoning_summary
+    assert model.prompts == []

@@ -265,6 +265,14 @@ async def run_task_plan(
     worker_results: list[WorkerResult] = []
     execution_order: list[str] = []
     executions = 0
+    source_contract = dict(
+        (
+            context.supervisor_state.get("worker_context", {})
+            if context is not None
+            else {}
+        ).get("source_contract", {})
+        or {}
+    )
 
     while True:
         if _all_completed(current):
@@ -345,6 +353,7 @@ async def run_task_plan(
                 step,
                 model=resolver_model,
                 surfaces=surfaces,
+                source_contract=source_contract,
             )
 
             if resolution.status == "clarification":

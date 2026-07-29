@@ -62,6 +62,8 @@ def test_conversation_class_reuses_normal_chat(
         llm_candidates,
         prompt_type=None,
         max_tokens=1400,
+        active_workspace=False,
+        workspace_label=None,
     ):
         captured["query"] = query
         captured["candidates"] = llm_candidates

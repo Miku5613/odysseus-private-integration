@@ -46,6 +46,7 @@ def _assessment():
                 objective="Gather evidence.",
                 work_domains=("knowledge",),
                 requires_external_state=True,
+                retrieval_concepts=("runtime admission", "workspace source"),
             ),
             IntentGoal(
                 id="combine",
@@ -188,6 +189,10 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     assert metrics["execution_order"] == ["gather", "combine"]
     assert metrics["multi_graph"] is True
     assert captured["dependency_outputs"]["gather"]["summary"] == "Evidence A"
+    assert captured["retrieval_concepts"] == [
+        "runtime admission",
+        "workspace source",
+    ]
 
 
 def test_planner_exhaustion_emits_one_controlled_terminal_result():

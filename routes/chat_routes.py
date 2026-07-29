@@ -226,6 +226,35 @@ async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
         yield "data: [DONE]\n\n"
 
 
+async def _stream_agent_admission_failure(*args, **kwargs):
+    """Return a typed, fail-closed control-plane failure over the SSE seam."""
+
+    detail = str(
+        kwargs.get("admission_failure")
+        or "Structured Agent admission could not be validated."
+    )
+    yield "data: " + json.dumps({
+        "delta": (
+            "I could not validate the Agent execution plan safely after one "
+            "bounded structured retry. No workspace, web, or Legacy work was "
+            "started."
+        ),
+    }) + "\n\n"
+    yield "data: " + json.dumps({
+        "type": "metrics",
+        "data": {
+            "runtime": "agent-admission-v1",
+            "response_origin": "controlled_runtime_failure",
+            "failure_type": "structured_output_failed",
+            "failure_detail": detail[:800],
+            "fallback_used": False,
+            "fallback_scope": "none",
+            "langgraph_runtime": True,
+        },
+    }) + "\n\n"
+    yield "data: [DONE]\n\n"
+
+
 async def _stream_multi_graph_fail_closed(*args, **kwargs):
     """Run the admitted coordinator without widening into whole-query Legacy."""
     import inspect
@@ -1150,6 +1179,7 @@ def setup_chat_routes(
         _agent_langgraph_architecture_enabled = _agent_langgraph_architecture_enabled_for_request(chat_mode)
         # AGENT_LANGGRAPH_REQUEST_BYPASS_V1_END
         _agent_admission = None
+        _agent_admission_failure = None
         # P3_C5_EXPLICIT_AGENT_ADMISSION_PREP_END
 
 
@@ -1346,6 +1376,7 @@ def setup_chat_routes(
         # P3_C5_EXPLICIT_AGENT_ADMISSION_START
         # Only the user's explicit Agent selection is semantically admitted.
         # Upstream Chat-to-Agent promotion remains owned by action_intents.
+        _agent_admission_task = None
         if user_requested_agent:
             try:
                 from src.endpoint_resolver import resolve_chat_fallback_candidates
@@ -1361,40 +1392,34 @@ def setup_chat_routes(
                     )
                     _admission_fallback_candidates = []
 
-                _agent_admission = await assess_explicit_agent_admission(
-                    message,
-                    langgraph_enabled=_agent_langgraph_architecture_enabled,
-                    llm_candidates=[
-                        (sess.endpoint_url, sess.model, sess.headers),
-                        *_admission_fallback_candidates,
-                    ],
-                    prompt_type=preset_id,
-                )
-                logger.info(
-                    "[agent-admission] explicit Agent path=%s execution_class=%s",
-                    _agent_admission.path,
-                    (
-                        _agent_admission.assessment.execution_class
-                        if _agent_admission.assessment is not None
-                        else None
-                    ),
-                )
-
-                if _agent_admission.use_normal_chat:
-                    chat_mode = "chat"
-                    logger.info(
-                        "[agent-admission] explicit Agent request is "
-                        "conversation-class; reusing normal chat stream"
+                _agent_admission_task = asyncio.create_task(
+                    assess_explicit_agent_admission(
+                        message,
+                        langgraph_enabled=_agent_langgraph_architecture_enabled,
+                        llm_candidates=[
+                            (sess.endpoint_url, sess.model, sess.headers),
+                            *_admission_fallback_candidates,
+                        ],
+                        prompt_type=preset_id,
+                        active_workspace=bool(workspace),
+                        workspace_label=(
+                            os.path.basename(
+                                str(workspace).rstrip("\\/")
+                            )
+                            if workspace
+                            else None
+                        ),
                     )
+                )
             except Exception as _agent_admission_exc:
-                # Never silently demote an explicit Agent request when semantic
-                # admission fails. Preserve existing Agent compatibility/fallback.
                 logger.exception(
-                    "[agent-admission] semantic admission failed; "
-                    "preserving explicit Agent mode: %s",
+                    "[agent-admission] could not start semantic admission: %s",
                     _agent_admission_exc,
                 )
-                _agent_admission = None
+                _agent_admission_failure = (
+                    f"{type(_agent_admission_exc).__name__}: "
+                    f"{_agent_admission_exc}"
+                )
         # P3_C5_EXPLICIT_AGENT_ADMISSION_END
 
         # Check for research_pending BEFORE mode persist overwrites it
@@ -1697,12 +1722,57 @@ def setup_chat_routes(
         # Persist session mode after policy/privilege gates so blocked research
         # turns remain ordinary chat/agent streams and saved messages.
         _effective_mode = 'research' if effective_do_research else (chat_mode or 'chat')
-        if _effective_mode in ('agent', 'research', 'chat'):
-            set_session_mode(session, _effective_mode)
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
-            # _effective_mode is read-only here; closure captures it from
-            # the outer scope. (Was `nonlocal` but never reassigned.)
+            nonlocal chat_mode
+            nonlocal _agent_admission
+            nonlocal _agent_admission_failure
+            nonlocal _effective_mode
+
+            if user_requested_agent:
+                yield "data: " + json.dumps({
+                    "type": "agent_prep",
+                    "data": {
+                        "runtime": "agent-admission-v1",
+                        "label": (
+                            "Understanding the request and selecting permitted sources"
+                        ),
+                    },
+                }) + "\n\n"
+
+            if _agent_admission_task is not None:
+                try:
+                    _agent_admission = await _agent_admission_task
+                    logger.info(
+                        "[agent-admission] explicit Agent path=%s execution_class=%s",
+                        _agent_admission.path,
+                        (
+                            _agent_admission.assessment.execution_class
+                            if _agent_admission.assessment is not None
+                            else None
+                        ),
+                    )
+                    if _agent_admission.use_normal_chat:
+                        chat_mode = "chat"
+                except Exception as _agent_admission_exc:
+                    logger.exception(
+                        "[agent-admission] semantic admission failed closed: %s",
+                        _agent_admission_exc,
+                    )
+                    _agent_admission = None
+                    _agent_admission_failure = (
+                        f"{type(_agent_admission_exc).__name__}: "
+                        f"{_agent_admission_exc}"
+                    )
+
+            _effective_mode = (
+                'research'
+                if effective_do_research
+                else (chat_mode or 'chat')
+            )
+            if _effective_mode in ('agent', 'research', 'chat'):
+                set_session_mode(session, _effective_mode)
+
             research_sources = None
             web_sources = ctx.web_sources
 
@@ -2560,7 +2630,12 @@ def setup_chat_routes(
                         _runtime_tool_events = [_runtime_trace_tool_event(message, _runtime_decision)]
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_END
 
-                    if _explicit_agent_multi_graph:
+                    if _agent_admission_failure:
+                        _selected_agent_stream = partial(
+                            _stream_agent_admission_failure,
+                            admission_failure=_agent_admission_failure,
+                        )
+                    elif _explicit_agent_multi_graph:
                         _selected_agent_stream = partial(
                             _stream_multi_graph_fail_closed,
                             admission_assessment=(
@@ -2572,8 +2647,13 @@ def setup_chat_routes(
                             "dependency-aware coordinator"
                         )
                     elif _langgraph_first_ambiguous_agent:
-                        _selected_agent_stream = (
-                            _stream_langgraph_first_with_legacy_fallback
+                        _selected_agent_stream = partial(
+                            _stream_langgraph_first_with_legacy_fallback,
+                            admission_assessment=(
+                                _agent_admission.assessment
+                                if _agent_admission is not None
+                                else None
+                            ),
                         )
                         logger.info(
                             "[langgraph-first] ambiguous Agent request entering native LangGraph runtime"

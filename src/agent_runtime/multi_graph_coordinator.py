@@ -972,6 +972,11 @@ async def stream_multi_graph_coordinator_sse(
             for surface in execution_surfaces
             if not surface.supports_mutation
         )
+    retrieval_concepts = [
+        concept
+        for goal in assessment.goals
+        for concept in goal.retrieval_concepts
+    ]
     supervisor_state["worker_context"].update({
         "run_id": lifecycle.identity.run_id,
         "owner": owner,
@@ -982,6 +987,16 @@ async def stream_multi_graph_coordinator_sse(
         "research_job_observer": lifecycle.own_research_job,
         "langgraph_runtime_settings": runtime_settings,
         "langgraph_runtime_policy": configured_policy,
+        "source_contract": {
+            "requested_sources": list(assessment.requested_sources),
+            "excluded_sources": list(assessment.excluded_sources),
+            "retrieval_concepts": retrieval_concepts,
+        },
+        # Code-worker recovery consumes this at the handoff-context level.
+        # Keep the same model-derived concepts outside the source-contract
+        # envelope so multi-step objectives do not lose the user's semantic
+        # retrieval targets when the planner paraphrases a step.
+        "retrieval_concepts": retrieval_concepts,
     })
     context = StepExecutionContext(
         supervisor_state=supervisor_state,

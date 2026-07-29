@@ -23,6 +23,8 @@ def build_supervisor_prompt(
     raw_query: str,
     *,
     extra_capabilities: Iterable[CapabilityDescriptor] = (),
+    requested_sources: Iterable[str] = (),
+    excluded_sources: Iterable[str] = (),
 ) -> str:
     """Build a semantic capability-selection prompt.
 
@@ -53,6 +55,10 @@ def build_supervisor_prompt(
         "clarification_needed": False,
         "reasoning_summary": "Brief orchestration rationale.",
     }
+    source_contract = {
+        "requested_sources": list(requested_sources),
+        "excluded_sources": list(excluded_sources),
+    }
 
     instructions = [
         "You are the general agent Supervisor for Odysseus.",
@@ -73,10 +79,21 @@ def build_supervisor_prompt(
         "7. Set clarification_needed=true only when unresolved ambiguity materially prevents safe or correct progress.",
         "8. Do not invent capability names that are not present in the registry.",
         "9. Do not execute tools or answer the user request itself.",
-        "10. Return only one JSON object matching the required schema.",
+        "10. Treat SOURCE_CONTRACT as authoritative semantic admission state. "
+        "Select capabilities that acquire its requested sources and never "
+        "select a capability for an excluded source.",
+        "11. authorized_workspace_files maps to direct code_inspection, while "
+        "indexed_workspace_knowledge maps to knowledge_search. An unavailable "
+        "index must not prevent direct authorized workspace inspection.",
+        "12. public_web maps to web_search only when public_web is requested "
+        "and not excluded. Never widen a workspace request to web search.",
+        "13. Return only one JSON object matching the required schema.",
         "",
         "AVAILABLE_CAPABILITIES:",
         json.dumps(capability_context, ensure_ascii=False, indent=2),
+        "",
+        "SOURCE_CONTRACT:",
+        json.dumps(source_contract, ensure_ascii=False, indent=2),
         "",
         "USER_QUERY:",
         raw_query,
