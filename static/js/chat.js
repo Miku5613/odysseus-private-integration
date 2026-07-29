@@ -3004,8 +3004,10 @@ import runtimeControl from './runtimeControl.js';
                 metrics = json.data;
                 multiGraphTracker.handleMetrics(json.data, { background: _isBg });
                 if (!_isBg && holder && metrics) {
-                  holder._requestedModel = metrics.requested_model || holder._requestedModel || modelName;
-                  holder._actualModel = metrics.model || holder._actualModel || holder._requestedModel;
+                  holder._requestedModel = metrics.selected_model || metrics.requested_model || holder._requestedModel || modelName;
+                  holder._actualModel = Object.prototype.hasOwnProperty.call(metrics, 'presenting_model')
+                    ? metrics.presenting_model
+                    : (metrics.model || holder._actualModel || holder._requestedModel);
                 }
                 if (_isBg) {
                   var bgM = _backgroundStreams.get(streamSessionId);
@@ -3603,6 +3605,24 @@ import runtimeControl from './runtimeControl.js';
       _removeThinkingSpinner();
       // Stop any thread pulse animations
       document.querySelectorAll('.agent-thread.streaming').forEach(t => t.classList.remove('streaming'));
+      if (
+        metrics?.langgraph_runtime
+        && metrics?.response_origin === 'selected_model'
+      ) {
+        const chatBox = document.getElementById('chat-history');
+        if (chatBox) {
+          let latestUser = null;
+          for (const child of chatBox.children) {
+            if (child.classList?.contains('msg-user')) latestUser = child;
+          }
+          let cursor = latestUser ? latestUser.nextElementSibling : chatBox.firstElementChild;
+          while (cursor) {
+            const next = cursor.nextElementSibling;
+            if (cursor.classList?.contains('agent-thread')) cursor.remove();
+            cursor = next;
+          }
+        }
+      }
       // --- Final render (skip if stream was ever backgrounded or currently in background) ---
       // Remove streaming class from all round bubbles
       holder.classList.remove('streaming');
@@ -3611,16 +3631,24 @@ import runtimeControl from './runtimeControl.js';
       const _isBgFinal = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
       if (!_isBgFinal) {
         finalMeta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
-        const _finalActualModel = metrics?.model || holder._actualModel || finalMeta?.model;
-        const _finalRequestedModel = metrics?.requested_model || holder._requestedModel || finalMeta?.model || _finalActualModel;
+        const _runtimeFailure = metrics?.response_origin === 'controlled_runtime_failure';
+        const _finalActualModel = _runtimeFailure
+          ? null
+          : (metrics?.presenting_model || metrics?.model || holder._actualModel || finalMeta?.model);
+        const _finalRequestedModel = metrics?.selected_model || metrics?.requested_model || holder._requestedModel || finalMeta?.model || _finalActualModel;
         // Prepend character name if set
         var _charNameFinal = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
         const roleEl = holder.querySelector('.role');
         if (roleEl) {
-          _setRoleModelLabel(roleEl, _finalRequestedModel, _finalActualModel, {
-            suffix: holder._roleSuffix,
-            characterName: _charNameFinal || holder._characterName,
-          });
+          if (_runtimeFailure) {
+            roleEl.textContent = 'LangGraph runtime failure';
+            roleEl.title = 'Controlled runtime failure; no presenting model';
+          } else {
+            _setRoleModelLabel(roleEl, _finalRequestedModel, _finalActualModel, {
+              suffix: holder._roleSuffix,
+              characterName: _charNameFinal || holder._characterName,
+            });
+          }
         }
         holder.dataset.raw = accumulated;
 

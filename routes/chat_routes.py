@@ -2656,7 +2656,12 @@ def setup_chat_routes(
                                     last_metrics = data.get("data", {})
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = last_metrics.get("requested_model") or _requested_model
-                                    last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
+                                    if "presenting_model" in last_metrics:
+                                        last_metrics["model"] = last_metrics.get(
+                                            "presenting_model"
+                                        )
+                                    else:
+                                        last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
                                     if ctx.context_trimmed:
                                         last_metrics["context_trimmed"] = True
                                         last_metrics["context_messages_before_trim"] = ctx.context_messages_before_trim

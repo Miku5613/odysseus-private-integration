@@ -797,6 +797,9 @@ async def stream_multi_graph_coordinator_sse(
         llm_caller=llm_caller,
     )
 
+    response_origin = "selected_model"
+    presenting_model: str | None = model
+    synthesis_error: str | None = None
     try:
         plan = await plan_task_from_assessment_async(
             query,
@@ -1105,19 +1108,40 @@ async def stream_multi_graph_coordinator_sse(
         )
         response = await _await_if_needed(response)
         final_text = str(response or "").strip()
-    except Exception:
-        final_text = fallback_text
-
-    if not final_text:
-        final_text = fallback_text
+        if not final_text:
+            raise ValueError("final synthesis returned an empty response")
+    except Exception as exc:
+        synthesis_error = f"{type(exc).__name__}: {exc}"
+        response_origin = "controlled_runtime_failure"
+        presenting_model = None
+        final_text = (
+            "The LangGraph plan reached final synthesis, but the selected model "
+            "did not produce a usable answer. The runtime stopped without "
+            "presenting deterministic worker output as a model response."
+        )
 
     yield _frame({"delta": final_text})
+    fallback_used = any(
+        bool(result.data.get("fallback_used"))
+        for result in control.orchestration.worker_results
+    )
     yield _frame({
         "type": "metrics",
         "data": {
             "runtime": RUNTIME_VERSION,
-            "model": model,
+            "model": presenting_model,
             "requested_model": model,
+            "selected_model": model,
+            "presenting_model": presenting_model,
+            "worker": list(control.orchestration.execution_order),
+            "fallback_used": fallback_used,
+            "fallback_scope": (
+                "legacy_plan_step_only"
+                if fallback_used
+                else "none"
+            ),
+            "response_origin": response_origin,
+            "synthesis_error": synthesis_error,
             "elapsed_s": round(time.time() - started_at, 3),
             "multi_graph": True,
             "plan_status": control.orchestration.status,

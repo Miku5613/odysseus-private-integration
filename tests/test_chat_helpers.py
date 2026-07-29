@@ -360,6 +360,56 @@ def test_save_assistant_response_preserves_actual_and_requested_model():
     assert sess.history[-1].metadata["model"] == "actual-model"
 
 
+def test_successful_langgraph_save_excludes_progress_from_transcript():
+    sess = _FakeSession("qwen3:8b")
+
+    save_assistant_response(
+        sess,
+        session_manager=None,
+        session_id="s1",
+        full_response="One final synthesized answer.",
+        last_metrics={
+            "langgraph_runtime": True,
+            "response_origin": "selected_model",
+            "selected_model": "qwen3:8b",
+            "presenting_model": "qwen3:8b",
+            "tool_events": [
+                {"tool": "RUNTIME_DECISION", "output": "internal progress"},
+            ],
+            "round_texts": ["", "One final synthesized answer."],
+        },
+    )
+
+    message = sess.history[-1]
+    assert message.content == "One final synthesized answer."
+    assert message.metadata["model"] == "qwen3:8b"
+    assert "tool_events" not in message.metadata
+    assert "round_texts" not in message.metadata
+
+
+def test_controlled_runtime_failure_has_no_presenting_model():
+    sess = _FakeSession("qwen3:8b")
+
+    save_assistant_response(
+        sess,
+        session_manager=None,
+        session_id="s1",
+        full_response="The runtime failed safely.",
+        last_metrics={
+            "langgraph_runtime": True,
+            "response_origin": "controlled_runtime_failure",
+            "selected_model": "qwen3:8b",
+            "presenting_model": None,
+            "model": None,
+        },
+    )
+
+    metadata = sess.history[-1].metadata
+    assert metadata["selected_model"] == "qwen3:8b"
+    assert metadata["presenting_model"] is None
+    assert "model" not in metadata
+
+
 def test_save_assistant_response_incognito_does_not_mutate_session_history():
     sess = _FakeSession("selected-model")
 
