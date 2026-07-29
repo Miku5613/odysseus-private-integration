@@ -327,14 +327,14 @@ function createRuntimePanel() {
           <span>Runtime Selector</span>
         </h2>
         <p class="settings-help-text">
-          Choose the default runtime used by newly created chats.
+          Choose which Agent runtime newly created chats use by default. Existing chats keep their assigned runtime.
         </p>
       </div>
 
       <label class="runtime-select-row" for="set-runtime-default">
         <span class="runtime-select-copy">
           <strong>Runtime</strong>
-          <small>Select Legacy, LangGraph, or OpenCode.</small>
+           <small>Choose which Agent runtime newly created chats use by default. Existing chats keep their assigned runtime.</small>
         </span>
         <select id="set-runtime-default" class="runtime-select-control"
                 aria-label="Default runtime">
@@ -368,7 +368,7 @@ function createRuntimePanel() {
           <label class="runtime-lifecycle-option">
             <span class="runtime-choice-copy">
               <strong>Reuse conversation per chat</strong>
-              <small>Continue the same native OpenCode conversation for each Odysseus chat.</small>
+               <small>Keeps one native OpenCode conversation attached to each Odysseus chat so its context continues between messages.</small>
             </span>
             <span class="runtime-toggle">
               <input id="set-opencode-reuse-session" type="checkbox" checked
@@ -382,7 +382,7 @@ function createRuntimePanel() {
           <label class="runtime-lifecycle-option">
             <span class="runtime-choice-copy">
               <strong>Reset after switching runtime</strong>
-              <small>Start a fresh OpenCode conversation after leaving and returning.</small>
+               <small>Starts a fresh OpenCode conversation after leaving OpenCode and returning.</small>
             </span>
             <span class="runtime-toggle">
               <input id="set-opencode-reset-on-switch" type="checkbox"
@@ -398,7 +398,7 @@ function createRuntimePanel() {
       <section class="runtime-session-manager-card">
         <div class="runtime-session-manager-copy">
           <h3>OpenCode Session Manager</h3>
-          <p>Open the full native console for sessions, lifecycle, permissions, MCP, plugins, extensions, and commands.</p>
+          <p>Opens the native OpenCode console for sessions, permissions, MCP, plugins, extensions, and commands.</p>
         </div>
         <button id="runtime-session-manager-settings-btn" type="button"
                 class="runtime-session-manager-launch">
@@ -474,7 +474,8 @@ function createRuntimePanel() {
           <h3 id="langgraph-models-title">Models</h3>
           <p>Only enabled text-capable models are offered.</p>
         </div>
-        ${langGraphSelect('runtime-langgraph-model', 'One model for all roles', [
+        <p class="runtime-policy-note">Use one model for all roles uses the same compatible model for planning, workers, and final synthesis.</p>
+        ${langGraphSelect('runtime-langgraph-model', 'Runtime model', [
           ['', 'Use active chat model'],
         ])}
         <details class="runtime-advanced">
@@ -500,10 +501,10 @@ function createRuntimePanel() {
             ['never_auto_resume', 'Never auto-resume'],
             ['auto_resume_safe_read_only', 'Auto-resume safe read-only'],
           ])}
-          ${langGraphSelect('runtime-langgraph-retention', 'Completed retention', [
+          ${langGraphSelect('runtime-langgraph-retention', 'Completed run retention', [
             ['7', '7 days'], ['30', '30 days'], ['90', '90 days'],
           ])}
-          ${langGraphSelect('runtime-langgraph-reuse', 'Completed research', [
+          ${langGraphSelect('runtime-langgraph-reuse', 'Reuse completed reports', [
             ['prefer_existing', 'Prefer existing'], ['ask', 'Ask'],
             ['always_new_when_requested', 'New when requested'],
           ])}
@@ -516,9 +517,9 @@ function createRuntimePanel() {
           <p>Only authorized sources are eligible; these switches never bypass access checks.</p>
         </div>
         <div class="runtime-context-grid">
-          ${langGraphContextToggle('conversation', 'Current conversation')}
+          ${langGraphContextToggle('conversation', 'Conversation context')}
           ${langGraphContextToggle('workspace', 'Selected workspace')}
-          ${langGraphContextToggle('indexed_knowledge', 'Indexed knowledge')}
+          ${langGraphContextToggle('indexed_knowledge', 'Ideaverse knowledge')}
           ${langGraphContextToggle('completed_research', 'Completed research')}
           ${langGraphContextToggle('personal_memory', 'Personal memory')}
         </div>
@@ -545,10 +546,39 @@ function createRuntimePanel() {
   return panel;
 }
 
+const LANGGRAPH_SETTING_HELP = {
+  'runtime-langgraph-execution': 'Controls whether LangGraph answers directly, uses one specialist, or creates a coordinated multi-step plan.',
+  'runtime-langgraph-effort': 'Controls how much planning, validation, and tool work LangGraph may use before producing the final answer.',
+  'runtime-langgraph-parallel': 'Controls how many independent workers may run simultaneously; lower values use fewer local resources.',
+  'runtime-langgraph-permission': 'Controls what LangGraph may do without approval. Guided asks before mutations; Active still obeys tool safety and exact approvals.',
+  'runtime-langgraph-fallback': 'Controls whether one failed PlanStep may use Legacy fallback. It never falls back the entire query.',
+  'runtime-langgraph-research-approval': 'Controls whether LangGraph must ask before starting a longer Deep Research job.',
+  'runtime-langgraph-model': 'Selects the model used for all LangGraph roles when single-model mode is active.',
+  'runtime-langgraph-role-planner': 'Selects the model responsible for planning, worker selection, and replanning.',
+  'runtime-langgraph-role-general_worker': 'Selects the model used for general reasoning and direct read-only tasks.',
+  'runtime-langgraph-role-knowledge_worker': 'Selects the model used for workspace, indexed knowledge, and Ideaverse retrieval.',
+  'runtime-langgraph-role-code_worker': 'Selects the model used for source inspection, coding, and technical tasks.',
+  'runtime-langgraph-role-research_worker': 'Selects the model used to coordinate and interpret research work.',
+  'runtime-langgraph-role-final_synthesis': 'Selects the model that writes the final user-facing answer from verified worker results.',
+  'runtime-langgraph-interrupted': 'Controls what Odysseus offers when a LangGraph run was interrupted by a backend restart.',
+  'runtime-langgraph-retention': 'Controls how long completed LangGraph run history remains before safe cleanup.',
+  'runtime-langgraph-reuse': 'Uses a suitable completed report before starting a duplicate research job.',
+  'runtime-langgraph-planner-visibility': 'Shows live plan and step progress while LangGraph is working.',
+};
+
+const LANGGRAPH_CONTEXT_HELP = {
+  conversation: 'Allows LangGraph to use messages from the current chat.',
+  workspace: 'Allows LangGraph to read from the currently selected authorized workspace.',
+  indexed_knowledge: 'Allows LangGraph to retrieve authorized indexed Ideaverse knowledge.',
+  completed_research: 'Allows LangGraph to use previously completed research reports.',
+  personal_memory: 'Allows LangGraph to use saved personal memory when available and authorized.',
+};
+
 function langGraphSelect(id, label, options, attributes = '') {
+  const help = LANGGRAPH_SETTING_HELP[id] || '';
   return `<label class="runtime-select-row" for="${id}">
-    <span class="runtime-select-copy"><strong>${label}</strong></span>
-    <select id="${id}" class="runtime-select-control" ${attributes}>
+    <span class="runtime-select-copy"><strong>${label}</strong><small id="${id}-help">${help}</small></span>
+    <select id="${id}" class="runtime-select-control" aria-describedby="${id}-help" ${attributes}>
       ${options.map(([value, text]) =>
         `<option value="${value}">${text}</option>`).join('')}
     </select>
@@ -557,10 +587,10 @@ function langGraphSelect(id, label, options, attributes = '') {
 
 function langGraphContextToggle(key, label) {
   return `<label class="runtime-lifecycle-option">
-    <span class="runtime-choice-copy"><strong>${label}</strong></span>
+    <span class="runtime-choice-copy"><strong>${label}</strong><small id="runtime-langgraph-context-${key}-help">${LANGGRAPH_CONTEXT_HELP[key] || ''}</small></span>
     <span class="runtime-toggle">
       <input type="checkbox" role="switch" data-langgraph-context="${key}"
-             aria-label="${label}">
+             aria-label="${label}" aria-describedby="runtime-langgraph-context-${key}-help">
       <span class="runtime-toggle-track" aria-hidden="true">
         <span class="runtime-toggle-thumb"></span>
       </span>
