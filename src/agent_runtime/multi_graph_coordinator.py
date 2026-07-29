@@ -30,6 +30,9 @@ from src.agent_runtime.replan_controller import (
     ReplanControlResult,
     run_task_plan_with_replanning,
 )
+from src.agent_runtime.clarification_store import (
+    register_pending_clarification,
+)
 from src.agent_runtime.run_lifecycle import (
     LangGraphCancellationScope,
     LangGraphRunLifecycle,
@@ -699,8 +702,16 @@ async def stream_multi_graph_coordinator_sse(
                 "langgraph_runtime": True,
             },
         })
-        terminal = lifecycle.finish(
-            "AWAITING_APPROVAL",
+        if session_id:
+            register_pending_clarification(
+                session_id=session_id,
+                original_request=query,
+                question=question,
+                run_id=lifecycle.identity.run_id,
+                owner=owner,
+            )
+        terminal = lifecycle.suspend(
+            "AWAITING_CLARIFICATION",
             stage="admission",
             reason=question,
             completed_steps=[],
@@ -896,8 +907,10 @@ async def stream_multi_graph_coordinator_sse(
     )
     supervisor_state["worker_context"].update({
         "run_id": lifecycle.identity.run_id,
+        "owner": owner,
         "thread_id": lifecycle.identity.thread_id,
         "checkpoint_ns": lifecycle.identity.checkpoint_ns,
+        "attempt_store": checkpoint_store,
         "cancellation_scope": lifecycle.cancellation,
         "research_job_observer": lifecycle.own_research_job,
     })
@@ -1060,20 +1073,41 @@ async def stream_multi_graph_coordinator_sse(
         "COMPLETED"
         if control.orchestration.status == "completed"
         else (
-            "AWAITING_APPROVAL"
+            "AWAITING_CLARIFICATION"
             if question is not None
             else "FAILED"
         )
     )
-    terminal = lifecycle.finish(
-        terminal_status,
-        stage="coordinator",
-        reason=(
-            control.orchestration.message
-            or control.stopped_reason
-        ),
-        completed_steps=completed_step_ids,
-        whole_query_legacy_fallback=False,
+    if question is not None and session_id:
+        register_pending_clarification(
+            session_id=session_id,
+            original_request=query,
+            question=question,
+            run_id=lifecycle.identity.run_id,
+            owner=owner,
+        )
+    terminal = (
+        lifecycle.suspend(
+            terminal_status,
+            stage="coordinator",
+            reason=(
+                control.orchestration.message
+                or control.stopped_reason
+            ),
+            completed_steps=completed_step_ids,
+            whole_query_legacy_fallback=False,
+        )
+        if terminal_status == "AWAITING_CLARIFICATION"
+        else lifecycle.finish(
+            terminal_status,
+            stage="coordinator",
+            reason=(
+                control.orchestration.message
+                or control.stopped_reason
+            ),
+            completed_steps=completed_step_ids,
+            whole_query_legacy_fallback=False,
+        )
     )
     if terminal is not None:
         yield _frame(terminal)

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
-import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
+
+from src.agent_runtime.durable_checkpoint import get_default_checkpoint_store
 
 
 CONFIRMATION_CONTRACT_VERSION = "tool_confirmation_v1"
@@ -24,14 +24,74 @@ class PendingToolConfirmation:
     reason: str
     status: str
     created_at: float
+    record_id: str = ""
+    run_id: str = ""
+    owner: str = "anonymous"
+    step_id: str | None = None
+    attempt_id: str | None = None
+    expires_at: float = 0.0
+    consumed_at: float | None = None
+    response: Any = None
+    side_effect_risk: str = "guided"
 
     def arguments(self) -> dict[str, Any]:
         value = json.loads(self.arguments_json)
         return value if isinstance(value, dict) else {}
 
 
-_LOCK = threading.RLock()
-_PENDING: dict[tuple[str, str], PendingToolConfirmation] = {}
+def _record_to_confirmation(record: dict[str, Any]) -> PendingToolConfirmation:
+    metadata = dict(record.get("tool_metadata") or {})
+    return PendingToolConfirmation(
+        version=CONFIRMATION_CONTRACT_VERSION,
+        session_id=str(record["session_id"]),
+        call_id=str(metadata.get("call_id") or ""),
+        tool_name=str(record.get("capability") or ""),
+        arguments_json=canonicalize_tool_arguments(
+            metadata.get("arguments")
+            if isinstance(metadata.get("arguments"), dict)
+            else {}
+        ),
+        fingerprint=str(record["fingerprint"]),
+        reason=str(metadata.get("reason") or ""),
+        status=str(record["state"]),
+        created_at=float(record["created_at"]),
+        record_id=str(record["record_id"]),
+        run_id=str(record["run_id"]),
+        owner=str(record["owner"]),
+        step_id=record.get("step_id"),
+        attempt_id=record.get("attempt_id"),
+        expires_at=float(record["expires_at"]),
+        consumed_at=record.get("consumed_at"),
+        response=record.get("response"),
+        side_effect_risk=str(record.get("side_effect_risk") or "guided"),
+    )
+
+
+def _decision_scope(
+    *,
+    session_id: str,
+    run_id: str | None,
+    owner: str | None,
+) -> tuple[str, str]:
+    store = get_default_checkpoint_store()
+    if run_id:
+        record = store.run_record(str(run_id))
+    else:
+        record = store.latest_run_record(
+            session_id=session_id,
+            owner=owner,
+        )
+    resolved_run = str(
+        run_id
+        or (record or {}).get("run_id")
+        or f"single:{session_id}"
+    )
+    resolved_owner = str(
+        owner
+        or (record or {}).get("owner")
+        or "anonymous"
+    )
+    return resolved_run, resolved_owner
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -93,6 +153,12 @@ def register_pending_confirmation(
     arguments: dict[str, Any] | None,
     reason: str = "",
     policy_action: str,
+    run_id: str | None = None,
+    owner: str | None = None,
+    step_id: str | None = None,
+    attempt_id: str | None = None,
+    expires_in_seconds: float = 3600.0,
+    side_effect_risk: str = "guided",
 ) -> PendingToolConfirmation:
     """Register one exact tool call that the risk mapper classified as confirm.
 
@@ -114,33 +180,36 @@ def register_pending_confirmation(
         arguments=arguments,
     )
 
-    record = PendingToolConfirmation(
-        version=CONFIRMATION_CONTRACT_VERSION,
+    resolved_run, resolved_owner = _decision_scope(
+        session_id=session,
+        run_id=run_id,
+        owner=owner,
+    )
+    existing = get_default_checkpoint_store().decision_for_tool_call(
         session_id=session,
         call_id=call,
-        tool_name=tool,
-        arguments_json=args_json,
-        fingerprint=fingerprint,
-        reason=str(reason or "").strip(),
-        status="pending",
-        created_at=time.time(),
     )
-
-    key = (session, call)
-
-    with _LOCK:
-        existing = _PENDING.get(key)
-
-        if existing is not None:
-            if existing.fingerprint != fingerprint:
-                raise ValueError(
-                    "call_id is already bound to a different tool call"
-                )
-
-            return existing
-
-        _PENDING[key] = record
-        return record
+    if existing is not None and existing["fingerprint"] != fingerprint:
+        raise ValueError("call_id is already bound to a different tool call")
+    record = get_default_checkpoint_store().create_decision(
+        kind="approval",
+        run_id=resolved_run,
+        session_id=session,
+        owner=resolved_owner,
+        step_id=step_id,
+        attempt_id=attempt_id,
+        action_text=f"{tool}({args_json})",
+        fingerprint=fingerprint,
+        expires_in_seconds=expires_in_seconds,
+        capability=tool,
+        tool_metadata={
+            "call_id": call,
+            "arguments": json.loads(args_json),
+            "reason": str(reason or "").strip(),
+        },
+        side_effect_risk=side_effect_risk,
+    )
+    return _record_to_confirmation(record)
 
 
 def get_pending_confirmation(
@@ -150,8 +219,13 @@ def get_pending_confirmation(
     session = _required_text(session_id, "session_id")
     call = _required_text(call_id, "call_id")
 
-    with _LOCK:
-        return _PENDING.get((session, call))
+    record = get_default_checkpoint_store().decision_for_tool_call(
+        session_id=session,
+        call_id=call,
+    )
+    if record is None or record["state"] not in {"pending", "approved"}:
+        return None
+    return _record_to_confirmation(record)
 
 
 def resolve_pending_confirmation(
@@ -160,6 +234,8 @@ def resolve_pending_confirmation(
     call_id: str,
     fingerprint: str,
     approved: bool,
+    owner: str | None = None,
+    run_id: str | None = None,
 ) -> PendingToolConfirmation:
     """Approve or reject one exact pending call.
 
@@ -171,28 +247,23 @@ def resolve_pending_confirmation(
     session = _required_text(session_id, "session_id")
     call = _required_text(call_id, "call_id")
     supplied_fingerprint = _required_text(fingerprint, "fingerprint")
-    key = (session, call)
-
-    with _LOCK:
-        record = _PENDING.get(key)
-
-        if record is None:
-            raise KeyError("no pending confirmation for this session/call")
-
-        if record.fingerprint != supplied_fingerprint:
-            raise ValueError("confirmation fingerprint mismatch")
-
-        if record.status != "pending":
-            raise ValueError("confirmation has already been resolved")
-
-        if not approved:
-            rejected = replace(record, status="rejected")
-            del _PENDING[key]
-            return rejected
-
-        approved_record = replace(record, status="approved")
-        _PENDING[key] = approved_record
-        return approved_record
+    existing = get_default_checkpoint_store().decision_for_tool_call(
+        session_id=session,
+        call_id=call,
+    )
+    if existing is None:
+        raise KeyError("no pending confirmation for this session/call")
+    if existing["fingerprint"] != supplied_fingerprint:
+        raise ValueError("confirmation fingerprint mismatch")
+    resolved = get_default_checkpoint_store().resolve_decision(
+        record_id=str(existing["record_id"]),
+        owner=str(owner or existing["owner"]),
+        session_id=session,
+        run_id=str(run_id or existing["run_id"]),
+        response={"approved": bool(approved)},
+        state="approved" if approved else "rejected",
+    )
+    return _record_to_confirmation(resolved)
 
 
 def consume_approved_confirmation(
@@ -202,6 +273,8 @@ def consume_approved_confirmation(
     fingerprint: str,
     tool_name: str,
     arguments: dict[str, Any] | None,
+    owner: str | None = None,
+    run_id: str | None = None,
 ) -> PendingToolConfirmation:
     """Consume approval exactly once after re-validating the exact call."""
 
@@ -219,22 +292,27 @@ def consume_approved_confirmation(
     if expected != supplied_fingerprint:
         raise ValueError("tool call changed after approval")
 
-    key = (session, call)
-
-    with _LOCK:
-        record = _PENDING.get(key)
-
-        if record is None:
-            raise KeyError("approved confirmation is missing or already consumed")
-
-        if record.status != "approved":
-            raise ValueError("confirmation has not been approved")
-
-        if record.fingerprint != supplied_fingerprint:
-            raise ValueError("confirmation fingerprint mismatch")
-
-        del _PENDING[key]
-        return replace(record, status="consumed")
+    existing = get_default_checkpoint_store().decision_for_tool_call(
+        session_id=session,
+        call_id=call,
+    )
+    if existing is None:
+        raise KeyError("approved confirmation is missing or already consumed")
+    if existing["state"] == "consumed":
+        return _record_to_confirmation(existing)
+    if existing["state"] != "approved":
+        raise ValueError("confirmation has not been approved")
+    if existing["fingerprint"] != supplied_fingerprint:
+        raise ValueError("confirmation fingerprint mismatch")
+    consumed = get_default_checkpoint_store().resolve_decision(
+        record_id=str(existing["record_id"]),
+        owner=str(owner or existing["owner"]),
+        session_id=session,
+        run_id=str(run_id or existing["run_id"]),
+        response={"approved": True, "consumed": True},
+        state="consumed",
+    )
+    return _record_to_confirmation(consumed)
 
 
 def clear_session_confirmations(session_id: str) -> int:
@@ -242,18 +320,14 @@ def clear_session_confirmations(session_id: str) -> int:
 
     session = _required_text(session_id, "session_id")
 
-    with _LOCK:
-        keys = [key for key in _PENDING if key[0] == session]
-
-        for key in keys:
-            del _PENDING[key]
-
-        return len(keys)
+    return get_default_checkpoint_store().delete_session_decisions(
+        session_id=session,
+        kind="approval",
+    )
 
 
 def _clear_all_confirmations_for_tests() -> None:
-    with _LOCK:
-        _PENDING.clear()
+    get_default_checkpoint_store().delete_session_decisions(kind="approval")
 
 
 __all__ = [

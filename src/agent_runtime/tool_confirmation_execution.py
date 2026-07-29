@@ -19,6 +19,8 @@ def resolve_and_execute_tool_confirmation(
     call_id: str,
     fingerprint: str,
     approved: bool,
+    owner: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve one exact session-bound caution-level call."""
 
@@ -51,6 +53,8 @@ def resolve_and_execute_tool_confirmation(
             call_id=call_id,
             fingerprint=fingerprint,
             approved=False,
+            owner=owner,
+            run_id=run_id,
         )
 
         return {
@@ -66,6 +70,8 @@ def resolve_and_execute_tool_confirmation(
         call_id=call_id,
         fingerprint=fingerprint,
         approved=True,
+        owner=owner,
+        run_id=run_id,
     )
 
     consumed = consume_approved_confirmation(
@@ -74,6 +80,8 @@ def resolve_and_execute_tool_confirmation(
         fingerprint=fingerprint,
         tool_name=record.tool_name,
         arguments=arguments,
+        owner=owner,
+        run_id=run_id,
     )
 
     tool_obj = TOOL_MAP.get(consumed.tool_name)

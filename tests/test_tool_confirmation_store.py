@@ -120,7 +120,7 @@ def test_rejection_consumes_pending_call_permanently():
     assert rejected.status == "rejected"
     assert get_pending_confirmation("session-a", "call-1") is None
 
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError):
         resolve_pending_confirmation(
             session_id=record.session_id,
             call_id=record.call_id,
@@ -186,14 +186,15 @@ def test_exact_approval_is_consumable_once_only():
 
     assert consumed.status == "consumed"
 
-    with pytest.raises(KeyError):
-        consume_approved_confirmation(
-            session_id=record.session_id,
-            call_id=record.call_id,
-            fingerprint=record.fingerprint,
-            tool_name=record.tool_name,
-            arguments=arguments,
-        )
+    duplicate = consume_approved_confirmation(
+        session_id=record.session_id,
+        call_id=record.call_id,
+        fingerprint=record.fingerprint,
+        tool_name=record.tool_name,
+        arguments=arguments,
+    )
+    assert duplicate.record_id == consumed.record_id
+    assert duplicate.status == "consumed"
 
 
 def test_clear_session_does_not_touch_other_sessions():

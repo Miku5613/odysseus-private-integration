@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, AsyncGenerator, List, Optional
 
 from fastapi import APIRouter, Request, HTTPException, Form, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from core.models import ChatMessage
@@ -31,6 +31,7 @@ from src.agent_runtime.durable_checkpoint import (
 from src.agent_runtime.research_worker import (
     cancel_owned_research_jobs,
 )
+from src.agent_runtime.step_resume import resume_interrupted_step
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -330,6 +331,19 @@ async def _replay_durable_langgraph_run(
         if cursor <= after_cursor:
             continue
         yield f"data: {json.dumps(event, default=str)}\n\n"
+    replay_complete = {
+        "type": "runtime_replay_complete",
+        "data": {
+            "run_id": state.get("run_id"),
+            "status": state.get("status"),
+            "event_cursor": state.get("event_cursor", 0),
+            "run_completed": str(
+                state.get("status") or ""
+            ).upper() in {"COMPLETED", "FAILED", "CANCELLED"},
+            "transport_complete": True,
+        },
+    }
+    yield f"data: {json.dumps(replay_complete, default=str)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -2716,11 +2730,13 @@ def setup_chat_routes(
                 agent_runs.subscribe(session_id),
                 media_type="text/event-stream",
             )
-        state = _durable_checkpoint_store_or_503().recover_latest(
+        store = _durable_checkpoint_store_or_503()
+        state = store.recover_latest(
             session_id=session_id,
         )
         if state is None:
             raise HTTPException(404, "No recoverable run for this session")
+        state = store.reconcile_state(state, executor_alive=False)
         return StreamingResponse(
             _replay_durable_langgraph_run(
                 state,
@@ -2776,6 +2792,15 @@ def setup_chat_routes(
                 call_id=call_id,
                 fingerprint=fingerprint,
                 approved=approved,
+                owner=effective_user(request),
+                run_id=(
+                    get_default_checkpoint_store()
+                    .latest_run_record(
+                        session_id=session_id,
+                        owner=effective_user(request),
+                    )
+                    or {}
+                ).get("run_id"),
             )
 
         except KeyError as exc:
@@ -2791,7 +2816,19 @@ def setup_chat_routes(
         if not stopped:
             store = _durable_checkpoint_store_or_503()
             state = store.recover_latest(session_id=session_id)
-            if state and state.get("status") == "RUNNING":
+            if state:
+                state = store.reconcile_state(
+                    state,
+                    executor_alive=False,
+                )
+            if state and state.get("status") in {
+                "PENDING",
+                "RUNNING",
+                "AWAITING_APPROVAL",
+                "AWAITING_CLARIFICATION",
+                "SUSPENDED",
+                "INTERRUPTED",
+            }:
                 recovered = LangGraphRunLifecycle.recover(
                     checkpoint_store=store,
                     thread_id=state["thread_id"],
@@ -2813,6 +2850,44 @@ def setup_chat_routes(
                     stopped = True
         return {"stopped": stopped}
 
+    @router.post("/api/chat/resume_step/{session_id}")
+    async def chat_resume_step(
+        request: Request,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """Resume one safe durable PlanStep boundary, never replay or a query."""
+
+        _verify_session_owner(request, session_id)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        step_id = str(body.get("step_id") or "").strip() or None
+        store = _durable_checkpoint_store_or_503()
+        state = store.recover_latest(session_id=session_id)
+        if state is None:
+            raise HTTPException(404, "No recoverable run for this session")
+        state = store.reconcile_state(
+            state,
+            executor_alive=agent_runs.is_active(session_id),
+        )
+        try:
+            result = await resume_interrupted_step(
+                checkpoint_store=store,
+                checkpoint_state=state,
+                owner=effective_user(request),
+                step_id=step_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        if result.get("outcome") in {
+            "REQUIRES_VERIFICATION",
+            "REQUIRES_APPROVAL",
+            "NOT_RESUMABLE",
+        }:
+            return JSONResponse(result, status_code=409)
+        return result
+
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session
     # ------------------------------------------------------------------ #
@@ -2828,10 +2903,15 @@ def setup_chat_routes(
         if rec is None:
             if agent_runs.is_active(session_id):
                 return {"status": "streaming", "detached": True}
-            state = _durable_checkpoint_store_or_503().recover_latest(
+            store = _durable_checkpoint_store_or_503()
+            state = store.recover_latest(
                 session_id=session_id,
             )
             if state is not None:
+                state = store.reconcile_state(
+                    state,
+                    executor_alive=False,
+                )
                 return {
                     "status": str(state.get("status") or "unknown").lower(),
                     "detached": False,

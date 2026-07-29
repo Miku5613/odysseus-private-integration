@@ -169,10 +169,20 @@ def _evaluate_support(state: AgentState) -> dict:
     )
 
 
-def build_graph(scope: str = "file_inspection", session_id: str | None = None):
+def build_graph(
+    scope: str = "file_inspection",
+    session_id: str | None = None,
+    *,
+    run_id: str | None = None,
+    owner: str | None = None,
+    step_id: str | None = None,
+    attempt_id: str | None = None,
+):
     llm = make_llm()
     resolved_scope = str(scope or "file_inspection").strip() or "file_inspection"
     runtime_session_id = str(session_id or "").strip()
+    runtime_run_id = str(run_id or "").strip() or None
+    runtime_owner = str(owner or "").strip() or None
     tools = get_tools_for_scope(resolved_scope)
 
     # LangGraph tool risk visibility v1 — LangGraph-only observational policy.
@@ -345,6 +355,10 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
                         session_id=runtime_session_id,
                         original_request=query,
                         question=question,
+                        run_id=runtime_run_id,
+                        owner=runtime_owner,
+                        step_id=step_id,
+                        attempt_id=attempt_id,
                     )
 
                 ask_event = make_event(
@@ -432,6 +446,10 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
                         arguments=args if isinstance(args, dict) else {},
                         reason=_risk_decision.reason,
                         policy_action="confirm",
+                        run_id=runtime_run_id,
+                        owner=runtime_owner,
+                        step_id=step_id,
+                        attempt_id=attempt_id,
                     )
 
                 risk_event = make_event(
@@ -834,6 +852,10 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
                         arguments=args if isinstance(args, dict) else {},
                         reason=_risk_decision.reason,
                         policy_action="confirm",
+                        run_id=runtime_run_id,
+                        owner=runtime_owner,
+                        step_id=step_id,
+                        attempt_id=attempt_id,
                     )
 
                 risk_event = make_event(

@@ -13,7 +13,12 @@ FINAL_STATUSES = frozenset({
     "COMPLETED",
     "FAILED",
     "CANCELLED",
+})
+SUSPENDED_STATUSES = frozenset({
     "AWAITING_APPROVAL",
+    "AWAITING_CLARIFICATION",
+    "SUSPENDED",
+    "INTERRUPTED",
 })
 
 
@@ -23,6 +28,7 @@ class LangGraphRunIdentity:
     session_id: str | None
     thread_id: str
     checkpoint_ns: str
+    owner: str | None = None
     runtime_mode: str = "multi_graph"
 
     @classmethod
@@ -74,6 +80,7 @@ class LangGraphRunIdentity:
             session_id=stable_session_id,
             thread_id=stable_thread_id,
             checkpoint_ns=stable_checkpoint_ns,
+            owner=(str(owner).strip() if owner else None),
             runtime_mode=runtime_mode,
         )
 
@@ -151,6 +158,8 @@ class LangGraphRunLifecycle:
         default_factory=dict
     )
     checkpoint_store: Any = None
+    executor_id: str | None = None
+    _executor_claimed: bool = field(default=False, init=False)
 
     @classmethod
     def create(
@@ -164,6 +173,7 @@ class LangGraphRunLifecycle:
         runtime_mode: str = "multi_graph",
         cancellation: LangGraphCancellationScope | None = None,
         checkpoint_store: Any = None,
+        claim_executor: bool = True,
     ) -> "LangGraphRunLifecycle":
         identity = LangGraphRunIdentity.create(
             session_id=session_id,
@@ -178,11 +188,17 @@ class LangGraphRunLifecycle:
             raise ValueError(
                 "cancellation scope run_id must match lifecycle run_id"
             )
-        return cls(
+        lifecycle = cls(
             identity=identity,
             cancellation=scope,
             checkpoint_store=checkpoint_store,
+            executor_id=(
+                f"executor_{uuid.uuid4().hex}"
+                if checkpoint_store is not None and claim_executor
+                else None
+            ),
         )
+        return lifecycle
 
     def _decorate(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.event_cursor += 1
@@ -190,6 +206,7 @@ class LangGraphRunLifecycle:
         data = dict(framed.get("data") or {})
         data.update({
             "run_id": self.identity.run_id,
+            "owner": self.identity.owner,
             "session_id": self.identity.session_id,
             "thread_id": self.identity.thread_id,
             "checkpoint_ns": self.identity.checkpoint_ns,
@@ -207,6 +224,7 @@ class LangGraphRunLifecycle:
         )
         return {
             "run_id": self.identity.run_id,
+            "owner": self.identity.owner,
             "session_id": self.identity.session_id,
             "thread_id": self.identity.thread_id,
             "checkpoint_namespace": self.identity.checkpoint_ns,
@@ -239,6 +257,18 @@ class LangGraphRunLifecycle:
     def _persist(self) -> None:
         if self.checkpoint_store is not None:
             self.checkpoint_store.save(self._checkpoint_state())
+            if self.executor_id is not None:
+                if not self._executor_claimed:
+                    self.checkpoint_store.claim_executor(
+                        run_id=self.identity.run_id,
+                        executor_id=self.executor_id,
+                    )
+                    self._executor_claimed = True
+                elif self.status == "RUNNING":
+                    self.checkpoint_store.heartbeat_executor(
+                        run_id=self.identity.run_id,
+                        executor_id=self.executor_id,
+                    )
 
     def event(self, payload: dict[str, Any]) -> dict[str, Any]:
         framed = self._decorate(payload)
@@ -293,6 +323,13 @@ class LangGraphRunLifecycle:
         **details: Any,
     ) -> dict[str, Any] | None:
         normalized = str(status).upper()
+        if normalized in SUSPENDED_STATUSES:
+            return self.suspend(
+                normalized,
+                stage=stage,
+                reason=reason,
+                **details,
+            )
         if normalized not in FINAL_STATUSES:
             raise ValueError(f"Unsupported terminal status: {status}")
         if self.terminal is not None:
@@ -309,7 +346,56 @@ class LangGraphRunLifecycle:
         })
         self.event_log.append(self.terminal)
         self._persist()
+        if self.checkpoint_store is not None:
+            self.checkpoint_store.set_run_status(
+                self.identity.run_id,
+                normalized,
+            )
+        self._executor_claimed = False
         return self.terminal
+
+    def suspend(
+        self,
+        status: str,
+        *,
+        stage: str,
+        reason: str | None = None,
+        **details: Any,
+    ) -> dict[str, Any] | None:
+        """Record a durable nonterminal pause without fabricating completion."""
+
+        normalized = str(status).upper()
+        if normalized not in SUSPENDED_STATUSES:
+            raise ValueError(f"Unsupported suspended status: {status}")
+        if self.terminal is not None:
+            return None
+        if self.status == normalized and self.event_log:
+            latest = self.event_log[-1]
+            if (
+                latest.get("type") == "runtime_state"
+                and (latest.get("data") or {}).get("status") == normalized
+            ):
+                return None
+        self.status = normalized
+        event = self._decorate({
+            "type": "runtime_state",
+            "data": {
+                "status": normalized,
+                "stage": stage,
+                "reason": reason,
+                "terminal": False,
+                **details,
+            },
+        })
+        self.event_log.append(event)
+        self._persist()
+        if self.checkpoint_store is not None:
+            self.checkpoint_store.set_run_status(
+                self.identity.run_id,
+                normalized,
+            )
+        self._executor_claimed = False
+        return event
 
     @classmethod
     def recover(
@@ -331,7 +417,9 @@ class LangGraphRunLifecycle:
             thread_id=state["thread_id"],
             checkpoint_ns=state["checkpoint_namespace"],
             runtime_mode=state.get("runtime_mode") or "multi_graph",
+            owner=state.get("owner"),
             checkpoint_store=checkpoint_store,
+            claim_executor=False,
         )
         lifecycle.status = state.get("status") or "RUNNING"
         lifecycle.event_cursor = int(state.get("event_cursor") or 0)

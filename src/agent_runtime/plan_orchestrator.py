@@ -16,6 +16,7 @@ from src.agent_runtime.plan_execution import (
     request_replan,
     start_step,
     step_execution,
+    task_plan_fingerprint,
 )
 from src.agent_runtime.step_execution import (
     StepExecutionContext,
@@ -171,6 +172,53 @@ def _context_for_plan_step(
     return StepExecutionContext(
         supervisor_state=supervisor_state,
         session_id=base_context.session_id,
+    )
+
+
+def _attempt_store(context: StepExecutionContext | None):
+    state = (
+        dict(context.supervisor_state or {})
+        if context is not None
+        else {}
+    )
+    worker_context = dict(state.get("worker_context") or {})
+    store = worker_context.get("attempt_store")
+    return store if hasattr(store, "create_step_attempt") else None
+
+
+def _attempt_input_refs(
+    context: StepExecutionContext | None,
+    step,
+) -> dict:
+    state = (
+        dict(context.supervisor_state or {})
+        if context is not None
+        else {}
+    )
+    worker_context = dict(state.get("worker_context") or {})
+    return {
+        "objective": step.objective,
+        "depends_on": list(step.depends_on),
+        "dependency_outputs": dict(
+            worker_context.get("dependency_outputs") or {}
+        ),
+        "session_id": (
+            context.session_id if context is not None else None
+        ),
+    }
+
+
+def _context_with_attempt(
+    context: StepExecutionContext,
+    attempt_id: str,
+) -> StepExecutionContext:
+    state = dict(context.supervisor_state or {})
+    worker_context = dict(state.get("worker_context") or {})
+    worker_context["attempt_id"] = attempt_id
+    state["worker_context"] = worker_context
+    return StepExecutionContext(
+        supervisor_state=state,
+        session_id=context.session_id,
     )
 
 
@@ -342,21 +390,79 @@ async def run_task_plan(
                 current,
                 step_id,
             )
+            step_context = _context_for_plan_step(
+                context,
+                pre_step_state,
+                step,
+            )
+            attempt_store = _attempt_store(step_context)
+            attempt_id = None
+            if attempt_store is not None:
+                surface = resolution.selected_surface
+                supports_mutation = bool(
+                    surface and surface.supports_mutation
+                )
+                worker_kind = str(
+                    (
+                        surface.capability_name
+                        if surface is not None
+                        else None
+                    )
+                    or (
+                        surface.id
+                        if surface is not None
+                        else "unknown"
+                    )
+                )
+                side_effect_classification = (
+                    "external_effect"
+                    if supports_mutation
+                    or worker_kind == "research"
+                    or (surface is not None and surface.kind == "legacy")
+                    else "read_only"
+                )
+                base_state = dict(
+                    step_context.supervisor_state or {}
+                )
+                runtime_context = dict(
+                    base_state.get("worker_context") or {}
+                )
+                attempt = attempt_store.create_step_attempt(
+                    run_id=str(runtime_context.get("run_id") or ""),
+                    plan_id=task_plan_fingerprint(plan),
+                    plan_revision=current.revision,
+                    step_id=step.id,
+                    worker_kind=worker_kind,
+                    input_refs=_attempt_input_refs(
+                        step_context,
+                        step,
+                    ),
+                    side_effect_classification=(
+                        side_effect_classification
+                    ),
+                )
+                attempt_id = str(attempt["attempt_id"])
+                step_context = _context_with_attempt(
+                    step_context,
+                    attempt_id,
+                )
 
             try:
                 outcome = await execute_and_record_resolved_step(
                     started_state,
                     step,
                     resolution,
-                    context=_context_for_plan_step(
-                        context,
-                        pre_step_state,
-                        step,
-                    ),
+                    context=step_context,
                     worker_runners=worker_runners,
                     surface_executors=surface_executors,
                 )
             except StepExecutionUnavailable as exc:
+                if attempt_store is not None and attempt_id is not None:
+                    attempt_store.complete_step_attempt(
+                        attempt_id,
+                        status="FAILED",
+                        error=str(exc),
+                    )
                 replan = request_replan(
                     pre_step_state,
                     reason=str(exc),
@@ -372,6 +478,43 @@ async def run_task_plan(
                 )
 
             current = outcome.state
+            if attempt_store is not None and attempt_id is not None:
+                result = outcome.worker_result
+                data = (
+                    dict(result.data)
+                    if isinstance(result.data, dict)
+                    else {}
+                )
+                receipts = []
+                external_id = (
+                    data.get("research_job_id")
+                    or data.get("task_id")
+                    or data.get("job_id")
+                )
+                if external_id:
+                    receipts.append({
+                        "kind": "external_job",
+                        "external_id": str(external_id),
+                        "owned": bool(
+                            data.get("research_job_owned", False)
+                        ),
+                        "status": data.get("research_status"),
+                    })
+                attempt_store.complete_step_attempt(
+                    attempt_id,
+                    status=(
+                        "COMPLETED"
+                        if result.status == "completed"
+                        else (
+                            "RUNNING"
+                            if result.status == "partial"
+                            else "FAILED"
+                        )
+                    ),
+                    result=_worker_result_payload(result),
+                    error=result.error,
+                    action_receipts=receipts,
+                )
             worker_results.append(
                 outcome.worker_result
             )
