@@ -518,6 +518,34 @@ def test_code_inspection_recovery_preserves_resolved_capability_without_reclassi
     assert "multi_graph_coordinator.py" in state.final_answer
 
 
+def test_code_inspection_recovery_reads_explicit_workspace_file_directly(
+    tmp_path,
+):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(
+        "fastapi\nuvicorn\npytest\n",
+        encoding="utf-8",
+    )
+
+    state = run_code_inspection_recovery(
+        "Read requirements.txt and summarize its dependencies.",
+        str(tmp_path),
+    )
+
+    assert state.metrics["direct_file_inspection"] is True
+    assert "requirements.txt:1: fastapi" in state.final_answer
+    assert any(
+        observation.tool == "read_file"
+        and observation.args["path"] == "requirements.txt"
+        and observation.success
+        for observation in state.observations
+    )
+    assert not any(
+        observation.tool == "grep"
+        for observation in state.observations
+    )
+
+
 def test_code_worker_recovery_receives_only_step_objective_and_workspace():
     captured = {}
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from src.agent_runtime.structured_llm import (
+    StructuredControlFailure,
     StructuredResponseRejected,
     invoke_structured_model_async,
     invoke_validated_fallback_async,
@@ -64,6 +65,7 @@ def test_structured_invocation_preserves_plain_model_compatibility():
 
 def test_validated_fallback_retries_chain_once_with_distinct_repair_prompt():
     calls = []
+    kwargs_by_call = []
 
     async def fake_caller(
         candidates,
@@ -73,6 +75,7 @@ def test_validated_fallback_retries_chain_once_with_distinct_repair_prompt():
         **kwargs,
     ):
         calls.append(messages[0]["content"])
+        kwargs_by_call.append(kwargs)
         response = "invalid" if len(calls) == 1 else "valid"
         response_validator(response)
         return response
@@ -93,6 +96,10 @@ def test_validated_fallback_retries_chain_once_with_distinct_repair_prompt():
     assert calls[1] != calls[0]
     assert calls[1].startswith("Return the required JSON.")
     assert "STRUCTURED OUTPUT RETRY:" in calls[1]
+    assert kwargs_by_call[0]["structured_output"] is True
+    assert kwargs_by_call[0]["reasoning_effort"] == "none"
+    assert kwargs_by_call[1]["structured_output"] is True
+    assert kwargs_by_call[1]["reasoning_effort"] == "none"
 
 
 def test_validated_fallback_stops_after_bounded_repair_round():
@@ -119,7 +126,8 @@ def test_validated_fallback_stops_after_bounded_repair_round():
                 max_rounds=2,
             )
         )
-    except StructuredResponseRejected:
+    except StructuredControlFailure as exc:
+        assert exc.code == "structured_output_failed"
         pass
     else:
         raise AssertionError(

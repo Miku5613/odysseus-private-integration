@@ -253,6 +253,8 @@ def test_prompt_owns_complexity_not_capability_selection():
     assert "Possessive or deictic references to user-owned state" in prompt
     assert "Execution class is determined by prerequisite acquisition" in prompt
     assert "one report or one answer" in prompt
+    assert "named local workspace file" in prompt
+    assert "Never assume a named file was supplied" in prompt
 
 
 def test_model_call_reuses_canonical_candidate_chain(

@@ -1873,6 +1873,53 @@ def run_code_inspection_recovery(
         bool(workspace_output.strip()),
     )
 
+    named_files = re.findall(
+        r"(?<![A-Za-z0-9_])"
+        r"([A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)*"
+        r"\.(?:txt|md|toml|ya?ml|json|py|js|ts|tsx|jsx))",
+        query,
+        flags=re.IGNORECASE,
+    )
+    if named_files:
+        named_path = named_files[0].replace("\\", "/")
+        file_output = tools.read_file(
+            state.workspace,
+            named_path,
+            offset=0,
+            limit=400,
+        )
+        found = bool(
+            file_output.strip()
+            and not file_output.startswith("NOT_FOUND:")
+        )
+        _record(
+            state,
+            "read_file",
+            {
+                "path": named_path,
+                "offset": 0,
+                "limit": 400,
+            },
+            file_output,
+            found,
+        )
+        if found:
+            state.final_answer = (
+                f"Direct contents of {named_path}:\n\n{file_output}"
+            )
+            state.metrics = {
+                "runtime": "code-inspection-recovery-v1",
+                "model": "deterministic-source-inspection",
+                "elapsed_s": round(time.time() - start, 3),
+                "tool_calls": len(state.observations),
+                "fallback_required": False,
+                "task_kind": state.task.kind,
+                "semantic_capability": "code_inspection",
+                "intent_reclassified": False,
+                "direct_file_inspection": True,
+            }
+            return state
+
     answer = _execute_broad_source_inspection(
         state,
         include_agent_runtime=True,

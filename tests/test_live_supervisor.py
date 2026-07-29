@@ -63,6 +63,9 @@ async def test_live_supervisor_reasons_dispatches_and_finishes():
     assert _payload(frames[3])["data"]["response_origin"] == "selected_model"
     assert frames[-1] == "data: [DONE]\n\n"
     assert len(calls) == 2
+    assert calls[1].startswith(
+        "You are the final-response stage"
+    )
 
 
 @pytest.mark.asyncio
@@ -107,6 +110,55 @@ async def test_live_supervisor_raises_before_output_on_reasoner_failure():
 
     with pytest.raises(RuntimeError, match="endpoint unavailable"):
         await anext(generator)
+
+
+@pytest.mark.asyncio
+async def test_live_supervisor_retries_empty_synthesis_with_compact_evidence():
+    calls = []
+
+    async def fake_llm(endpoint_url, model, messages, **kwargs):
+        calls.append((messages[0]["content"], kwargs))
+        if len(calls) == 1:
+            return json.dumps({
+                "selected_capabilities": ["code_inspection"],
+                "capability_actions": {"code_inspection": "inspect"},
+                "missing_information": [],
+                "clarification_needed": False,
+                "reasoning_summary": "Inspect the named file.",
+            })
+        if len(calls) == 2:
+            return ""
+        return "Dependencies include web, data, security, and test tooling."
+
+    async def fake_dispatch(*args, **kwargs):
+        return DispatchResult(
+            requested_capabilities=("code_inspection",),
+            completed_capabilities=("code_inspection",),
+            worker_results=(
+                WorkerResult(
+                    capability="code_inspection",
+                    status="completed",
+                    summary="requirements.txt contains fastapi and pytest.",
+                ),
+            ),
+        )
+
+    frames = [
+        frame
+        async for frame in stream_general_supervisor_sse(
+            "http://localhost",
+            "test-model",
+            [{"role": "user", "content": "Read requirements.txt."}],
+            llm_caller=fake_llm,
+            dispatcher=fake_dispatch,
+        )
+    ]
+
+    assert len(calls) == 3
+    assert "WORKER SUMMARIES:" in calls[2][0]
+    assert calls[2][1]["temperature"] == 0.3
+    assert _payload(frames[2])["delta"].startswith("Dependencies include")
+    assert _payload(frames[3])["data"]["presenting_model"] == "test-model"
 
 
 def test_chat_route_uses_live_general_supervisor():

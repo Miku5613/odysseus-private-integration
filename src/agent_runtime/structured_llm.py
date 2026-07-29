@@ -4,6 +4,8 @@ import inspect
 from collections.abc import Mapping, Sequence
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 
+from src.llm_core import StructuredOutputIncomplete
+
 
 T = TypeVar("T")
 
@@ -21,6 +23,12 @@ StructuredFallbackCaller = Callable[..., Any | Awaitable[Any]]
 
 class StructuredResponseRejected(ValueError):
     """One candidate chain completed without an acceptable structured result."""
+
+
+class StructuredControlFailure(RuntimeError):
+    """A bounded structured control-plane request exhausted its retry."""
+
+    code = "structured_output_failed"
 
 
 def _validated_candidate_acceptor(
@@ -94,6 +102,9 @@ async def invoke_validated_fallback_async(
     current_prompt = prompt
 
     for round_index in range(max_rounds):
+        round_kwargs = dict(kwargs)
+        round_kwargs["structured_output"] = True
+        round_kwargs["reasoning_effort"] = "none"
         try:
             response = llm_caller(
                 list(candidates),
@@ -104,14 +115,17 @@ async def invoke_validated_fallback_async(
                     }
                 ],
                 response_validator=acceptor,
-                **kwargs,
+                **round_kwargs,
             )
             if inspect.isawaitable(response):
                 response = await response
             return response
-        except StructuredResponseRejected as exc:
+        except (StructuredResponseRejected, StructuredOutputIncomplete) as exc:
             if round_index + 1 >= max_rounds:
-                raise
+                raise StructuredControlFailure(
+                    "Structured output remained invalid after one "
+                    "non-thinking retry"
+                ) from exc
             current_prompt = build_structured_retry_prompt(
                 prompt,
                 exc,
@@ -179,6 +193,7 @@ async def invoke_structured_model_async(
 
 __all__ = [
     "StructuredFallbackCaller",
+    "StructuredControlFailure",
     "StructuredModel",
     "StructuredResponseRejected",
     "StructuredValidator",

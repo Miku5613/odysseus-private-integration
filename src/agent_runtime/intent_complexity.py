@@ -193,6 +193,11 @@ def build_intent_complexity_prompt(raw_query: str) -> str:
         "13. Set clarification_needed=true only when ambiguity materially "
         "prevents safe or correct progress.",
         "14. Return only one JSON object matching the required schema.",
+        "15. A request to read, inspect, search, or summarize a named local "
+        "workspace file requires filesystem-backed execution when that file's "
+        "contents are not literally included in USER_QUERY. Classify one such "
+        "bounded inspection as single_graph with requires_external_state=true. "
+        "Never assume a named file was supplied in conversational context.",
         "",
         "USER_QUERY:",
         raw_query,

@@ -7,6 +7,7 @@ from typing import Any
 
 from src.agent_runtime.supervisor_decision import parse_supervisor_decision
 from src.agent_runtime.supervisor_reasoner import build_supervisor_prompt
+from src.agent_runtime.structured_llm import invoke_validated_fallback_async
 from src.agent_runtime.legacy_sse_adapter import to_legacy_payload
 from src.agent_runtime.worker_dispatcher import (
     DispatchResult,
@@ -166,11 +167,25 @@ async def stream_general_supervisor_sse(
 
     decision_prompt = build_supervisor_prompt(query)
 
-    decision_response = await call_runtime_llm(
-        [{"role": "user", "content": decision_prompt}],
-        temperature=0.0,
-        max_tokens=min(max_tokens, 1400),
-        prompt_type=prompt_type,
+    async def call_structured_runtime_llm(
+        candidates: list[Any],
+        *,
+        messages: list[dict[str, Any]],
+        **call_kwargs: Any,
+    ) -> Any:
+        return await call_runtime_llm(messages, **call_kwargs)
+
+    decision_response = await invoke_validated_fallback_async(
+        call_structured_runtime_llm,
+        runtime_llm_candidates,
+        decision_prompt,
+        lambda value: parse_supervisor_decision(_text(value).strip()),
+        call_kwargs={
+            "temperature": 0.0,
+            "max_tokens": min(max_tokens, 1400),
+            "prompt_type": prompt_type,
+        },
+        max_rounds=2,
     )
 
     decision = parse_supervisor_decision(_text(decision_response).strip())
@@ -291,13 +306,51 @@ async def stream_general_supervisor_sse(
         final_response = await call_runtime_llm(
             [{"role": "user", "content": synthesis_prompt}],
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=(
+                max_tokens
+                if max_tokens and max_tokens >= 8192
+                else 8192
+            ),
             prompt_type=prompt_type,
         )
         final_text = _text(final_response).strip()
         presenting_model = _response_model(final_response, model)
         if not final_text:
-            raise ValueError("final synthesis returned an empty response")
+            compact_results = [
+                {
+                    "capability": result.capability,
+                    "status": result.status,
+                    "summary": str(result.summary or "")[:8000],
+                }
+                for result in dispatch.worker_results
+            ]
+            retry_prompt = "\n".join([
+                "Answer the user's request concisely from the worker summaries.",
+                "Do not discuss internal routing or hidden reasoning.",
+                "",
+                "USER REQUEST:",
+                query,
+                "",
+                "WORKER SUMMARIES:",
+                json.dumps(
+                    compact_results,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            ])
+            final_response = await call_runtime_llm(
+                [{"role": "user", "content": retry_prompt}],
+                temperature=min(temperature, 0.3),
+                max_tokens=8192,
+                prompt_type=prompt_type,
+            )
+            final_text = _text(final_response).strip()
+            presenting_model = _response_model(final_response, model)
+            if not final_text:
+                raise ValueError(
+                    "final synthesis returned an empty response "
+                    "after one selected-model retry"
+                )
     except Exception as exc:
         synthesis_error = f"{type(exc).__name__}: {exc}"
         response_origin = "controlled_runtime_failure"
