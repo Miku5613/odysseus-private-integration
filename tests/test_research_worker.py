@@ -7,7 +7,7 @@ from src.agent_runtime.supervisor_contracts import WorkerHandoff
 
 
 @pytest.mark.asyncio
-async def test_research_worker_starts_existing_research_runtime():
+async def test_research_trigger_is_pending_until_final_report_is_observed():
     captured = {}
 
     async def fake_trigger(content, owner=None):
@@ -32,8 +32,11 @@ async def test_research_worker_starts_existing_research_runtime():
 
     assert captured["content"]["topic"] == handoff.objective
     assert captured["owner"] == "user-1"
-    assert result.status == "completed"
+    assert result.status == "partial"
     assert result.data["payload"]["task_id"] == "research-1"
+    assert result.data["research_job_id"] == "research-1"
+    assert result.data["research_status"] == "running"
+    assert result.data["semantic_complete"] is False
 
 
 @pytest.mark.asyncio
@@ -61,6 +64,7 @@ async def test_research_worker_reads_existing_report():
     assert captured == {"action": "read", "id": "rp-123"}
     assert result.status == "completed"
     assert result.summary == "Saved report text."
+    assert result.data["semantic_complete"] is True
 
 
 @pytest.mark.asyncio
@@ -112,6 +116,28 @@ async def test_research_worker_resolves_latest_report_when_read_has_no_id():
     ]
     assert result.status == "completed"
     assert result.summary == "Latest saved report text."
+    assert result.data["semantic_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_research_trigger_without_stable_job_id_fails_closed():
+    async def fake_trigger(content, owner=None):
+        return {
+            "output": "Research accepted.",
+            "exit_code": 0,
+        }
+
+    result = await run_research_worker(
+        WorkerHandoff(
+            capability="deep_research",
+            objective="Investigate runtime durability.",
+        ),
+        trigger_backend=fake_trigger,
+    )
+
+    assert result.status == "failed"
+    assert result.data["semantic_complete"] is False
+    assert "stable job ID" in (result.error or "")
 
 
 @pytest.mark.asyncio

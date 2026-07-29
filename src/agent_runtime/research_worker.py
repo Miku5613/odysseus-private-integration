@@ -240,6 +240,49 @@ async def run_research_worker(
             error=str(payload.get("error") or payload.get("output") or "Unknown research failure."),
         )
 
+    if action == "start":
+        research_job_id = str(
+            payload.get("research_session_id")
+            or payload.get("session_id")
+            or payload.get("task_id")
+            or ""
+        ).strip()
+        if not research_job_id or research_job_id == "?":
+            return WorkerResult(
+                capability=RESEARCH_WORKER_CAPABILITY,
+                status="failed",
+                summary=(
+                    "Research started without a stable job ID, so its "
+                    "completion cannot be observed safely."
+                ),
+                data={
+                    "action": action,
+                    "payload": payload,
+                    "session_id": session_id,
+                    "semantic_complete": False,
+                },
+                error="Research trigger did not return a stable job ID.",
+            )
+
+        summary = str(
+            payload.get("output")
+            or payload.get("message")
+            or "Research job started."
+        )
+        return WorkerResult(
+            capability=RESEARCH_WORKER_CAPABILITY,
+            status="partial",
+            summary=summary,
+            data={
+                "action": action,
+                "payload": payload,
+                "session_id": session_id,
+                "research_job_id": research_job_id,
+                "research_status": "running",
+                "semantic_complete": False,
+            },
+        )
+
     summary = str(
         payload.get("output")
         or payload.get("message")
@@ -254,6 +297,7 @@ async def run_research_worker(
             "action": action,
             "payload": payload,
             "session_id": session_id,
+            "semantic_complete": True,
         },
     )
 
