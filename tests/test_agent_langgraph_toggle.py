@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,7 +131,7 @@ def test_explicit_multi_graph_admission_owns_coordinator_boundary() -> None:
     chat = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
 
     assert "stream_multi_graph_coordinator_sse" in chat
-    assert "def _stream_multi_graph_with_legacy_fallback" in chat
+    assert "def _stream_multi_graph_fail_closed" in chat
     assert "_explicit_agent_multi_graph = bool(" in chat
     assert "_agent_admission.use_multi_graph" in chat
     assert "admission_assessment=(" in chat
@@ -137,5 +139,61 @@ def test_explicit_multi_graph_admission_owns_coordinator_boundary() -> None:
     assert "not _explicit_agent_multi_graph\n                        and contract_runtime_enabled()" in chat
     assert "not _explicit_agent_multi_graph\n                        and general_runtime_enabled()" in chat
     assert "not _explicit_agent_multi_graph\n                        and _router_agent_runtime_requested" in chat
-    assert "_stream_multi_graph_with_legacy_fallback" in chat
-    assert "falling back to Legacy agent loop" in chat
+    assert "_stream_multi_graph_fail_closed" in chat
+    assert "whole-query Legacy fallback" in chat
+    assert "legacy_kwargs" not in chat
+    assert '"runtime_run"' in chat
+    assert '"runtime_terminal"' in chat
+
+
+def test_multi_graph_startup_failure_never_invokes_whole_query_legacy(
+    monkeypatch,
+) -> None:
+    from routes import chat_routes
+
+    async def failing_coordinator():
+        if False:
+            yield ""
+        raise RuntimeError("coordinator unavailable")
+
+    legacy_calls = []
+
+    async def forbidden_legacy(*args, **kwargs):
+        legacy_calls.append((args, kwargs))
+        yield "data: forbidden\n\n"
+
+    monkeypatch.setattr(
+        chat_routes,
+        "stream_multi_graph_coordinator_sse",
+        failing_coordinator,
+    )
+    monkeypatch.setattr(
+        chat_routes,
+        "stream_agent_loop",
+        forbidden_legacy,
+    )
+
+    async def collect():
+        return [
+            frame
+            async for frame in chat_routes._stream_multi_graph_fail_closed()
+        ]
+
+    frames = asyncio.run(collect())
+    payloads = [
+        json.loads(frame[6:])
+        for frame in frames
+        if frame.startswith("data: ")
+        and frame != "data: [DONE]\n\n"
+    ]
+    terminals = [
+        item
+        for item in payloads
+        if item.get("type") == "runtime_terminal"
+    ]
+
+    assert legacy_calls == []
+    assert frames.count("data: [DONE]\n\n") == 1
+    assert len(terminals) == 1
+    assert terminals[0]["data"]["status"] == "FAILED"
+    assert terminals[0]["data"]["whole_query_legacy_fallback"] is False

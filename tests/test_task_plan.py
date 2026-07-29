@@ -8,6 +8,7 @@ from src.agent_runtime.task_plan import (
     blocked_step_ids,
     ready_step_ids,
     topological_step_ids,
+    validate_or_repair_task_plan_payload,
     validate_task_plan_payload,
 )
 
@@ -82,6 +83,17 @@ def test_dependency_state_usage_requires_dependency():
         match="uses_dependency_state=true requires at least one depends_on",
     ):
         validate_task_plan_payload(payload)
+
+
+def test_unambiguous_first_step_dependency_state_is_repaired():
+    payload = _multi_plan_payload()
+    payload["steps"][0]["uses_dependency_state"] = True
+
+    plan = validate_or_repair_task_plan_payload(payload)
+
+    assert plan.steps[0].depends_on == ()
+    assert plan.steps[0].uses_dependency_state is False
+    assert plan.steps[0].requires_external_state is True
 
 
 def test_backend_execution_fields_are_rejected():

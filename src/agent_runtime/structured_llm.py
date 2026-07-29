@@ -126,6 +126,8 @@ async def invoke_structured_model_async(
     model: StructuredModel,
     prompt: str,
     validator: StructuredValidator[T],
+    *,
+    max_rounds: int = 2,
 ) -> T:
     """Invoke one structured model call through its strongest available seam.
 
@@ -134,6 +136,9 @@ async def invoke_structured_model_async(
     offline models keep the existing ``invoke`` seam and are validated after
     their one response.
     """
+
+    if max_rounds < 1:
+        raise ValueError("max_rounds must be at least 1")
 
     validated_invoke = getattr(
         model,
@@ -146,18 +151,30 @@ async def invoke_structured_model_async(
             prompt,
             validator,
         )
-    else:
-        response = model.invoke(
-            prompt
-        )
+        if inspect.isawaitable(response):
+            response = await response
+        return validator(response)
 
-    if inspect.isawaitable(response):
-        response = await response
+    current_prompt = prompt
+    last_error: Exception | None = None
+    for round_index in range(max_rounds):
+        response = model.invoke(current_prompt)
+        if inspect.isawaitable(response):
+            response = await response
+        try:
+            return validator(response)
+        except Exception as exc:
+            last_error = exc
+            if round_index + 1 >= max_rounds:
+                raise
+            current_prompt = build_structured_retry_prompt(
+                prompt,
+                exc,
+            )
 
-    # Production invoke_validated already used the validator to decide which
-    # fallback candidate won. Validate again to return the typed result and to
-    # preserve identical behavior for simple injected/offline models.
-    return validator(response)
+    raise AssertionError(
+        f"Structured model loop exited without a result: {last_error}"
+    )
 
 
 __all__ = [

@@ -15,6 +15,9 @@ from src.agent_runtime.multi_graph_coordinator import (
     _RuntimeFallbackModel,
     stream_multi_graph_coordinator_sse,
 )
+from src.agent_runtime.run_lifecycle import (
+    LangGraphCancellationScope,
+)
 from src.agent_runtime.supervisor_contracts import WorkerResult
 
 
@@ -151,6 +154,9 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
                     "combine_cap": combine,
                 },
                 surfaces=surfaces,
+                session_id="session-1",
+                run_id="run-1",
+                thread_id="thread-1",
             )
         )
     )
@@ -164,6 +170,14 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     ]
     assert any(item.get("type") == "plan_update" for item in payloads)
     assert any(item.get("delta") == "Final answer" for item in payloads)
+    runtime_run = next(
+        item["data"]
+        for item in payloads
+        if item.get("type") == "runtime_run"
+    )
+    assert runtime_run["run_id"] == "run-1"
+    assert runtime_run["session_id"] == "session-1"
+    assert runtime_run["thread_id"] == "thread-1"
     metrics = next(
         item["data"]
         for item in payloads
@@ -173,6 +187,90 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     assert metrics["execution_order"] == ["gather", "combine"]
     assert metrics["multi_graph"] is True
     assert captured["dependency_outputs"]["gather"]["summary"] == "Evidence A"
+
+
+def test_planner_exhaustion_emits_one_controlled_terminal_result():
+    invalid = _plan()
+    invalid["steps"][1]["depends_on"] = ["missing"]
+    planner = Model(lambda prompt: invalid)
+
+    frames = asyncio.run(
+        _collect(
+            stream_multi_graph_coordinator_sse(
+                "http://example",
+                "model",
+                [{"role": "user", "content": "Gather then combine."}],
+                admission_assessment=_assessment(),
+                planner_model=planner,
+            )
+        )
+    )
+    payloads = [
+        json.loads(frame[6:])
+        for frame in frames
+        if frame.startswith("data: ")
+        and frame != "data: [DONE]\n\n"
+    ]
+    terminals = [
+        item
+        for item in payloads
+        if item.get("type") == "runtime_terminal"
+    ]
+
+    assert len(planner.prompts) == 2
+    assert frames.count("data: [DONE]\n\n") == 1
+    assert len(terminals) == 1
+    assert terminals[0]["data"]["status"] == "FAILED"
+    assert terminals[0]["data"]["stage"] == "planner"
+    assert terminals[0]["data"]["completed_steps"] == []
+    assert terminals[0]["data"]["whole_query_legacy_fallback"] is False
+
+
+def test_coordinator_cancellation_cancels_only_its_run_scope():
+    async def scenario():
+        blocker = asyncio.Event()
+
+        class BlockingPlanner:
+            def invoke(self, prompt):
+                async def wait_forever():
+                    await blocker.wait()
+                    return _plan()
+
+                return wait_forever()
+
+        owned_calls = []
+        scope = LangGraphCancellationScope("run-cancel")
+        scope.own_cancellation(
+            "owned-research-job",
+            lambda: owned_calls.append("owned"),
+        )
+        generator = stream_multi_graph_coordinator_sse(
+            "http://example",
+            "model",
+            [{"role": "user", "content": "Gather then combine."}],
+            admission_assessment=_assessment(),
+            planner_model=BlockingPlanner(),
+            run_id="run-cancel",
+            cancellation_scope=scope,
+        )
+
+        first = await generator.__anext__()
+        assert '"type": "runtime_run"' in first
+
+        pending = asyncio.create_task(generator.__anext__())
+        await asyncio.sleep(0)
+        pending.cancel()
+        try:
+            await pending
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("planner cancellation did not propagate")
+
+        assert scope.cancelled is True
+        assert owned_calls == ["owned"]
+
+    asyncio.run(scenario())
 
 
 def test_partial_worker_result_stops_at_replan_boundary_instead_of_crashing():

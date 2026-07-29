@@ -105,6 +105,8 @@ class _Model:
 
     def invoke(self, prompt):
         self.prompts.append(prompt)
+        if isinstance(self.response, list):
+            return self.response[len(self.prompts) - 1]
         return self.response
 
 
@@ -227,6 +229,40 @@ def test_multi_graph_plan_cannot_collapse_to_one_step():
             _multi_assessment(),
             model=model,
         )
+
+
+def test_sync_planner_retries_once_with_precise_validation_feedback():
+    invalid = _valid_plan_payload()
+    invalid["steps"][2]["depends_on"] = ["missing"]
+    model = _Model([invalid, _valid_plan_payload()])
+
+    plan = plan_task_from_assessment(
+        "Compare my project with current options.",
+        _multi_assessment(),
+        model=model,
+    )
+
+    assert plan.steps[-1].id == "synthesize"
+    assert len(model.prompts) == 2
+    assert "depends on unknown step missing" in model.prompts[1]
+
+
+def test_sync_planner_exhaustion_is_bounded():
+    invalid = _valid_plan_payload()
+    invalid["steps"][2]["depends_on"] = ["missing"]
+    model = _Model([invalid, invalid])
+
+    with pytest.raises(
+        ValueError,
+        match="depends on unknown step missing",
+    ):
+        plan_task_from_assessment(
+            "Compare my project with current options.",
+            _multi_assessment(),
+            model=model,
+        )
+
+    assert len(model.prompts) == 2
 
 
 def test_planner_does_not_import_execution_owners():

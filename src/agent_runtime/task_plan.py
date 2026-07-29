@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -335,6 +336,59 @@ def validate_task_plan_payload(
     return plan
 
 
+def repair_unambiguous_task_plan_payload(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Repair only schema invariants that have exactly one safe correction.
+
+    The planner cannot consume dependency output when ``depends_on`` is empty.
+    Clearing that contradictory flag preserves the step objective and does not
+    invent dependencies. Unknown IDs, cycles, duplicates, ordering, and all
+    semantic fields remain model-owned and are never guessed here.
+    """
+
+    if not isinstance(payload, dict):
+        return payload, ()
+
+    repaired = deepcopy(payload)
+    raw_steps = repaired.get("steps")
+    if not isinstance(raw_steps, list):
+        return repaired, ()
+
+    repairs: list[str] = []
+    for index, raw_step in enumerate(raw_steps, start=1):
+        if not isinstance(raw_step, dict):
+            continue
+        depends_on = raw_step.get("depends_on", [])
+        if (
+            raw_step.get("uses_dependency_state") is True
+            and isinstance(depends_on, (list, tuple))
+            and not depends_on
+        ):
+            raw_step["uses_dependency_state"] = False
+            step_id = str(raw_step.get("id") or index).strip()
+            repairs.append(
+                f"PlanStep {step_id} uses_dependency_state=false "
+                "because depends_on is empty"
+            )
+
+    return repaired, tuple(repairs)
+
+
+def validate_or_repair_task_plan_payload(
+    payload: dict[str, Any],
+) -> TaskPlan:
+    """Validate first, then apply the one deterministic repair if applicable."""
+
+    try:
+        return validate_task_plan_payload(payload)
+    except ValueError:
+        repaired, repairs = repair_unambiguous_task_plan_payload(payload)
+        if not repairs:
+            raise
+        return validate_task_plan_payload(repaired)
+
+
 def _normalize_runtime_ids(
     plan: TaskPlan,
     values: Iterable[str],
@@ -471,6 +525,8 @@ __all__ = [
     "TaskPlan",
     "blocked_step_ids",
     "ready_step_ids",
+    "repair_unambiguous_task_plan_payload",
     "topological_step_ids",
+    "validate_or_repair_task_plan_payload",
     "validate_task_plan_payload",
 ]

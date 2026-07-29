@@ -23,6 +23,7 @@ from src.agent_runtime.live_supervisor import stream_general_supervisor_sse
 from src.agent_runtime.multi_graph_coordinator import (
     stream_multi_graph_coordinator_sse,
 )
+from src.agent_runtime.run_lifecycle import LangGraphRunLifecycle
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -180,12 +181,28 @@ async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
         yield chunk
 
 
-async def _stream_multi_graph_with_legacy_fallback(*args, **kwargs):
-    """Run the admitted multi-graph coordinator, preserving Legacy fallback."""
+async def _stream_multi_graph_fail_closed(*args, **kwargs):
+    """Run the admitted coordinator without widening into whole-query Legacy."""
     import inspect
 
-    emitted_any = False
     coordinator_kwargs = dict(kwargs)
+    lifecycle = LangGraphRunLifecycle.create(
+        session_id=coordinator_kwargs.get("session_id"),
+        run_id=coordinator_kwargs.get("run_id"),
+        thread_id=coordinator_kwargs.get("thread_id"),
+    )
+    coordinator_kwargs.setdefault(
+        "run_id",
+        lifecycle.identity.run_id,
+    )
+    coordinator_kwargs.setdefault(
+        "thread_id",
+        lifecycle.identity.thread_id,
+    )
+    coordinator_kwargs.setdefault(
+        "cancellation_scope",
+        lifecycle.cancellation,
+    )
 
     try:
         allowed = set(
@@ -203,28 +220,50 @@ async def _stream_multi_graph_with_legacy_fallback(*args, **kwargs):
             *args,
             **coordinator_kwargs,
         ):
-            emitted_any = True
             yield chunk
 
         return
 
-    except Exception:
-        if emitted_any:
-            raise
-
+    except (asyncio.CancelledError, GeneratorExit):
+        raise
+    except Exception as exc:
         logger.exception(
             "[multi-graph] coordinator failed before output; "
-            "falling back to Legacy agent loop"
+            "failing closed without whole-query Legacy fallback"
         )
 
-    legacy_kwargs = dict(kwargs)
-    legacy_kwargs.pop("admission_assessment", None)
-
-    async for chunk in stream_agent_loop(
-        *args,
-        **legacy_kwargs,
-    ):
-        yield chunk
+        error_text = (
+            "The native multi-step runtime could not start safely. "
+            "No Legacy fallback was started. "
+            f"{type(exc).__name__}: {exc}"
+        )
+        yield f"data: {json.dumps({'delta': error_text})}\n\n"
+        terminal = lifecycle.finish(
+            "FAILED",
+            stage="coordinator_start",
+            reason=f"{type(exc).__name__}: {exc}",
+            retryable=True,
+            completed_steps=[],
+            whole_query_legacy_fallback=False,
+        )
+        if terminal is not None:
+            yield "data: " + json.dumps(terminal) + "\n\n"
+        yield (
+            "data: "
+            + json.dumps({
+                "type": "metrics",
+                "data": {
+                    "runtime": "p3c5b2-multi-graph-v1",
+                    "multi_graph": True,
+                    "plan_status": "coordinator_start_failed",
+                    "terminal_status": "FAILED",
+                    "whole_query_legacy_fallback": False,
+                    "langgraph_runtime": True,
+                },
+            })
+            + "\n\n"
+        )
+        yield "data: [DONE]\n\n"
 
 
 def _append_runtime_tool_event(events, data):
@@ -2421,7 +2460,7 @@ def setup_chat_routes(
 
                     if _explicit_agent_multi_graph:
                         _selected_agent_stream = partial(
-                            _stream_multi_graph_with_legacy_fallback,
+                            _stream_multi_graph_fail_closed,
                             admission_assessment=(
                                 _agent_admission.assessment
                             ),
@@ -2489,6 +2528,8 @@ def setup_chat_routes(
                                     "intent_nudge_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "runtime_run",
+                                    "runtime_terminal",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))

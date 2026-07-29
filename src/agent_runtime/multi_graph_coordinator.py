@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
@@ -28,6 +29,10 @@ from src.agent_runtime.replan_controller import (
     ReplanContextProvider,
     ReplanControlResult,
     run_task_plan_with_replanning,
+)
+from src.agent_runtime.run_lifecycle import (
+    LangGraphCancellationScope,
+    LangGraphRunLifecycle,
 )
 from src.agent_runtime.step_action_resolver import (
     CapabilityActionModel,
@@ -618,11 +623,20 @@ async def stream_multi_graph_coordinator_sse(
     max_plan_steps: int = MAX_PLAN_STEPS,
     max_step_executions: int = 64,
     max_revisions: int = 3,
+    run_id: str | None = None,
+    thread_id: str | None = None,
+    cancellation_scope: LangGraphCancellationScope | None = None,
     **kwargs: Any,
 ) -> AsyncGenerator[str, None]:
     """Execute an admitted multi-graph turn through permanent runtime owners."""
 
     started_at = time.time()
+    lifecycle = LangGraphRunLifecycle.create(
+        session_id=session_id,
+        run_id=run_id,
+        thread_id=thread_id,
+        cancellation=cancellation_scope,
+    )
     query = _latest_user_message(messages)
 
     if not query:
@@ -639,6 +653,16 @@ async def stream_multi_graph_coordinator_sse(
         raise ValueError(
             "Multi-graph coordinator requires an admitted multi_graph assessment"
         )
+
+    yield _frame(lifecycle.event({
+        "type": "runtime_run",
+        "data": {
+            "status": lifecycle.status,
+            "admission_result": "multi_graph",
+            "fallback_policy": "plan_step_only",
+            "cancellation_scope": lifecycle.identity.run_id,
+        },
+    }))
 
     if assessment.clarification_needed:
         missing = ", ".join(assessment.missing_information)
@@ -670,6 +694,15 @@ async def stream_multi_graph_coordinator_sse(
                 "langgraph_runtime": True,
             },
         })
+        terminal = lifecycle.finish(
+            "AWAITING_APPROVAL",
+            stage="admission",
+            reason=question,
+            completed_steps=[],
+            whole_query_legacy_fallback=False,
+        )
+        if terminal is not None:
+            yield _frame(terminal)
         yield "data: [DONE]\n\n"
         return
 
@@ -710,19 +743,59 @@ async def stream_multi_graph_coordinator_sse(
         llm_caller=llm_caller,
     )
 
-    plan = await plan_task_from_assessment_async(
-        query,
-        assessment,
-        model=planner,
-    )
-
-    if len(plan.steps) > max_plan_steps:
-        raise ValueError(
-            f"Task Planner produced {len(plan.steps)} steps; "
-            f"the safety limit is {max_plan_steps}"
+    try:
+        plan = await plan_task_from_assessment_async(
+            query,
+            assessment,
+            model=planner,
         )
 
-    yield _frame({
+        if len(plan.steps) > max_plan_steps:
+            raise ValueError(
+                f"Task Planner produced {len(plan.steps)} steps; "
+                f"the safety limit is {max_plan_steps}"
+            )
+    except asyncio.CancelledError:
+        lifecycle.cancellation.cancel()
+        raise
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        error_text = (
+            "I could not construct a valid bounded plan for this multi-step "
+            "request. No work was started and no Legacy fallback was used. "
+            f"{reason}"
+        )
+        yield _frame({"delta": error_text})
+        terminal = lifecycle.finish(
+            "FAILED",
+            stage="planner",
+            reason=reason,
+            retryable=True,
+            completed_steps=[],
+            whole_query_legacy_fallback=False,
+        )
+        if terminal is not None:
+            yield _frame(terminal)
+        yield _frame({
+            "type": "metrics",
+            "data": {
+                "runtime": RUNTIME_VERSION,
+                "model": model,
+                "requested_model": model,
+                "elapsed_s": round(time.time() - started_at, 3),
+                "multi_graph": True,
+                "plan_status": "planner_failed",
+                "terminal_status": "FAILED",
+                "whole_query_legacy_fallback": False,
+                "tool_calls": 0,
+                "tool_events": [],
+                "langgraph_runtime": True,
+            },
+        })
+        yield "data: [DONE]\n\n"
+        return
+
+    yield _frame(lifecycle.event({
         "type": "plan_update",
         "data": {
             "runtime": RUNTIME_VERSION,
@@ -730,7 +803,7 @@ async def stream_multi_graph_coordinator_sse(
             "status": "planned",
             **_plan_payload(plan),
         },
-    })
+    }))
 
     dependency_reasoning_descriptor = (
         dependency_reasoning_capability()
@@ -834,12 +907,26 @@ async def stream_multi_graph_coordinator_sse(
             max_step_executions=max_step_executions,
             max_revisions=max_revisions,
         )
+    except asyncio.CancelledError:
+        lifecycle.cancellation.cancel()
+        raise
     except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
         error_text = (
             "The multi-step plan started but its execution coordinator failed: "
-            f"{type(exc).__name__}: {exc}"
+            f"{reason}"
         )
         yield _frame({"delta": error_text})
+        terminal = lifecycle.finish(
+            "FAILED",
+            stage="coordinator",
+            reason=reason,
+            retryable=True,
+            completed_steps=[],
+            whole_query_legacy_fallback=False,
+        )
+        if terminal is not None:
+            yield _frame(terminal)
         yield _frame({
             "type": "metrics",
             "data": {
@@ -919,6 +1006,35 @@ async def stream_multi_graph_coordinator_sse(
             "langgraph_runtime": True,
         },
     })
+    terminal_status = (
+        "COMPLETED"
+        if control.orchestration.status == "completed"
+        else (
+            "AWAITING_APPROVAL"
+            if question is not None
+            else "FAILED"
+        )
+    )
+    terminal = lifecycle.finish(
+        terminal_status,
+        stage="coordinator",
+        reason=(
+            control.orchestration.message
+            or control.stopped_reason
+        ),
+        completed_steps=[
+            step_id
+            for step_id in control.orchestration.execution_order
+            if next(
+                item
+                for item in control.orchestration.state.step_states
+                if item.step_id == step_id
+            ).status == "completed"
+        ],
+        whole_query_legacy_fallback=False,
+    )
+    if terminal is not None:
+        yield _frame(terminal)
     yield "data: [DONE]\n\n"
 
 
