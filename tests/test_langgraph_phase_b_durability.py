@@ -83,6 +83,31 @@ def test_retention_deletes_only_old_terminal_runs(tmp_path):
     store.close()
 
 
+def test_retention_uses_typed_runtime_setting_when_not_explicit(
+    tmp_path,
+    monkeypatch,
+):
+    import src.agent_runtime.runtime_settings as runtime_settings
+
+    store = DurableRunCheckpointStore(tmp_path / "configured-retention.sqlite3")
+    old_terminal = _run(store, 1)
+    old_terminal.finish("COMPLETED", stage="done")
+    store._connection.execute(
+        "UPDATE odysseus_runtime_runs SET updated_at=? WHERE run_id='run-1'",
+        (time.time() - 8 * 86400,),
+    )
+    store._connection.commit()
+    configured = dict(runtime_settings.DEFAULT_LANGGRAPH_RUNTIME_SETTINGS)
+    configured["completed_run_retention"] = 7
+    monkeypatch.setattr(
+        runtime_settings,
+        "get_langgraph_runtime_settings",
+        lambda: configured,
+    )
+    assert store.cleanup_completed() == 1
+    store.close()
+
+
 def test_schema_migration_and_controlled_rejection(tmp_path):
     store = DurableRunCheckpointStore(tmp_path / "schema.sqlite3")
     old = {

@@ -369,9 +369,16 @@ class DurableRunCheckpointStore:
                 f"{type(exc).__name__}: {exc}"
             ) from exc
 
-    def cleanup_completed(self, *, retention_days: int = 30) -> int:
+    def cleanup_completed(self, *, retention_days: int | None = None) -> int:
         """Delete only terminal run data older than the configured retention."""
 
+        if retention_days is None:
+            from src.agent_runtime.runtime_settings import (
+                get_langgraph_runtime_settings,
+            )
+            retention_days = int(
+                get_langgraph_runtime_settings()["completed_run_retention"]
+            )
         cutoff = time.time() - max(1, int(retention_days)) * 86400
         with self._lock:
             try:

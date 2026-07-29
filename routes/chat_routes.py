@@ -138,6 +138,19 @@ def _agent_langgraph_architecture_enabled_for_request(chat_mode: str | None) -> 
         return True
 
 
+def _langgraph_multi_graph_allowed_by_settings() -> bool:
+    try:
+        from src.agent_runtime.runtime_settings import (
+            get_langgraph_runtime_settings,
+            runtime_policy,
+        )
+        return bool(
+            runtime_policy(get_langgraph_runtime_settings())["allow_multi_graph"]
+        )
+    except Exception:
+        return False
+
+
 def _route_agent_runtime_for_request(message: str, enabled: bool):
     """Return no LangGraph decision when the request-level kill switch is off.
 
@@ -2180,6 +2193,7 @@ def setup_chat_routes(
                         and not effective_do_research
                         and not plan_mode
                         and not approved_plan
+                        and _langgraph_multi_graph_allowed_by_settings()
                     )
                     _langgraph_first_ambiguous_agent = (
                         _agent_langgraph_architecture_enabled

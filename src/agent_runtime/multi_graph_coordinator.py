@@ -645,6 +645,25 @@ async def stream_multi_graph_coordinator_sse(
     """Execute an admitted multi-graph turn through permanent runtime owners."""
 
     started_at = time.time()
+    from src.agent_runtime.runtime_settings import (
+        get_langgraph_runtime_settings,
+        runtime_policy,
+    )
+    runtime_settings = get_langgraph_runtime_settings()
+    configured_policy = runtime_policy(runtime_settings)
+    effort_limits = {
+        "quick": (4, 16, 1),
+        "balanced": (max_plan_steps, max_step_executions, max_revisions),
+        "thorough": (
+            max(max_plan_steps, 12),
+            max(max_step_executions, 96),
+            max(max_revisions, 4),
+        ),
+        "custom": (max_plan_steps, max_step_executions, max_revisions),
+    }
+    max_plan_steps, max_step_executions, max_revisions = effort_limits[
+        runtime_settings["effort_preset"]
+    ]
     lifecycle = LangGraphRunLifecycle.create(
         session_id=session_id,
         run_id=run_id,
@@ -677,6 +696,7 @@ async def stream_multi_graph_coordinator_sse(
             "status": lifecycle.status,
             "admission_result": "multi_graph",
             "fallback_policy": "plan_step_only",
+            "runtime_settings_version": runtime_settings["version"],
             "cancellation_scope": lifecycle.identity.run_id,
         },
     }))
@@ -889,10 +909,11 @@ async def stream_multi_graph_coordinator_sse(
     )
 
     executors = dict(surface_executors or {})
-    executors.setdefault(
-        LEGACY_SURFACE_ID,
-        legacy_executor,
-    )
+    if configured_policy["allow_legacy_step_fallback"]:
+        executors.setdefault(
+            LEGACY_SURFACE_ID,
+            legacy_executor,
+        )
 
     execution_surfaces = (
         build_execution_surface_catalog(
@@ -906,7 +927,11 @@ async def stream_multi_graph_coordinator_sse(
     supervisor_state = _base_supervisor_state(
         query,
         owner=owner,
-        workspace=workspace,
+        workspace=(
+            workspace
+            if runtime_settings["context_source_policy"]["workspace"]
+            else None
+        ),
         active_document=active_document,
         active_email=active_email,
         disabled_tools=disabled_tools,
@@ -914,6 +939,27 @@ async def stream_multi_graph_coordinator_sse(
         root_id=root_id or kwargs.get("root_id"),
         uploaded_files=uploaded_files or (),
     )
+    if not configured_policy["allow_legacy_step_fallback"]:
+        execution_surfaces = tuple(
+            surface
+            for surface in execution_surfaces
+            if surface.id != LEGACY_SURFACE_ID
+        )
+    if not configured_policy["allow_research_start"]:
+        execution_surfaces = tuple(
+            surface
+            for surface in execution_surfaces
+            if surface.capability_name != "deep_research"
+        )
+    if not (
+        configured_policy["allow_mutation"]
+        or configured_policy["require_mutation_approval"]
+    ):
+        execution_surfaces = tuple(
+            surface
+            for surface in execution_surfaces
+            if not surface.supports_mutation
+        )
     supervisor_state["worker_context"].update({
         "run_id": lifecycle.identity.run_id,
         "owner": owner,
@@ -922,6 +968,8 @@ async def stream_multi_graph_coordinator_sse(
         "attempt_store": checkpoint_store,
         "cancellation_scope": lifecycle.cancellation,
         "research_job_observer": lifecycle.own_research_job,
+        "langgraph_runtime_settings": runtime_settings,
+        "langgraph_runtime_policy": configured_policy,
     })
     context = StepExecutionContext(
         supervisor_state=supervisor_state,
