@@ -59,6 +59,8 @@ async def test_live_supervisor_reasons_dispatches_and_finishes():
     assert _payload(frames[1])["type"] == "tool_output"
     assert _payload(frames[2])["delta"] == "I found the relevant indexed project notes."
     assert _payload(frames[3])["data"]["runtime"] == "general-supervisor-v1"
+    assert _payload(frames[3])["data"]["presenting_model"] == "test-model"
+    assert _payload(frames[3])["data"]["response_origin"] == "selected_model"
     assert frames[-1] == "data: [DONE]\n\n"
     assert len(calls) == 2
 

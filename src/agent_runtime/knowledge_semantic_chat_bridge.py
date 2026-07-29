@@ -109,15 +109,17 @@ def should_intercept_workspace_knowledge(message: str) -> bool:
     ):
         return False
 
-    # A question or contextual read request inside an active workspace should
-    # consult that workspace before claiming the information is unavailable.
-    return bool(
-        "?" in text
-        or re.search(
-            r"^\s*(?:what|when|which|where|who|how|should|do|did|was|were|is|are|can|could|would|remind|summarize|list|help|give|tell|add|calculate|compute|total|review|suggest|build)\b",
-            low,
-        )
-    )
+    # An active workspace is available context, not evidence that every factual
+    # question is about that workspace. Require the user to refer to the
+    # workspace/project/files (or an equivalent contextual pronoun) before RAG
+    # can intercept an otherwise ordinary question.
+    return bool(re.search(
+        r"\b(?:this|current|selected|active|my|our)\s+"
+        r"(?:workspace|project|repository|repo|codebase|files?|documents?|notes?)\b"
+        r"|\b(?:in|from|within|about)\s+(?:the|this|my|our)\s+"
+        r"(?:workspace|project|repository|repo|codebase|files?|documents?|notes?)\b",
+        low,
+    ))
 
 
 def extract_semantic_query(message: str) -> str:

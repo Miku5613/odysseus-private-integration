@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .general_state import GeneralObservation, GeneralState, GeneralTask
 from . import general_tools as tools
+from .tool_policy import has_mutation_intent
 
 
 WRITE_WORDS = {
@@ -87,10 +88,7 @@ def _contains_any(text: str, words: set[str]) -> bool:
 
 
 def _has_write_intent(text: str) -> bool:
-    low = text.lower()
-    if any(p in low for p in WRITE_PHRASES):
-        return True
-    return any(re.search(rf"\b{re.escape(word)}\b", low) for word in WRITE_WORDS)
+    return has_mutation_intent(text)
 
 
 def infer_file_lookup_topic(query: str) -> str:

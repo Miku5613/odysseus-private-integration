@@ -163,10 +163,13 @@ def _route_agent_runtime_for_request(message: str, enabled: bool):
 
 
 async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
-    """Run native LangGraph first, preserving Legacy as failure fallback."""
-    import inspect
+    """Run native LangGraph without widening a failed request into Legacy.
 
-    emitted_any = False
+    The historical name remains as a compatibility seam for callers and tests.
+    Legacy fallback is permitted only inside an eligible failed PlanStep, never
+    for the whole user query.
+    """
+    import inspect
 
     try:
         allowed = set(
@@ -185,22 +188,42 @@ async def _stream_langgraph_first_with_legacy_fallback(*args, **kwargs):
             *args,
             **langgraph_kwargs,
         ):
-            emitted_any = True
             yield chunk
 
         return
 
-    except Exception:
-        if emitted_any:
-            raise
-
+    except (asyncio.CancelledError, GeneratorExit):
+        raise
+    except Exception as exc:
         logger.exception(
-            "[langgraph-first] native LangGraph failed before output; "
-            "falling back to Legacy agent loop"
+            "[langgraph-first] native LangGraph failed; "
+            "failing closed without whole-query Legacy fallback"
         )
-
-    async for chunk in stream_agent_loop(*args, **kwargs):
-        yield chunk
+        failure = (
+            "The native LangGraph runtime could not complete this request "
+            "safely. No Legacy fallback was started. "
+            f"{type(exc).__name__}: {exc}"
+        )
+        yield f"data: {json.dumps({'delta': failure})}\n\n"
+        yield "data: " + json.dumps({
+            "type": "metrics",
+            "data": {
+                "runtime": "general-supervisor-v1",
+                "selected_model": (
+                    kwargs.get("model")
+                    or (args[1] if len(args) > 1 else None)
+                ),
+                "presenting_model": None,
+                "model": None,
+                "worker": None,
+                "fallback_used": False,
+                "fallback_scope": "none",
+                "response_origin": "controlled_runtime_failure",
+                "langgraph_runtime": True,
+                "whole_query_legacy_fallback": False,
+            },
+        }) + "\n\n"
+        yield "data: [DONE]\n\n"
 
 
 async def _stream_multi_graph_fail_closed(*args, **kwargs):
@@ -2218,6 +2241,7 @@ def setup_chat_routes(
                     )
                     _contract_allowed_agent = (
                         _contract_requested_agent
+                        and not _explicit_agent_single_graph
                         and not _explicit_agent_multi_graph
                         and contract_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
@@ -2306,6 +2330,10 @@ def setup_chat_routes(
                         _agent_langgraph_architecture_enabled
                         and _runtime_decision is not None
                         and _runtime_decision.intent == "write_mutation"
+                        and not (
+                            _explicit_agent_single_graph
+                            or _explicit_agent_multi_graph
+                        )
                     ):
                         _policy_result = evaluate_mutation_request(message)
                         _policy_call_id = "mutation-policy-decision"
@@ -2430,6 +2458,7 @@ def setup_chat_routes(
                     )
                     _general_allowed_agent = (
                         _general_requested_agent
+                        and not _explicit_agent_single_graph
                         and not _explicit_agent_multi_graph
                         and general_runtime_enabled()
                         and _runtime_decision.is_safe_readonly
@@ -2510,7 +2539,8 @@ def setup_chat_routes(
 
                     # RUNTIME_TRACE_V015F_LEGACY_DECLINE_START
                     _legacy_trace_needed = (
-                        not _explicit_agent_multi_graph
+                        not _explicit_agent_single_graph
+                        and not _explicit_agent_multi_graph
                         and _router_agent_runtime_requested
                         and (
                             _runtime_decision.target_runtime == "legacy"

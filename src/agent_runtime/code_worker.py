@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+import inspect
 from typing import Any
 
 from src.agent_runtime.claim_support import (
@@ -71,10 +72,21 @@ def _collect_worker_result(
     claim_support_level: str | None = None
     semantic_support_seen = False
     strong_evidence = False
+    runtime_events: list[dict[str, Any]] = []
 
     for event in events:
         event_count += 1
         event_type = str(event.get("type") or "")
+        if event_type in {
+            "stream_start",
+            "tool_call_start",
+            "tool_call_result",
+            "tool_confirmation_required",
+            "tool_risk_blocked",
+            "stream_error",
+            "stream_done",
+        }:
+            runtime_events.append(dict(event))
 
         if event_type == "evidence_hit":
             evidence.append(dict(event))
@@ -119,6 +131,7 @@ def _collect_worker_result(
             if semantic_support_seen
             else bool(evidence)
         ),
+        "runtime_events": runtime_events,
     }
 
     if error is not None:
@@ -489,11 +502,29 @@ def run_code_worker(
 
     workspace = _normalize_workspace(handoff)
 
-    events = stream_factory(
-        objective,
-        workspace=workspace,
-        session_id=session_id,
-    )
+    stream_kwargs = {
+        "workspace": workspace,
+        "session_id": session_id,
+        "owner": handoff.context.get("owner"),
+    }
+    try:
+        signature = inspect.signature(stream_factory)
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if not accepts_kwargs:
+            stream_kwargs = {
+                key: value
+                for key, value in stream_kwargs.items()
+                if key in signature.parameters
+            }
+    except (TypeError, ValueError):
+        # Some injected callables do not expose a signature. Preserve the older
+        # workspace/session contract in that compatibility case.
+        stream_kwargs.pop("owner", None)
+
+    events = stream_factory(objective, **stream_kwargs)
 
     primary = _collect_worker_result(
         handoff,

@@ -7,6 +7,7 @@ from typing import Any
 
 from src.agent_runtime.supervisor_decision import parse_supervisor_decision
 from src.agent_runtime.supervisor_reasoner import build_supervisor_prompt
+from src.agent_runtime.legacy_sse_adapter import to_legacy_payload
 from src.agent_runtime.worker_dispatcher import (
     DispatchResult,
     builtin_worker_runners,
@@ -52,6 +53,18 @@ def _text(value: Any) -> str:
         return content
 
     raise ValueError("LLM response did not contain text")
+
+
+def _response_model(value: Any, selected_model: str) -> str:
+    if isinstance(value, dict):
+        for key in ("actual_model", "model", "answered_by"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    candidate = getattr(value, "model", None)
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    return selected_model
 
 
 def _frame(payload: dict[str, Any]) -> str:
@@ -175,7 +188,13 @@ async def stream_general_supervisor_sse(
             "type": "metrics",
             "data": {
                 "runtime": RUNTIME_VERSION,
-                "model": model,
+                "selected_model": model,
+                "presenting_model": None,
+                "model": None,
+                "worker": None,
+                "fallback_used": False,
+                "fallback_scope": "none",
+                "response_origin": "runtime_clarification",
                 "elapsed_s": round(time.time() - started_at, 3),
                 "selected_capabilities": list(decision.selected_capabilities),
                 "clarification_needed": True,
@@ -221,6 +240,13 @@ async def stream_general_supervisor_sse(
 
     evidence_payload = _dispatch_payload(dispatch)
     for index, result in enumerate(dispatch.worker_results, start=1):
+        for runtime_event in result.data.get("runtime_events", ()):
+            if runtime_event.get("type") != "tool_confirmation_required":
+                continue
+            projected = to_legacy_payload(runtime_event)
+            if isinstance(projected, dict):
+                yield _frame(projected)
+
         call_id = f"supervisor_{result.capability}_{index}"
         yield _frame({
             "type": "tool_start",
@@ -258,6 +284,9 @@ async def stream_general_supervisor_sse(
         json.dumps(evidence_payload, ensure_ascii=False, default=str),
     ])
 
+    response_origin = "selected_model"
+    presenting_model: str | None = model
+    synthesis_error: str | None = None
     try:
         final_response = await call_runtime_llm(
             [{"role": "user", "content": synthesis_prompt}],
@@ -266,24 +295,43 @@ async def stream_general_supervisor_sse(
             prompt_type=prompt_type,
         )
         final_text = _text(final_response).strip()
-    except Exception:
-        final_text = _fallback_summary(
-            dispatch,
-            decision.reasoning_summary,
-        )
-
-    if not final_text:
-        final_text = _fallback_summary(
-            dispatch,
-            decision.reasoning_summary,
+        presenting_model = _response_model(final_response, model)
+        if not final_text:
+            raise ValueError("final synthesis returned an empty response")
+    except Exception as exc:
+        synthesis_error = f"{type(exc).__name__}: {exc}"
+        response_origin = "controlled_runtime_failure"
+        presenting_model = None
+        final_text = (
+            "The LangGraph workers finished, but the selected final-synthesis "
+            "model did not produce a usable answer. The runtime stopped without "
+            "claiming that a model authored the worker output."
         )
 
     yield _frame({"delta": final_text})
+    worker_names = list(dispatch.requested_capabilities)
+    fallback_used = any(
+        bool(result.data.get("fallback_used"))
+        for result in dispatch.worker_results
+    )
     yield _frame({
         "type": "metrics",
         "data": {
             "runtime": RUNTIME_VERSION,
-            "model": model,
+            "selected_model": model,
+            "presenting_model": presenting_model,
+            "model": presenting_model,
+            "worker": (
+                worker_names[0]
+                if len(worker_names) == 1
+                else worker_names
+            ),
+            "fallback_used": fallback_used,
+            "fallback_scope": (
+                "legacy_plan_step_only" if fallback_used else "none"
+            ),
+            "response_origin": response_origin,
+            "synthesis_error": synthesis_error,
             "elapsed_s": round(time.time() - started_at, 3),
             "selected_capabilities": list(decision.selected_capabilities),
             "completed_capabilities": list(dispatch.completed_capabilities),
