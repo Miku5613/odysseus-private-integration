@@ -147,6 +147,9 @@ class LangGraphRunLifecycle:
     completed_steps: list[str] = field(default_factory=list)
     dependency_results: dict[str, Any] = field(default_factory=dict)
     artifact_references: list[dict[str, Any]] = field(default_factory=list)
+    owned_research_jobs: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
     checkpoint_store: Any = None
 
     @classmethod
@@ -213,6 +216,7 @@ class LangGraphRunLifecycle:
             "completed_steps": list(self.completed_steps),
             "dependency_results": dict(self.dependency_results),
             "artifact_references": list(self.artifact_references),
+            "owned_research_jobs": dict(self.owned_research_jobs),
             "failure": (
                 {
                     "stage": terminal_data.get("stage"),
@@ -263,6 +267,22 @@ class LangGraphRunLifecycle:
                 "artifact_references": self.artifact_references,
             },
         })
+
+    def own_research_job(
+        self,
+        research_job_id: str,
+        objective: str,
+        status: str = "running",
+    ) -> None:
+        job_id = str(research_job_id).strip()
+        if not job_id:
+            raise ValueError("research_job_id must not be empty")
+        self.owned_research_jobs[job_id] = {
+            "objective": str(objective),
+            "owned": True,
+            "status": str(status),
+        }
+        self._persist()
 
     def finish(
         self,
@@ -325,6 +345,9 @@ class LangGraphRunLifecycle:
         )
         lifecycle.artifact_references = list(
             state.get("artifact_references") or []
+        )
+        lifecycle.owned_research_jobs = dict(
+            state.get("owned_research_jobs") or {}
         )
         terminal = state.get("terminal")
         if terminal:

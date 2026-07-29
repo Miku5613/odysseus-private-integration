@@ -89,6 +89,11 @@ def test_concurrent_runs_and_recovery_cancellation_are_isolated(tmp_path):
     run_a = _lifecycle(store, "run-a", "session-a")
     run_b = _lifecycle(store, "run-b", "session-b")
     run_a.event({"type": "runtime_run", "data": {}})
+    run_a.own_research_job(
+        "research-owned-a",
+        "Research cancellation isolation.",
+        "running",
+    )
     run_b.event({"type": "runtime_run", "data": {}})
     identities = (run_a.identity, run_b.identity)
     store.close()
@@ -110,6 +115,14 @@ def test_concurrent_runs_and_recovery_cancellation_are_isolated(tmp_path):
     recovered_a.cancellation.cancel()
     assert recovered_a.cancellation.cancelled is True
     assert recovered_b.cancellation.cancelled is False
+    assert recovered_a.owned_research_jobs == {
+        "research-owned-a": {
+            "objective": "Research cancellation isolation.",
+            "owned": True,
+            "status": "running",
+        }
+    }
+    assert recovered_b.owned_research_jobs == {}
     assert recovered_a.identity.checkpoint_ns != recovered_b.identity.checkpoint_ns
     restarted.close()
 

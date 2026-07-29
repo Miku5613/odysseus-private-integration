@@ -883,18 +883,26 @@ async def stream_multi_graph_coordinator_sse(
         else tuple(surfaces)
     )
 
+    supervisor_state = _base_supervisor_state(
+        query,
+        owner=owner,
+        workspace=workspace,
+        active_document=active_document,
+        active_email=active_email,
+        disabled_tools=disabled_tools,
+        tool_policy=tool_policy,
+        root_id=root_id or kwargs.get("root_id"),
+        uploaded_files=uploaded_files or (),
+    )
+    supervisor_state["worker_context"].update({
+        "run_id": lifecycle.identity.run_id,
+        "thread_id": lifecycle.identity.thread_id,
+        "checkpoint_ns": lifecycle.identity.checkpoint_ns,
+        "cancellation_scope": lifecycle.cancellation,
+        "research_job_observer": lifecycle.own_research_job,
+    })
     context = StepExecutionContext(
-        supervisor_state=_base_supervisor_state(
-            query,
-            owner=owner,
-            workspace=workspace,
-            active_document=active_document,
-            active_email=active_email,
-            disabled_tools=disabled_tools,
-            tool_policy=tool_policy,
-            root_id=root_id or kwargs.get("root_id"),
-            uploaded_files=uploaded_files or (),
-        ),
+        supervisor_state=supervisor_state,
         session_id=session_id,
     )
 

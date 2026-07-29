@@ -32,6 +32,7 @@ class RunCheckpointState(TypedDict, total=False):
     completed_steps: list[str]
     dependency_results: dict[str, Any]
     artifact_references: list[dict[str, Any]]
+    owned_research_jobs: dict[str, dict[str, Any]]
     failure: dict[str, Any] | None
     event_cursor: int
     event_log: list[dict[str, Any]]

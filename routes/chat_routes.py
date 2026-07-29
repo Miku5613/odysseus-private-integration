@@ -28,6 +28,9 @@ from src.agent_runtime.durable_checkpoint import (
     CheckpointUnavailableError,
     get_default_checkpoint_store,
 )
+from src.agent_runtime.research_worker import (
+    cancel_owned_research_jobs,
+)
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -2795,6 +2798,11 @@ def setup_chat_routes(
                     checkpoint_ns=state["checkpoint_namespace"],
                 )
                 if recovered is not None:
+                    owner = effective_user(request)
+                    await cancel_owned_research_jobs(
+                        state,
+                        owner=owner,
+                    )
                     recovered.cancellation.cancel()
                     recovered.finish(
                         "CANCELLED",
