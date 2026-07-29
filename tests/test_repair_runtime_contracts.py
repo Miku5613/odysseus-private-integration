@@ -634,7 +634,7 @@ def test_negative_constraint_enforcement_is_generic():
 
 
 def test_certification_normalizes_equivalent_dates_numbers_and_contractions():
-    from Exclusions.Scripts.phase5fw_live_daily_assistant_certification import (
+    from src.agent_runtime.certification_text import (
         positive_forbidden_hit,
         semantic_contains,
     )
