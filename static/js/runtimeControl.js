@@ -20,6 +20,31 @@ const OPENCODE_MODEL_KEY = 'odysseus-opencode-model-v1';
 const OPENCODE_ENDPOINT_KEY = 'odysseus-opencode-endpoint-v1';
 const OPENCODE_WORKSPACE_KEY = 'odysseus-opencode-workspace-v1';
 const OPENCODE_PERMISSION_MODE_KEY = 'odysseus-opencode-permission-mode-v1';
+const LANGGRAPH_SETTINGS_DEFAULTS = {
+  version: 1,
+  execution_mode: 'automatic',
+  permission_level: 'guided',
+  runtime_model_policy: {
+    mode: 'single_compatible',
+    model: '',
+    role_models: {},
+  },
+  legacy_step_fallback_policy: 'ask_first',
+  interrupted_run_policy: 'ask_before_resume',
+  effort_preset: 'balanced',
+  research_approval_policy: 'ask_before_long_research',
+  research_reuse_policy: 'prefer_existing',
+  context_source_policy: {
+    conversation: true,
+    workspace: true,
+    indexed_knowledge: true,
+    completed_research: true,
+    personal_memory: false,
+  },
+  parallel_worker_limit: 'automatic',
+  task_planner_visibility: 'show',
+  completed_run_retention: 30,
+};
 
 const RUNTIMES = new Set(['legacy', 'langgraph', 'opencode']);
 let _pendingRuntime = null;
@@ -175,10 +200,6 @@ export async function setDefaultRuntime(runtime) {
   safeStorageSet(DEFAULT_RUNTIME_KEY, selected);
   await postLangGraphSetting(selected);
 
-  if (selected === 'legacy') {
-    await setCurrentRuntime('legacy');
-  }
-
   syncSettingsControls();
   refreshRuntimeIndicator();
   dispatchRuntimeChanged(selected, '');
@@ -327,7 +348,8 @@ function createRuntimePanel() {
            class="runtime-settings-message runtime-inline-message"></div>
     </div>
 
-    <div class="admin-card runtime-settings-card runtime-console-card runtime-minimal-card">
+    <div id="runtime-opencode-panel"
+         class="admin-card runtime-settings-card runtime-console-card runtime-minimal-card">
       <div class="runtime-minimal-heading">
         <span class="runtime-card-kicker">Standalone runtime</span>
         <h2 class="runtime-card-title">OpenCode Console</h2>
@@ -390,8 +412,160 @@ function createRuntimePanel() {
         <select id="runtime-opencode-model" tabindex="-1"></select>
         <input id="runtime-opencode-workspace" type="text" tabindex="-1">
       </div>
+    </div>
+
+    <div id="runtime-langgraph-panel" hidden aria-hidden="true"
+         class="admin-card runtime-settings-card runtime-console-card runtime-minimal-card hidden">
+      <div class="runtime-minimal-heading">
+        <span class="runtime-card-kicker">Native agent runtime</span>
+        <h2 class="runtime-card-title">LangGraph Runtime</h2>
+        <p class="settings-help-text">
+          These global defaults apply to newly created Agent chats. Existing
+          chats keep their assigned runtime.
+        </p>
+      </div>
+
+      <section class="runtime-lifecycle-panel" aria-labelledby="langgraph-execution-title">
+        <div class="runtime-lifecycle-heading">
+          <h3 id="langgraph-execution-title">Execution</h3>
+          <p>Choose planning depth and conservative local concurrency.</p>
+        </div>
+        <div class="runtime-selector-grid">
+          ${langGraphSelect('runtime-langgraph-execution', 'Planning mode', [
+            ['automatic', 'Automatic'],
+            ['direct_only', 'Direct only'],
+            ['multi_step_allowed', 'Multi-step allowed'],
+            ['ask_before_multi_step', 'Ask before multi-step'],
+          ])}
+          ${langGraphSelect('runtime-langgraph-effort', 'Effort', [
+            ['quick', 'Quick'], ['balanced', 'Balanced'],
+            ['thorough', 'Thorough'], ['custom', 'Custom'],
+          ])}
+          ${langGraphSelect('runtime-langgraph-parallel', 'Parallel workers', [
+            ['automatic', 'Automatic'], ['1', '1'], ['2', '2'],
+            ['3', '3'], ['4', '4'],
+          ])}
+        </div>
+      </section>
+
+      <section class="runtime-lifecycle-panel" aria-labelledby="langgraph-permissions-title">
+        <div class="runtime-lifecycle-heading">
+          <h3 id="langgraph-permissions-title">Permissions</h3>
+          <p>Guided asks before mutations. Active still obeys tool safety and exact approvals.</p>
+        </div>
+        <div class="runtime-selector-grid">
+          ${langGraphSelect('runtime-langgraph-permission', 'Action level', [
+            ['read_only', 'Read only'], ['guided', 'Guided'], ['active', 'Active'],
+          ])}
+          ${langGraphSelect('runtime-langgraph-fallback', 'Legacy step fallback', [
+            ['never', 'Never'], ['ask_first', 'Ask first'],
+            ['allow_bounded', 'Allow bounded'],
+          ])}
+          ${langGraphSelect('runtime-langgraph-research-approval', 'Long research', [
+            ['ask_before_long_research', 'Ask first'],
+            ['allow_within_budget', 'Allow within budget'],
+            ['disabled', 'Disabled'],
+          ])}
+        </div>
+      </section>
+
+      <section class="runtime-lifecycle-panel" aria-labelledby="langgraph-models-title">
+        <div class="runtime-lifecycle-heading">
+          <h3 id="langgraph-models-title">Models</h3>
+          <p>Only enabled text-capable models are offered.</p>
+        </div>
+        ${langGraphSelect('runtime-langgraph-model', 'One model for all roles', [
+          ['', 'Use active chat model'],
+        ])}
+        <details class="runtime-advanced">
+          <summary>Advanced role assignment</summary>
+          <div class="runtime-selector-grid">
+            ${['planner', 'general_worker', 'knowledge_worker', 'code_worker',
+              'research_worker', 'final_synthesis'].map(role =>
+                langGraphSelect(`runtime-langgraph-role-${role}`,
+                  role.replaceAll('_', ' '), [['', 'Use runtime model']],
+                  `data-langgraph-role="${role}"`)).join('')}
+          </div>
+        </details>
+      </section>
+
+      <section class="runtime-lifecycle-panel" aria-labelledby="langgraph-recovery-title">
+        <div class="runtime-lifecycle-heading">
+          <h3 id="langgraph-recovery-title">Recovery and research</h3>
+          <p>Automatic resume is limited to durable, safe read-only PlanStep boundaries.</p>
+        </div>
+        <div class="runtime-selector-grid">
+          ${langGraphSelect('runtime-langgraph-interrupted', 'Interrupted runs', [
+            ['ask_before_resume', 'Ask before resume'],
+            ['never_auto_resume', 'Never auto-resume'],
+            ['auto_resume_safe_read_only', 'Auto-resume safe read-only'],
+          ])}
+          ${langGraphSelect('runtime-langgraph-retention', 'Completed retention', [
+            ['7', '7 days'], ['30', '30 days'], ['90', '90 days'],
+          ])}
+          ${langGraphSelect('runtime-langgraph-reuse', 'Completed research', [
+            ['prefer_existing', 'Prefer existing'], ['ask', 'Ask'],
+            ['always_new_when_requested', 'New when requested'],
+          ])}
+        </div>
+      </section>
+
+      <section class="runtime-lifecycle-panel" aria-labelledby="langgraph-context-title">
+        <div class="runtime-lifecycle-heading">
+          <h3 id="langgraph-context-title">Context</h3>
+          <p>Only authorized sources are eligible; these switches never bypass access checks.</p>
+        </div>
+        <div class="runtime-context-grid">
+          ${langGraphContextToggle('conversation', 'Current conversation')}
+          ${langGraphContextToggle('workspace', 'Selected workspace')}
+          ${langGraphContextToggle('indexed_knowledge', 'Indexed knowledge')}
+          ${langGraphContextToggle('completed_research', 'Completed research')}
+          ${langGraphContextToggle('personal_memory', 'Personal memory')}
+        </div>
+      </section>
+
+      <section class="runtime-lifecycle-panel" aria-labelledby="langgraph-visibility-title">
+        <div class="runtime-lifecycle-heading">
+          <h3 id="langgraph-visibility-title">Task visibility</h3>
+          <p>This changes presentation only; backend state remains authoritative.</p>
+        </div>
+        ${langGraphSelect('runtime-langgraph-planner-visibility', 'Live Task Planner', [
+          ['show', 'Show'], ['show_collapsed', 'Show collapsed'], ['hidden', 'Hidden'],
+        ])}
+      </section>
+
+      <div class="runtime-config-actions">
+        <button id="runtime-langgraph-save" type="button"
+                class="runtime-session-manager-launch">Save LangGraph settings</button>
+        <div id="runtime-langgraph-message"
+             class="runtime-settings-message runtime-inline-message"
+             role="status" aria-live="polite"></div>
+      </div>
     </div>`;
   return panel;
+}
+
+function langGraphSelect(id, label, options, attributes = '') {
+  return `<label class="runtime-select-row" for="${id}">
+    <span class="runtime-select-copy"><strong>${label}</strong></span>
+    <select id="${id}" class="runtime-select-control" ${attributes}>
+      ${options.map(([value, text]) =>
+        `<option value="${value}">${text}</option>`).join('')}
+    </select>
+  </label>`;
+}
+
+function langGraphContextToggle(key, label) {
+  return `<label class="runtime-lifecycle-option">
+    <span class="runtime-choice-copy"><strong>${label}</strong></span>
+    <span class="runtime-toggle">
+      <input type="checkbox" role="switch" data-langgraph-context="${key}"
+             aria-label="${label}">
+      <span class="runtime-toggle-track" aria-hidden="true">
+        <span class="runtime-toggle-thumb"></span>
+      </span>
+    </span>
+  </label>`;
 }
 function activateRuntimePanel() {
   const modal = document.getElementById('settings-modal');
@@ -498,6 +672,209 @@ function syncSettingsControls() {
   if (workspace && document.activeElement !== workspace) {
     workspace.value = safeStorageGet(OPENCODE_WORKSPACE_KEY) || '';
   }
+  syncRuntimeSettingsPanelVisibility(runtime);
+}
+
+function syncRuntimeSettingsPanelVisibility(runtime = getDefaultRuntime()) {
+  const openCodePanel = document.getElementById('runtime-opencode-panel');
+  const langGraphPanel = document.getElementById('runtime-langgraph-panel');
+  if (openCodePanel) {
+    const inactive = runtime !== 'opencode';
+    openCodePanel.hidden = inactive;
+    openCodePanel.classList.toggle('hidden', inactive);
+    openCodePanel.setAttribute('aria-hidden', String(inactive));
+  }
+  if (langGraphPanel) {
+    const inactive = runtime !== 'langgraph';
+    langGraphPanel.hidden = inactive;
+    langGraphPanel.classList.toggle('hidden', inactive);
+    langGraphPanel.setAttribute('aria-hidden', String(inactive));
+  }
+}
+
+function setLangGraphMessage(message, error = false) {
+  const target = document.getElementById('runtime-langgraph-message');
+  if (!target) return;
+  target.textContent = message || '';
+  target.classList.toggle('error', !!error);
+}
+
+function mergedLangGraphSettings(value) {
+  const input = value && typeof value === 'object' ? value : {};
+  return {
+    ...LANGGRAPH_SETTINGS_DEFAULTS,
+    ...input,
+    runtime_model_policy: {
+      ...LANGGRAPH_SETTINGS_DEFAULTS.runtime_model_policy,
+      ...(input.runtime_model_policy || {}),
+      role_models: {
+        ...(input.runtime_model_policy?.role_models || {}),
+      },
+    },
+    context_source_policy: {
+      ...LANGGRAPH_SETTINGS_DEFAULTS.context_source_policy,
+      ...(input.context_source_policy || {}),
+    },
+  };
+}
+
+function setControlValue(id, value) {
+  const control = document.getElementById(id);
+  if (control && document.activeElement !== control) {
+    control.value = String(value ?? '');
+  }
+}
+
+function applyLangGraphSettingsToControls(value) {
+  const config = mergedLangGraphSettings(value);
+  setControlValue('runtime-langgraph-execution', config.execution_mode);
+  setControlValue('runtime-langgraph-effort', config.effort_preset);
+  setControlValue('runtime-langgraph-parallel', config.parallel_worker_limit);
+  setControlValue('runtime-langgraph-permission', config.permission_level);
+  setControlValue(
+    'runtime-langgraph-fallback',
+    config.legacy_step_fallback_policy
+  );
+  setControlValue(
+    'runtime-langgraph-research-approval',
+    config.research_approval_policy
+  );
+  setControlValue(
+    'runtime-langgraph-interrupted',
+    config.interrupted_run_policy
+  );
+  setControlValue(
+    'runtime-langgraph-retention',
+    config.completed_run_retention
+  );
+  setControlValue('runtime-langgraph-reuse', config.research_reuse_policy);
+  setControlValue(
+    'runtime-langgraph-planner-visibility',
+    config.task_planner_visibility
+  );
+  setControlValue(
+    'runtime-langgraph-model',
+    config.runtime_model_policy.model
+  );
+  document.querySelectorAll('[data-langgraph-role]').forEach(control => {
+    control.value = String(
+      config.runtime_model_policy.role_models[control.dataset.langgraphRole]
+      || ''
+    );
+  });
+  document.querySelectorAll('[data-langgraph-context]').forEach(control => {
+    control.checked = !!(
+      config.context_source_policy[control.dataset.langgraphContext]
+    );
+  });
+  return config;
+}
+
+function collectLangGraphSettings() {
+  const value = id => String(
+    document.getElementById(id)?.value || ''
+  ).trim();
+  const roleModels = {};
+  document.querySelectorAll('[data-langgraph-role]').forEach(control => {
+    if (control.value) {
+      roleModels[control.dataset.langgraphRole] = control.value;
+    }
+  });
+  const context = {};
+  document.querySelectorAll('[data-langgraph-context]').forEach(control => {
+    context[control.dataset.langgraphContext] = !!control.checked;
+  });
+  return {
+    version: 1,
+    execution_mode: value('runtime-langgraph-execution'),
+    permission_level: value('runtime-langgraph-permission'),
+    runtime_model_policy: {
+      mode: Object.keys(roleModels).length
+        ? 'advanced_roles'
+        : 'single_compatible',
+      model: value('runtime-langgraph-model'),
+      role_models: roleModels,
+    },
+    legacy_step_fallback_policy: value('runtime-langgraph-fallback'),
+    interrupted_run_policy: value('runtime-langgraph-interrupted'),
+    effort_preset: value('runtime-langgraph-effort'),
+    research_approval_policy: value(
+      'runtime-langgraph-research-approval'
+    ),
+    research_reuse_policy: value('runtime-langgraph-reuse'),
+    context_source_policy: context,
+    parallel_worker_limit: value('runtime-langgraph-parallel'),
+    task_planner_visibility: value(
+      'runtime-langgraph-planner-visibility'
+    ),
+    completed_run_retention: Number(
+      value('runtime-langgraph-retention')
+    ),
+  };
+}
+
+async function populateLangGraphModels() {
+  const response = await fetch('/api/model-endpoints', {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error(`Model registry HTTP ${response.status}`);
+  const payload = await response.json();
+  const modelIds = [];
+  for (const endpoint of Array.isArray(payload) ? payload : []) {
+    if (
+      !endpoint
+      || endpoint.is_enabled === false
+      || (endpoint.model_type || 'llm') !== 'llm'
+    ) continue;
+    for (const model of Array.isArray(endpoint.models) ? endpoint.models : []) {
+      const id = String(model || '').trim();
+      if (id && !modelIds.includes(id)) modelIds.push(id);
+    }
+  }
+  const controls = document.querySelectorAll(
+    '#runtime-langgraph-model,[data-langgraph-role]'
+  );
+  controls.forEach(control => {
+    const selected = control.value;
+    const defaultText = control.dataset.langgraphRole
+      ? 'Use runtime model'
+      : 'Use active chat model';
+    control.replaceChildren(new Option(defaultText, ''));
+    modelIds.forEach(model => control.add(new Option(model, model)));
+    if (modelIds.includes(selected)) control.value = selected;
+  });
+}
+
+async function loadLangGraphSettings() {
+  try {
+    const payload = await runtimeJsonRequest('/api/auth/settings');
+    const config = applyLangGraphSettingsToControls(
+      payload.langgraph_runtime
+    );
+    await populateLangGraphModels();
+    applyLangGraphSettingsToControls(config);
+    setLangGraphMessage('LangGraph settings loaded.');
+    return config;
+  } catch (error) {
+    applyLangGraphSettingsToControls(null);
+    setLangGraphMessage(
+      `LangGraph settings unavailable: ${error.message || error}`,
+      true
+    );
+    return null;
+  }
+}
+
+async function saveLangGraphSettings() {
+  const config = collectLangGraphSettings();
+  setLangGraphMessage('Savingâ€¦');
+  const payload = await runtimeJsonRequest('/api/auth/settings', {
+    method: 'POST',
+    body: JSON.stringify({ langgraph_runtime: config }),
+  });
+  applyLangGraphSettingsToControls(payload.langgraph_runtime);
+  setLangGraphMessage('LangGraph settings saved for new Agent chats.');
+  return payload.langgraph_runtime;
 }
 
 function showDefaultMessage(message, error = false) {
@@ -858,6 +1235,7 @@ function wireRuntimeSettings() {
   const clearApprovals = document.getElementById(
     'runtime-clear-permission-approvals-btn'
   );
+  const saveLangGraph = document.getElementById('runtime-langgraph-save');
 
   if (runtimeSelect) {
     runtimeSelect.addEventListener('change', async () => {
@@ -865,7 +1243,24 @@ function wireRuntimeSettings() {
       showDefaultMessage('Saving…');
       await setDefaultRuntime(runtime);
       runtimeSelect.value = runtime;
+      syncRuntimeSettingsPanelVisibility(runtime);
+      if (runtime === 'langgraph') await loadLangGraphSettings();
       showDefaultMessage(`New chats will use ${runtimeLabel(runtime)}.`);
+    });
+  }
+  if (saveLangGraph) {
+    saveLangGraph.addEventListener('click', async () => {
+      saveLangGraph.disabled = true;
+      try {
+        await saveLangGraphSettings();
+      } catch (error) {
+        setLangGraphMessage(
+          `Save failed: ${error.message || error}`,
+          true
+        );
+      } finally {
+        saveLangGraph.disabled = false;
+      }
     });
   }
   if (reuse) {
@@ -1002,6 +1397,7 @@ function wireRuntimeSettings() {
   }
 
   syncSettingsControls();
+  loadLangGraphSettings().catch(() => {});
   refreshPermissionState();
 }
 

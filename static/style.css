@@ -42143,6 +42143,24 @@ body.theme-frosted .modal {
   color: var(--red);
 }
 
+.runtime-context-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.runtime-advanced {
+  margin-top: 12px;
+}
+
+.runtime-advanced > summary {
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.86rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
 .runtime-permission-select {
   width: 100%;
   min-height: 36px;
