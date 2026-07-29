@@ -13,10 +13,27 @@ from typing import Any, TypedDict
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
+from src.agent_runtime.runtime_budgets import (
+    RuntimeArtifactStore,
+    apply_checkpoint_budgets,
+)
 
 
 class CheckpointUnavailableError(RuntimeError):
     pass
+
+
+class CheckpointPersistenceError(RuntimeError):
+    """An authoritative runtime state operation failed after initialization."""
+
+
+class CheckpointSchemaError(RuntimeError):
+    """A persisted runtime snapshot cannot be migrated safely."""
+
+
+CURRENT_RUNTIME_SCHEMA_VERSION = 2
+RUNTIME_EVENT_TAIL_LIMIT = 200
+RUNTIME_REPLAY_PAGE_LIMIT = 500
 
 
 class RunCheckpointState(TypedDict, total=False):
@@ -38,6 +55,7 @@ class RunCheckpointState(TypedDict, total=False):
     dependency_results: dict[str, Any]
     artifact_references: list[dict[str, Any]]
     owned_research_jobs: dict[str, dict[str, Any]]
+    owned_children: dict[str, dict[str, Any]]
     failure: dict[str, Any] | None
     event_cursor: int
     event_log: list[dict[str, Any]]
@@ -89,6 +107,11 @@ class DurableRunCheckpointStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
+        artifact_root = os.getenv(
+            "ODYSSEUS_LANGGRAPH_ARTIFACT_DIR",
+            str(self.path.parent / "artifacts"),
+        )
+        self.artifact_store = RuntimeArtifactStore(artifact_root)
         self.process_id = f"process_{uuid.uuid4().hex}"
         self._lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,6 +215,15 @@ class DurableRunCheckpointStore:
                 ON odysseus_runtime_decisions(
                     kind, session_id, owner, run_id, state, expires_at
                 );
+            CREATE TABLE IF NOT EXISTS odysseus_runtime_events (
+                run_id TEXT NOT NULL,
+                event_cursor INTEGER NOT NULL,
+                event_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(run_id, event_cursor)
+            );
+            CREATE INDEX IF NOT EXISTS idx_odysseus_events_run_cursor
+                ON odysseus_runtime_events(run_id, event_cursor);
             """
         )
         self._connection.commit()
@@ -214,14 +246,169 @@ class DurableRunCheckpointStore:
         }
 
     def save(self, state: RunCheckpointState) -> RunCheckpointState:
+        migrated = self._migrate_state(dict(state), for_write=True)
+        migrated = apply_checkpoint_budgets(
+            migrated,
+            artifact_store=self.artifact_store,
+        )
         config = self.config(
-            thread_id=state["thread_id"],
-            checkpoint_ns=state["checkpoint_namespace"],
+            thread_id=migrated["thread_id"],
+            checkpoint_ns=migrated["checkpoint_namespace"],
         )
         with self._lock:
-            result = self.graph.invoke(dict(state), config=config)
-            self._upsert_run(dict(result))
-            return dict(result)
+            try:
+                self._persist_events(migrated)
+                compacted = dict(migrated)
+                compacted["event_log"] = list(
+                    migrated.get("event_log") or []
+                )[-RUNTIME_EVENT_TAIL_LIMIT:]
+                result = self.graph.invoke(compacted, config=config)
+                self._upsert_run(dict(result))
+                return dict(result)
+            except CheckpointSchemaError:
+                raise
+            except (sqlite3.Error, OSError, RuntimeError) as exc:
+                try:
+                    self._connection.rollback()
+                except sqlite3.Error:
+                    pass
+                raise CheckpointPersistenceError(
+                    "Authoritative LangGraph checkpoint save failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+
+    def _migrate_state(
+        self,
+        state: dict[str, Any],
+        *,
+        for_write: bool = False,
+    ) -> RunCheckpointState:
+        if not isinstance(state, dict):
+            raise CheckpointSchemaError("Runtime checkpoint payload is not an object.")
+        raw_version = state.get("schema_version")
+        if raw_version is None:
+            version = 1
+        elif isinstance(raw_version, bool):
+            raise CheckpointSchemaError("Runtime checkpoint schema version is malformed.")
+        else:
+            try:
+                version = int(raw_version)
+            except (TypeError, ValueError) as exc:
+                raise CheckpointSchemaError(
+                    "Runtime checkpoint schema version is malformed."
+                ) from exc
+        if version > CURRENT_RUNTIME_SCHEMA_VERSION:
+            raise CheckpointSchemaError(
+                "Runtime checkpoint schema version "
+                f"{version} is newer than supported version "
+                f"{CURRENT_RUNTIME_SCHEMA_VERSION}."
+            )
+        if version < 1:
+            raise CheckpointSchemaError(
+                f"Unsupported runtime checkpoint schema version: {version}."
+            )
+        migrated = dict(state)
+        required = ("run_id", "thread_id", "checkpoint_namespace")
+        if not for_write and any(not migrated.get(key) for key in required):
+            raise CheckpointSchemaError(
+                "Runtime checkpoint is missing required identity fields."
+            )
+        if version == 1:
+            migrated.setdefault("owner", None)
+            migrated.setdefault("artifact_references", [])
+            migrated.setdefault("owned_research_jobs", {})
+            migrated.setdefault("owned_children", {})
+            migrated.setdefault("dependency_results", {})
+            migrated.setdefault("completed_steps", [])
+            migrated.setdefault("event_log", [])
+        migrated["schema_version"] = CURRENT_RUNTIME_SCHEMA_VERSION
+        return migrated  # type: ignore[return-value]
+
+    def _persist_events(self, state: RunCheckpointState) -> None:
+        run_id = str(state["run_id"])
+        rows: list[tuple[str, int, str, float]] = []
+        now = time.time()
+        for event in state.get("event_log") or []:
+            if not isinstance(event, dict):
+                continue
+            cursor = int((event.get("data") or {}).get("event_cursor") or 0)
+            if cursor <= 0:
+                continue
+            rows.append((run_id, cursor, json.dumps(event, default=str), now))
+        if rows:
+            self._connection.executemany(
+                """
+                INSERT OR IGNORE INTO odysseus_runtime_events (
+                    run_id, event_cursor, event_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def events_after(
+        self,
+        *,
+        run_id: str,
+        after_cursor: int = 0,
+        limit: int = RUNTIME_REPLAY_PAGE_LIMIT,
+    ) -> list[dict[str, Any]]:
+        page_limit = max(1, min(int(limit), RUNTIME_REPLAY_PAGE_LIMIT))
+        try:
+            rows = self._connection.execute(
+                """
+                SELECT event_json FROM odysseus_runtime_events
+                WHERE run_id=? AND event_cursor>?
+                ORDER BY event_cursor ASC LIMIT ?
+                """,
+                (run_id, max(0, int(after_cursor)), page_limit),
+            ).fetchall()
+            return [json.loads(row[0]) for row in rows]
+        except (sqlite3.Error, json.JSONDecodeError) as exc:
+            raise CheckpointPersistenceError(
+                "Durable LangGraph event replay failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+    def cleanup_completed(self, *, retention_days: int = 30) -> int:
+        """Delete only terminal run data older than the configured retention."""
+
+        cutoff = time.time() - max(1, int(retention_days)) * 86400
+        with self._lock:
+            try:
+                rows = self._connection.execute(
+                    """
+                    SELECT run_id FROM odysseus_runtime_runs
+                    WHERE status IN ('COMPLETED','FAILED','CANCELLED')
+                      AND updated_at<?
+                    """,
+                    (cutoff,),
+                ).fetchall()
+                run_ids = [row[0] for row in rows]
+                for run_id in run_ids:
+                    self._connection.execute(
+                        "DELETE FROM odysseus_runtime_events WHERE run_id=?",
+                        (run_id,),
+                    )
+                    self._connection.execute(
+                        "DELETE FROM odysseus_step_attempts WHERE run_id=?",
+                        (run_id,),
+                    )
+                    self._connection.execute(
+                        "DELETE FROM odysseus_runtime_decisions WHERE run_id=?",
+                        (run_id,),
+                    )
+                    self._connection.execute(
+                        "DELETE FROM odysseus_runtime_runs WHERE run_id=?",
+                        (run_id,),
+                    )
+                self._connection.commit()
+                return len(run_ids)
+            except sqlite3.Error as exc:
+                self._connection.rollback()
+                raise CheckpointPersistenceError(
+                    "Completed LangGraph retention cleanup failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
 
     def _upsert_run(self, state: RunCheckpointState) -> None:
         now = time.time()
@@ -926,7 +1113,19 @@ class DurableRunCheckpointStore:
             )
         )
         values = dict(snapshot.values or {})
-        return values or None
+        if not values:
+            return None
+        migrated = self._migrate_state(values)
+        migrated["event_log"] = self.events_after(
+            run_id=str(migrated["run_id"]),
+            after_cursor=max(
+                0,
+                int(migrated.get("event_cursor") or 0)
+                - RUNTIME_EVENT_TAIL_LIMIT,
+            ),
+            limit=RUNTIME_EVENT_TAIL_LIMIT,
+        ) or list(migrated.get("event_log") or [])
+        return migrated
 
     def history(
         self,
@@ -950,33 +1149,29 @@ class DurableRunCheckpointStore:
         *,
         session_id: str | None = None,
         run_id: str | None = None,
+        owner: str | None = None,
     ) -> RunCheckpointState | None:
-        for checkpoint_tuple in self.checkpointer.list(
-            None,
-            limit=500,
-        ):
-            values = dict(
-                checkpoint_tuple.checkpoint.get(
-                    "channel_values",
-                    {}
-                )
-            )
-            if (
-                session_id is not None
-                and values.get("session_id") != session_id
-            ):
-                continue
-            if (
-                run_id is not None
-                and values.get("run_id") != run_id
-            ):
-                continue
-            if (
-                values.get("thread_id")
-                and values.get("checkpoint_namespace")
-            ):
-                return values
-        return None
+        if run_id is not None:
+            record = self.run_record(run_id)
+            if record is None:
+                return None
+            if session_id is not None and record.get("session_id") != session_id:
+                return None
+            if owner is not None and record.get("owner") != owner:
+                return None
+        elif session_id is not None:
+            record = self.latest_run_record(session_id=session_id, owner=owner)
+        else:
+            raise ValueError("run_id or session_id is required for checkpoint lookup")
+        if record is None:
+            return None
+        recovered = self.recover(
+            thread_id=str(record["thread_id"]),
+            checkpoint_ns=str(record["checkpoint_ns"]),
+        )
+        if recovered is not None:
+            recovered["status"] = str(record["status"])
+        return recovered
 
     def close(self) -> None:
         if self._closed:
@@ -1013,6 +1208,9 @@ def reset_default_checkpoint_store_for_tests() -> None:
 
 
 __all__ = [
+    "CURRENT_RUNTIME_SCHEMA_VERSION",
+    "CheckpointPersistenceError",
+    "CheckpointSchemaError",
     "CheckpointUnavailableError",
     "DurableRunCheckpointStore",
     "RunCheckpointState",

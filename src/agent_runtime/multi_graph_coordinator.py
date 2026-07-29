@@ -203,6 +203,7 @@ def _bounded_value(
         "truncated": True,
         "preview": serialized[:max_chars],
         "original_chars": len(serialized),
+        "full_value_retained_by_runtime_artifact_policy": True,
     }
 
 
@@ -305,7 +306,7 @@ def _synthesis_prompt(
     plan: TaskPlan,
     control: ReplanControlResult,
 ) -> str:
-    return "\n".join([
+    prompt = "\n".join([
         "You are the final-response stage of the Odysseus multi-graph coordinator.",
         "",
         "Answer the user using only the validated plan execution results below.",
@@ -332,6 +333,14 @@ def _synthesis_prompt(
             default=str,
         ),
     ])
+    max_prompt_chars = 120_000
+    if len(prompt) <= max_prompt_chars:
+        return prompt
+    return (
+        prompt[:max_prompt_chars]
+        + "\n\n[Synthesis input was bounded. Full evidence is retained in "
+        "managed runtime artifacts and dependency references.]"
+    )
 
 
 def _clarification_question(

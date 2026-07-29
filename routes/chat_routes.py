@@ -30,6 +30,7 @@ from src.agent_runtime.durable_checkpoint import (
 )
 from src.agent_runtime.research_worker import (
     cancel_owned_research_jobs,
+    reconcile_owned_research_jobs,
 )
 from src.agent_runtime.step_resume import resume_interrupted_step
 from src.agent_runtime.general_bridge import (
@@ -323,8 +324,9 @@ async def _replay_durable_langgraph_run(
     state: dict[str, Any],
     *,
     after_cursor: int = 0,
+    events: list[dict[str, Any]] | None = None,
 ) -> AsyncGenerator[str, None]:
-    for event in state.get("event_log") or []:
+    for event in events if events is not None else state.get("event_log") or []:
         if not isinstance(event, dict):
             continue
         cursor = int((event.get("data") or {}).get("event_cursor") or 0)
@@ -2733,14 +2735,31 @@ def setup_chat_routes(
         store = _durable_checkpoint_store_or_503()
         state = store.recover_latest(
             session_id=session_id,
+            owner=effective_user(request),
         )
         if state is None:
             raise HTTPException(404, "No recoverable run for this session")
         state = store.reconcile_state(state, executor_alive=False)
+        recovered = LangGraphRunLifecycle.recover(
+            checkpoint_store=store,
+            thread_id=state["thread_id"],
+            checkpoint_ns=state["checkpoint_namespace"],
+        )
+        if recovered is not None:
+            await reconcile_owned_research_jobs(recovered)
+            state = store.recover_latest(
+                run_id=state["run_id"],
+                owner=effective_user(request),
+            ) or state
+        replay_events = store.events_after(
+            run_id=str(state["run_id"]),
+            after_cursor=after_cursor,
+        )
         return StreamingResponse(
             _replay_durable_langgraph_run(
                 state,
                 after_cursor=after_cursor,
+                events=replay_events,
             ),
             media_type="text/event-stream",
         )
@@ -2815,7 +2834,10 @@ def setup_chat_routes(
         stopped = agent_runs.stop(session_id)
         if not stopped:
             store = _durable_checkpoint_store_or_503()
-            state = store.recover_latest(session_id=session_id)
+            state = store.recover_latest(
+                session_id=session_id,
+                owner=effective_user(request),
+            )
             if state:
                 state = store.reconcile_state(
                     state,
@@ -2840,7 +2862,12 @@ def setup_chat_routes(
                         state,
                         owner=owner,
                     )
-                    recovered.cancellation.cancel()
+                    cancellation_results = (
+                        await recovered.cancellation.cancel_and_wait()
+                    )
+                    recovered.record_child_cancellation(
+                        cancellation_results
+                    )
                     recovered.finish(
                         "CANCELLED",
                         stage="recovered_stop",
@@ -2864,7 +2891,10 @@ def setup_chat_routes(
             body = {}
         step_id = str(body.get("step_id") or "").strip() or None
         store = _durable_checkpoint_store_or_503()
-        state = store.recover_latest(session_id=session_id)
+        state = store.recover_latest(
+            session_id=session_id,
+            owner=effective_user(request),
+        )
         if state is None:
             raise HTTPException(404, "No recoverable run for this session")
         state = store.reconcile_state(
@@ -2906,12 +2936,27 @@ def setup_chat_routes(
             store = _durable_checkpoint_store_or_503()
             state = store.recover_latest(
                 session_id=session_id,
+                owner=effective_user(request),
             )
             if state is not None:
                 state = store.reconcile_state(
                     state,
                     executor_alive=False,
                 )
+                recovered = LangGraphRunLifecycle.recover(
+                    checkpoint_store=store,
+                    thread_id=state["thread_id"],
+                    checkpoint_ns=state["checkpoint_namespace"],
+                )
+                if recovered is not None:
+                    await reconcile_owned_research_jobs(recovered)
+                    state = (
+                        store.recover_latest(
+                            run_id=state["run_id"],
+                            owner=effective_user(request),
+                        )
+                        or state
+                    )
                 return {
                     "status": str(state.get("status") or "unknown").lower(),
                     "detached": False,

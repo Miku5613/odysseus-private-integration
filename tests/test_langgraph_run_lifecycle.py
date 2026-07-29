@@ -84,3 +84,41 @@ def test_cancellation_calls_only_hooks_owned_by_that_run():
 
     assert calls == ["a"]
     assert scope_b.cancelled is False
+
+
+def test_async_cancellation_is_drained_and_failures_are_recorded():
+    async def scenario():
+        scope = LangGraphCancellationScope("run-drain")
+        calls = []
+
+        async def successful():
+            await asyncio.sleep(0)
+            calls.append("completed")
+
+        async def failed():
+            raise RuntimeError("remote cancellation failed")
+
+        scope.own_cancellation("research:one", successful)
+        scope.own_cancellation("mcp:two", failed)
+        results = await scope.cancel_and_wait(timeout_s=1)
+
+        assert calls == ["completed"]
+        assert results["research:one"] == "cancelled"
+        assert results["mcp:two"] == "failed:RuntimeError"
+
+    asyncio.run(scenario())
+
+
+def test_async_cancellation_timeout_is_bounded():
+    async def scenario():
+        scope = LangGraphCancellationScope("run-timeout")
+        never = asyncio.Event()
+
+        async def blocked():
+            await never.wait()
+
+        scope.own_cancellation("tool:blocked", blocked)
+        results = await scope.cancel_and_wait(timeout_s=0)
+        assert results["tool:blocked"] == "timeout"
+
+    asyncio.run(scenario())

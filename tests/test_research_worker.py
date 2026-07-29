@@ -5,6 +5,7 @@ import pytest
 
 from src.agent_runtime.research_worker import (
     cancel_owned_research_jobs,
+    reconcile_owned_research_jobs,
     run_research_worker,
 )
 from src.agent_runtime.run_lifecycle import LangGraphCancellationScope
@@ -422,3 +423,123 @@ async def test_recovered_cancellation_ignores_unowned_and_completed_jobs():
 
     assert cancelled == ("running-owned",)
     assert calls == [("running-owned", "owner-1")]
+
+
+@pytest.mark.asyncio
+async def test_recovered_owned_research_attaches_report_to_dependency_state(
+    tmp_path,
+):
+    from src.agent_runtime.durable_checkpoint import DurableRunCheckpointStore
+    from src.agent_runtime.run_lifecycle import LangGraphRunLifecycle
+
+    store = DurableRunCheckpointStore(tmp_path / "research-recovery.sqlite3")
+    lifecycle = LangGraphRunLifecycle.create(
+        session_id="session-research",
+        run_id="run-research",
+        owner="alice",
+        checkpoint_store=store,
+    )
+    lifecycle.own_research_job(
+        "owned-research",
+        "Analyze durable research checkpoint recovery.",
+        "running",
+    )
+
+    async def completed_status(job_id, owner=None):
+        assert (job_id, owner) == ("owned-research", "alice")
+        return {"status": "completed", "exit_code": 0}
+
+    report = (
+        "Durable research checkpoint recovery safely reattaches to an owned "
+        "job and retrieves its completed report without starting duplicate "
+        "external work. This report supplies enough evidence for synthesis."
+    )
+
+    async def completed_result(job_id, owner=None):
+        return {
+            "result": report,
+            "sources": [{"url": "https://example.test/evidence"}],
+            "exit_code": 0,
+        }
+
+    results = await reconcile_owned_research_jobs(
+        lifecycle,
+        status_backend=completed_status,
+        result_backend=completed_result,
+    )
+    assert results["owned-research"].status == "completed"
+    dependency = lifecycle.dependency_results["research:owned-research"]
+    assert dependency["data"]["report"] == report
+    assert dependency["recovered"] is True
+    assert lifecycle.owned_research_jobs["owned-research"]["status"] == "completed"
+    assert lifecycle.status == "SUSPENDED"
+
+    reopened = DurableRunCheckpointStore(store.path)
+    recovered = reopened.recover_latest(run_id="run-research")
+    assert (
+        recovered["dependency_results"]["research:owned-research"]["data"]["report"]
+        == report
+    )
+    store.close()
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_recovered_running_research_is_observed_once_and_never_retriggered(
+    tmp_path,
+):
+    from src.agent_runtime.durable_checkpoint import DurableRunCheckpointStore
+    from src.agent_runtime.run_lifecycle import LangGraphRunLifecycle
+
+    store = DurableRunCheckpointStore(tmp_path / "research-running.sqlite3")
+    lifecycle = LangGraphRunLifecycle.create(
+        session_id="session-running",
+        run_id="run-running",
+        checkpoint_store=store,
+    )
+    lifecycle.own_research_job("still-running", "Observe existing work.", "running")
+    calls = []
+
+    async def running_status(job_id, owner=None):
+        calls.append(job_id)
+        return {"status": "running", "exit_code": 0}
+
+    results = await reconcile_owned_research_jobs(
+        lifecycle,
+        status_backend=running_status,
+    )
+    assert calls == ["still-running"]
+    assert results["still-running"].status == "partial"
+    assert lifecycle.status == "SUSPENDED"
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovered_research_observation_timeout_does_not_cancel_job(
+    tmp_path,
+):
+    from src.agent_runtime.durable_checkpoint import DurableRunCheckpointStore
+    from src.agent_runtime.run_lifecycle import LangGraphRunLifecycle
+
+    store = DurableRunCheckpointStore(tmp_path / "research-timeout.sqlite3")
+    lifecycle = LangGraphRunLifecycle.create(
+        session_id="session-timeout",
+        run_id="run-timeout",
+        checkpoint_store=store,
+    )
+    lifecycle.own_research_job("slow-job", "Observe safely.", "running")
+    never = asyncio.Event()
+
+    async def blocked_status(job_id, owner=None):
+        await never.wait()
+        return {"status": "running"}
+
+    results = await reconcile_owned_research_jobs(
+        lifecycle,
+        status_backend=blocked_status,
+        observation_timeout_s=0.01,
+    )
+    assert results["slow-job"].data["observation_timed_out"] is True
+    assert lifecycle.owned_research_jobs["slow-job"]["status"] == "running"
+    assert lifecycle.status == "SUSPENDED"
+    store.close()

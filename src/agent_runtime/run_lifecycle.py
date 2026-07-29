@@ -141,6 +141,59 @@ class LangGraphCancellationScope:
                 asyncio.create_task(result)
         return True
 
+    async def cancel_and_wait(
+        self,
+        *,
+        timeout_s: float = 5.0,
+    ) -> dict[str, str]:
+        """Cancel owned work and drain async callbacks within a bounded time."""
+
+        if self._cancelled:
+            return {}
+        self._cancelled = True
+        tasks = tuple(self._tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        callbacks = tuple(self._callbacks.items())
+        self._callbacks.clear()
+        callback_tasks: dict[str, asyncio.Task[Any]] = {}
+        results: dict[str, str] = {}
+        for owned_id, callback in callbacks:
+            try:
+                value = callback()
+                if inspect.isawaitable(value):
+                    callback_tasks[owned_id] = asyncio.create_task(value)
+                else:
+                    results[owned_id] = "cancelled"
+            except Exception as exc:
+                results[owned_id] = f"failed:{type(exc).__name__}"
+        pending = [
+            task for task in (*tasks, *callback_tasks.values())
+            if not task.done()
+        ]
+        if pending:
+            done, still_pending = await asyncio.wait(
+                pending,
+                timeout=max(0.0, float(timeout_s)),
+            )
+            for task in still_pending:
+                task.cancel()
+            for owned_id, task in callback_tasks.items():
+                if task in still_pending:
+                    results[owned_id] = "timeout"
+                elif task.cancelled():
+                    results[owned_id] = "cancelled"
+                elif task.exception() is not None:
+                    results[owned_id] = (
+                        f"failed:{type(task.exception()).__name__}"
+                    )
+                else:
+                    results[owned_id] = "cancelled"
+            if still_pending:
+                await asyncio.gather(*still_pending, return_exceptions=True)
+        return results
+
 
 @dataclass
 class LangGraphRunLifecycle:
@@ -157,6 +210,7 @@ class LangGraphRunLifecycle:
     owned_research_jobs: dict[str, dict[str, Any]] = field(
         default_factory=dict
     )
+    owned_children: dict[str, dict[str, Any]] = field(default_factory=dict)
     checkpoint_store: Any = None
     executor_id: str | None = None
     _executor_claimed: bool = field(default=False, init=False)
@@ -223,6 +277,7 @@ class LangGraphRunLifecycle:
             else None
         )
         return {
+            "schema_version": 2,
             "run_id": self.identity.run_id,
             "owner": self.identity.owner,
             "session_id": self.identity.session_id,
@@ -235,6 +290,7 @@ class LangGraphRunLifecycle:
             "dependency_results": dict(self.dependency_results),
             "artifact_references": list(self.artifact_references),
             "owned_research_jobs": dict(self.owned_research_jobs),
+            "owned_children": dict(self.owned_children),
             "failure": (
                 {
                     "stage": terminal_data.get("stage"),
@@ -273,6 +329,8 @@ class LangGraphRunLifecycle:
     def event(self, payload: dict[str, Any]) -> dict[str, Any]:
         framed = self._decorate(payload)
         self.event_log.append(framed)
+        if len(self.event_log) > 200:
+            self.event_log = self.event_log[-200:]
         if framed.get("type") == "plan_update":
             self.current_plan = dict(framed.get("data") or {})
         self._persist()
@@ -312,6 +370,28 @@ class LangGraphRunLifecycle:
             "owned": True,
             "status": str(status),
         }
+        self.owned_children[f"research:{job_id}"] = {
+            "kind": "research",
+            "external_id": job_id,
+            "owned": True,
+            "status": str(status),
+            "cancellation_result": None,
+        }
+        self._persist()
+
+    def record_child_cancellation(
+        self,
+        results: dict[str, str],
+    ) -> None:
+        for owned_id, result in results.items():
+            child = self.owned_children.setdefault(
+                owned_id,
+                {"kind": "unknown", "owned": True},
+            )
+            child["cancellation_result"] = result
+            child["status"] = (
+                "cancelled" if result == "cancelled" else "orphaned"
+            )
         self._persist()
 
     def finish(
@@ -345,6 +425,8 @@ class LangGraphRunLifecycle:
             },
         })
         self.event_log.append(self.terminal)
+        if len(self.event_log) > 200:
+            self.event_log = self.event_log[-200:]
         self._persist()
         if self.checkpoint_store is not None:
             self.checkpoint_store.set_run_status(
@@ -388,6 +470,8 @@ class LangGraphRunLifecycle:
             },
         })
         self.event_log.append(event)
+        if len(self.event_log) > 200:
+            self.event_log = self.event_log[-200:]
         self._persist()
         if self.checkpoint_store is not None:
             self.checkpoint_store.set_run_status(
@@ -437,6 +521,7 @@ class LangGraphRunLifecycle:
         lifecycle.owned_research_jobs = dict(
             state.get("owned_research_jobs") or {}
         )
+        lifecycle.owned_children = dict(state.get("owned_children") or {})
         terminal = state.get("terminal")
         if terminal:
             lifecycle.terminal = {

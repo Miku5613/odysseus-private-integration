@@ -105,6 +105,125 @@ async def cancel_owned_research_jobs(
     return tuple(cancelled)
 
 
+async def reconcile_owned_research_jobs(
+    lifecycle: Any,
+    *,
+    status_backend: ResearchJobBackend = do_research_status,
+    result_backend: ResearchJobBackend = do_research_result_peek,
+    semantic_validator: ResearchSemanticValidator = _default_semantic_validator,
+    observation_timeout_s: float = 10.0,
+) -> dict[str, WorkerResult]:
+    """Observe each durable owned job once and attach any completed report."""
+
+    results: dict[str, WorkerResult] = {}
+    owner = lifecycle.identity.owner
+    for research_job_id, job in tuple(lifecycle.owned_research_jobs.items()):
+        if (
+            not isinstance(job, dict)
+            or job.get("owned") is not True
+            or job.get("status") not in {"queued", "running"}
+        ):
+            continue
+        handoff = WorkerHandoff(
+            capability=RESEARCH_WORKER_CAPABILITY,
+            objective=str(job.get("objective") or "Retrieve completed research."),
+            context={
+                "action": "start",
+                "owner": owner,
+                "research_job_id": research_job_id,
+                "research_job_owned": True,
+                "research_timeout_s": 0,
+                "research_poll_interval_s": 0,
+                "research_job_observer": lifecycle.own_research_job,
+                "recovery_observation": True,
+            },
+        )
+        try:
+            result = await asyncio.wait_for(
+                run_research_worker(
+                    handoff,
+                    session_id=lifecycle.identity.session_id,
+                    trigger_backend=_forbid_recovery_trigger,
+                    status_backend=status_backend,
+                    result_backend=result_backend,
+                    semantic_validator=semantic_validator,
+                ),
+                timeout=max(0.01, float(observation_timeout_s)),
+            )
+        except TimeoutError:
+            result = WorkerResult(
+                capability=RESEARCH_WORKER_CAPABILITY,
+                status="partial",
+                summary="Owned research observation timed out safely.",
+                data={
+                    "action": "start",
+                    "research_job_id": research_job_id,
+                    "research_status": str(job.get("status") or "running"),
+                    "research_job_owned": True,
+                    "semantic_complete": False,
+                    "observation_timed_out": True,
+                },
+            )
+        results[research_job_id] = result
+        durable_status = str(
+            result.data.get("research_status")
+            or ("completed" if result.status == "completed" else "running")
+        ).lower()
+        lifecycle.own_research_job(
+            research_job_id,
+            str(job.get("objective") or ""),
+            durable_status,
+        )
+        dependency_key = str(
+            job.get("step_id") or f"research:{research_job_id}"
+        )
+        if result.status == "completed":
+            lifecycle.dependency_results[dependency_key] = {
+                "status": "completed",
+                "summary": result.summary,
+                "data": dict(result.data.get("dependency_state") or result.data),
+                "evidence": list(result.evidence),
+                "recovered": True,
+            }
+            for artifact in result.data.get("artifacts") or []:
+                if (
+                    isinstance(artifact, dict)
+                    and artifact not in lifecycle.artifact_references
+                ):
+                    lifecycle.artifact_references.append(artifact)
+            lifecycle.suspend(
+                "SUSPENDED",
+                stage="research_reconciled",
+                reason="Completed research is ready for final synthesis.",
+                research_job_id=research_job_id,
+            )
+        elif durable_status in {"failed", "cancelled"}:
+            lifecycle.dependency_results[dependency_key] = {
+                "status": "failed",
+                "summary": result.summary,
+                "error": result.error,
+                "recovered": True,
+            }
+            lifecycle.suspend(
+                "INTERRUPTED",
+                stage="research_reconciled",
+                reason=result.error or result.summary,
+                research_job_id=research_job_id,
+            )
+        else:
+            lifecycle.suspend(
+                "SUSPENDED",
+                stage="research_observation",
+                reason="Owned research remains queued or running.",
+                research_job_id=research_job_id,
+            )
+    return results
+
+
+async def _forbid_recovery_trigger(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    raise RuntimeError("Recovery must never trigger a new research job.")
+
+
 def _normalize_action(handoff: WorkerHandoff) -> str:
     action = str(handoff.context.get("action") or "start").strip().lower()
 
@@ -536,8 +655,10 @@ async def run_research_worker(
                     error=f"Unsupported research status: {research_status!r}",
                 )
         except asyncio.CancelledError:
+            if handoff.context.get("recovery_observation"):
+                raise
             if cancellation_scope is not None:
-                cancellation_scope.cancel()
+                await cancellation_scope.cancel_and_wait()
             else:
                 await cancel_backend(research_job_id, owner=owner)
             raise
@@ -700,5 +821,6 @@ async def run_research_worker(
 __all__ = [
     "RESEARCH_WORKER_CAPABILITY",
     "cancel_owned_research_jobs",
+    "reconcile_owned_research_jobs",
     "run_research_worker",
 ]

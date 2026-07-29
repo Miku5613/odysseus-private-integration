@@ -228,6 +228,21 @@ def get_pending_confirmation(
     return _record_to_confirmation(record)
 
 
+def get_confirmation(
+    session_id: str,
+    call_id: str,
+) -> PendingToolConfirmation | None:
+    """Return a durable confirmation in any lifecycle state."""
+
+    session = _required_text(session_id, "session_id")
+    call = _required_text(call_id, "call_id")
+    record = get_default_checkpoint_store().decision_for_tool_call(
+        session_id=session,
+        call_id=call,
+    )
+    return _record_to_confirmation(record) if record is not None else None
+
+
 def resolve_pending_confirmation(
     *,
     session_id: str,
@@ -337,6 +352,7 @@ __all__ = [
     "canonicalize_tool_arguments",
     "clear_session_confirmations",
     "consume_approved_confirmation",
+    "get_confirmation",
     "get_pending_confirmation",
     "register_pending_confirmation",
     "resolve_pending_confirmation",
