@@ -24,6 +24,10 @@ from src.agent_runtime.multi_graph_coordinator import (
     stream_multi_graph_coordinator_sse,
 )
 from src.agent_runtime.run_lifecycle import LangGraphRunLifecycle
+from src.agent_runtime.durable_checkpoint import (
+    CheckpointUnavailableError,
+    get_default_checkpoint_store,
+)
 from src.agent_runtime.general_bridge import (
     general_runtime_enabled,
     general_runtime_supports,
@@ -190,6 +194,8 @@ async def _stream_multi_graph_fail_closed(*args, **kwargs):
         session_id=coordinator_kwargs.get("session_id"),
         run_id=coordinator_kwargs.get("run_id"),
         thread_id=coordinator_kwargs.get("thread_id"),
+        checkpoint_ns=coordinator_kwargs.get("checkpoint_ns"),
+        owner=coordinator_kwargs.get("owner"),
     )
     coordinator_kwargs.setdefault(
         "run_id",
@@ -200,11 +206,19 @@ async def _stream_multi_graph_fail_closed(*args, **kwargs):
         lifecycle.identity.thread_id,
     )
     coordinator_kwargs.setdefault(
+        "checkpoint_ns",
+        lifecycle.identity.checkpoint_ns,
+    )
+    coordinator_kwargs.setdefault(
         "cancellation_scope",
         lifecycle.cancellation,
     )
 
     try:
+        coordinator_kwargs.setdefault(
+            "checkpoint_store",
+            get_default_checkpoint_store(),
+        )
         allowed = set(
             inspect.signature(
                 stream_multi_graph_coordinator_sse
@@ -299,6 +313,31 @@ def _append_runtime_tool_event(events, data):
             ev[key] = data.get(key)
 
     events.append(ev)
+
+
+async def _replay_durable_langgraph_run(
+    state: dict[str, Any],
+    *,
+    after_cursor: int = 0,
+) -> AsyncGenerator[str, None]:
+    for event in state.get("event_log") or []:
+        if not isinstance(event, dict):
+            continue
+        cursor = int((event.get("data") or {}).get("event_cursor") or 0)
+        if cursor <= after_cursor:
+            continue
+        yield f"data: {json.dumps(event, default=str)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+def _durable_checkpoint_store_or_503():
+    try:
+        return get_default_checkpoint_store()
+    except CheckpointUnavailableError as exc:
+        raise HTTPException(
+            503,
+            f"Durable LangGraph recovery is unavailable: {exc}",
+        ) from exc
 
 
 from src.agent_runtime.contract_bridge import (
@@ -2529,6 +2568,7 @@ def setup_chat_routes(
                                     "ask_user",
                                     "plan_update",
                                     "runtime_run",
+                                    "runtime_snapshot",
                                     "runtime_terminal",
                                 ):
                                     if data.get("type") == "agent_step":
@@ -2662,11 +2702,29 @@ def setup_chat_routes(
     # (e.g. after reopening a session whose agent kept running in the background)
     # ------------------------------------------------------------------ #
     @router.get("/api/chat/resume/{session_id}")
-    async def chat_resume(request: Request, session_id: str) -> StreamingResponse:
+    async def chat_resume(
+        request: Request,
+        session_id: str,
+        after_cursor: int = Query(0, ge=0),
+    ) -> StreamingResponse:
         _verify_session_owner(request, session_id)
-        if not agent_runs.is_active(session_id):
-            raise HTTPException(404, "No active run for this session")
-        return StreamingResponse(agent_runs.subscribe(session_id), media_type="text/event-stream")
+        if agent_runs.is_active(session_id):
+            return StreamingResponse(
+                agent_runs.subscribe(session_id),
+                media_type="text/event-stream",
+            )
+        state = _durable_checkpoint_store_or_503().recover_latest(
+            session_id=session_id,
+        )
+        if state is None:
+            raise HTTPException(404, "No recoverable run for this session")
+        return StreamingResponse(
+            _replay_durable_langgraph_run(
+                state,
+                after_cursor=after_cursor,
+            ),
+            media_type="text/event-stream",
+        )
 
     # ------------------------------------------------------------------ #
     # POST /api/chat/stop — cancel a detached run (Stop button). Closing the SSE
@@ -2727,6 +2785,24 @@ def setup_chat_routes(
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         stopped = agent_runs.stop(session_id)
+        if not stopped:
+            store = _durable_checkpoint_store_or_503()
+            state = store.recover_latest(session_id=session_id)
+            if state and state.get("status") == "RUNNING":
+                recovered = LangGraphRunLifecycle.recover(
+                    checkpoint_store=store,
+                    thread_id=state["thread_id"],
+                    checkpoint_ns=state["checkpoint_namespace"],
+                )
+                if recovered is not None:
+                    recovered.cancellation.cancel()
+                    recovered.finish(
+                        "CANCELLED",
+                        stage="recovered_stop",
+                        reason="Stopped after durable recovery.",
+                        completed_steps=recovered.completed_steps,
+                    )
+                    stopped = True
         return {"stopped": stopped}
 
     # ------------------------------------------------------------------ #
@@ -2744,6 +2820,22 @@ def setup_chat_routes(
         if rec is None:
             if agent_runs.is_active(session_id):
                 return {"status": "streaming", "detached": True}
+            state = _durable_checkpoint_store_or_503().recover_latest(
+                session_id=session_id,
+            )
+            if state is not None:
+                return {
+                    "status": str(state.get("status") or "unknown").lower(),
+                    "detached": False,
+                    "durable": True,
+                    "run_id": state.get("run_id"),
+                    "thread_id": state.get("thread_id"),
+                    "checkpoint_ns": state.get("checkpoint_namespace"),
+                    "event_cursor": state.get("event_cursor", 0),
+                    "plan": state.get("current_plan"),
+                    "completed_steps": state.get("completed_steps") or [],
+                    "terminal": state.get("terminal"),
+                }
             raise HTTPException(404, "No active stream for this session")
         return rec
 

@@ -197,3 +197,56 @@ def test_multi_graph_startup_failure_never_invokes_whole_query_legacy(
     assert len(terminals) == 1
     assert terminals[0]["data"]["status"] == "FAILED"
     assert terminals[0]["data"]["whole_query_legacy_fallback"] is False
+
+
+def test_durable_checkpoint_initialization_failure_is_controlled(
+    monkeypatch,
+) -> None:
+    from routes import chat_routes
+    from src.agent_runtime.durable_checkpoint import (
+        CheckpointUnavailableError,
+    )
+
+    def unavailable():
+        raise CheckpointUnavailableError("database is read-only")
+
+    coordinator_calls = []
+
+    async def forbidden_coordinator(*args, **kwargs):
+        coordinator_calls.append((args, kwargs))
+        yield "data: forbidden\n\n"
+
+    monkeypatch.setattr(
+        chat_routes,
+        "get_default_checkpoint_store",
+        unavailable,
+    )
+    monkeypatch.setattr(
+        chat_routes,
+        "stream_multi_graph_coordinator_sse",
+        forbidden_coordinator,
+    )
+
+    async def collect():
+        return [
+            frame
+            async for frame in chat_routes._stream_multi_graph_fail_closed()
+        ]
+
+    frames = asyncio.run(collect())
+    payloads = [
+        json.loads(frame[6:])
+        for frame in frames
+        if frame.startswith("data: ")
+        and frame != "data: [DONE]\n\n"
+    ]
+    terminal = next(
+        item
+        for item in payloads
+        if item.get("type") == "runtime_terminal"
+    )
+
+    assert coordinator_calls == []
+    assert terminal["data"]["status"] == "FAILED"
+    assert "CheckpointUnavailableError" in terminal["data"]["reason"]
+    assert frames.count("data: [DONE]\n\n") == 1

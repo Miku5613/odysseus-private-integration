@@ -3,6 +3,9 @@ from __future__ import annotations
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
+from src.agent_runtime.durable_checkpoint import (
+    get_default_checkpoint_store,
+)
 
 from src.agent_runtime.action_search import (
     build_assist_searches,
@@ -1222,4 +1225,6 @@ def build_graph(scope: str = "file_inspection", session_id: str | None = None):
     graph_builder.add_conditional_edges("targeted_action_search", route_after_tools)
     graph_builder.add_edge("finalizer", END)
 
-    return graph_builder.compile()
+    return graph_builder.compile(
+        checkpointer=get_default_checkpoint_store().checkpointer
+    )

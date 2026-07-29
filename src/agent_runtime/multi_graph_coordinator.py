@@ -625,7 +625,9 @@ async def stream_multi_graph_coordinator_sse(
     max_revisions: int = 3,
     run_id: str | None = None,
     thread_id: str | None = None,
+    checkpoint_ns: str | None = None,
     cancellation_scope: LangGraphCancellationScope | None = None,
+    checkpoint_store: Any = None,
     **kwargs: Any,
 ) -> AsyncGenerator[str, None]:
     """Execute an admitted multi-graph turn through permanent runtime owners."""
@@ -635,7 +637,10 @@ async def stream_multi_graph_coordinator_sse(
         session_id=session_id,
         run_id=run_id,
         thread_id=thread_id,
+        checkpoint_ns=checkpoint_ns,
+        owner=owner,
         cancellation=cancellation_scope,
+        checkpoint_store=checkpoint_store,
     )
     query = _latest_user_message(messages)
 
@@ -947,6 +952,43 @@ async def stream_multi_graph_coordinator_sse(
     frames, tool_events = _tool_frames_and_events(
         control
     )
+    completed_step_ids = [
+        step_id
+        for step_id in control.orchestration.execution_order
+        if next(
+            item
+            for item in control.orchestration.state.step_states
+            if item.step_id == step_id
+        ).status == "completed"
+    ]
+    dependency_results = {
+        step_id: {
+            "status": result.status,
+            "summary": result.summary,
+            "data": result.data,
+            "evidence": list(result.evidence),
+            "error": result.error,
+        }
+        for step_id, result in zip(
+            control.orchestration.execution_order,
+            control.orchestration.worker_results,
+        )
+    }
+    artifact_references = [
+        artifact
+        for result in control.orchestration.worker_results
+        for artifact in (
+            result.data.get("artifacts")
+            if isinstance(result.data.get("artifacts"), list)
+            else []
+        )
+        if isinstance(artifact, dict)
+    ]
+    yield _frame(lifecycle.update_runtime_state(
+        completed_steps=completed_step_ids,
+        dependency_results=dependency_results,
+        artifact_references=artifact_references,
+    ))
     for frame in frames:
         yield frame
 
@@ -1022,15 +1064,7 @@ async def stream_multi_graph_coordinator_sse(
             control.orchestration.message
             or control.stopped_reason
         ),
-        completed_steps=[
-            step_id
-            for step_id in control.orchestration.execution_order
-            if next(
-                item
-                for item in control.orchestration.state.step_states
-                if item.step_id == step_id
-            ).status == "completed"
-        ],
+        completed_steps=completed_step_ids,
         whole_query_legacy_fallback=False,
     )
     if terminal is not None:

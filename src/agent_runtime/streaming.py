@@ -11,6 +11,10 @@ from langchain_core.messages import HumanMessage
 
 from src.agent_runtime.events import make_event, reset_event_sink, set_event_sink
 from src.agent_runtime.graph import RUNTIME_VERSION, build_graph
+from src.agent_runtime.durable_checkpoint import (
+    get_default_checkpoint_store,
+)
+from src.agent_runtime.run_lifecycle import LangGraphRunIdentity
 from src.agent_runtime.tool_adapters import bind_workspace
 from src.agent_runtime.tool_policy import infer_tool_scope
 
@@ -44,6 +48,10 @@ def run_stream(
         question = clarified_question
 
     scope = infer_tool_scope(question, workspace_path)
+    identity = LangGraphRunIdentity.create(
+        session_id=session_id,
+        runtime_mode="single_graph",
+    )
     event_queue: queue.Queue = queue.Queue()
 
     def sink(event: dict) -> None:
@@ -66,6 +74,9 @@ def run_stream(
                     workspace=workspace_path,
                     scope=scope,
                     question=question,
+                    run_id=identity.run_id,
+                    thread_id=identity.thread_id,
+                    checkpoint_ns=identity.checkpoint_ns,
                 )
             )
 
@@ -80,7 +91,13 @@ def run_stream(
                     "events": [],
                     "evidence_hits": [],
                 },
-                config={"recursion_limit": 30},
+                config={
+                    "recursion_limit": 30,
+                    **get_default_checkpoint_store().config(
+                        thread_id=identity.thread_id,
+                        checkpoint_ns=identity.checkpoint_ns,
+                    ),
+                },
             )
 
             final = str(result["messages"][-1].content)
