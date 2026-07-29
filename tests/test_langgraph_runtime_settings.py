@@ -157,6 +157,9 @@ def test_settings_are_wired_to_runtime_enforcement_seams():
     assert 'configured_policy["allow_mutation"]' in coordinator
     assert 'runtime_settings["context_source_policy"]["workspace"]' in coordinator
     assert 'runtime_settings["effort_preset"]' in coordinator
+    assert 'role_candidates("planner")' in coordinator
+    assert 'role_candidates("code_worker")' in coordinator
+    assert 'role_candidates("final_synthesis")' in coordinator
     assert "_langgraph_multi_graph_allowed_by_settings()" in chat_routes
     assert '["completed_run_retention"]' in checkpoint
 

@@ -751,25 +751,34 @@ async def stream_multi_graph_coordinator_sse(
         yield "data: [DONE]\n\n"
         return
 
-    candidates = [
-        (endpoint_url, model, headers),
-        *list(fallbacks or ()),
-    ]
+    model_policy = runtime_settings["runtime_model_policy"]
+    configured_runtime_model = str(model_policy.get("model") or "").strip()
+    role_models = dict(model_policy.get("role_models") or {})
+
+    def role_candidates(role: str) -> list[tuple[Any, ...]]:
+        role_model = str(role_models.get(role) or "").strip()
+        selected_model = role_model or configured_runtime_model or model
+        return [
+            (endpoint_url, selected_model, headers),
+            *list(fallbacks or ()),
+        ]
+
+    candidates = role_candidates("general_worker")
 
     planner = planner_model or _RuntimeFallbackModel(
-        candidates,
+        role_candidates("planner"),
         prompt_type=prompt_type,
         max_tokens=2400,
         llm_caller=llm_caller,
     )
     resolver = resolver_model or _RuntimeFallbackModel(
-        candidates,
+        role_candidates("planner"),
         prompt_type=prompt_type,
         max_tokens=1400,
         llm_caller=llm_caller,
     )
     replanner = replanner_model or _RuntimeFallbackModel(
-        candidates,
+        role_candidates("planner"),
         prompt_type=prompt_type,
         max_tokens=2400,
         llm_caller=llm_caller,
@@ -781,7 +790,7 @@ async def stream_multi_graph_coordinator_sse(
         llm_caller=llm_caller,
     )
     synthesizer = final_model or _RuntimeFallbackModel(
-        candidates,
+        role_candidates("final_synthesis"),
         prompt_type=prompt_type,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -861,7 +870,7 @@ async def stream_multi_graph_coordinator_sse(
 
     base_runners = (
         builtin_worker_runners(
-            code_finalizer_candidates=candidates,
+            code_finalizer_candidates=role_candidates("code_worker"),
             code_finalizer_prompt_type=prompt_type,
         )
         if worker_runners is None

@@ -670,5 +670,8 @@ def test_multi_graph_configures_code_worker_grounded_finalizer_from_chat_candida
         / "multi_graph_coordinator.py"
     ).read_text(encoding="utf-8")
 
-    assert "code_finalizer_candidates=candidates" in source
+    assert (
+        'code_finalizer_candidates=role_candidates("code_worker")'
+        in source
+    )
     assert "code_finalizer_prompt_type=prompt_type" in source
