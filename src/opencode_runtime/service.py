@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import fnmatch
 import os
 import secrets
@@ -17,6 +18,7 @@ from .normalizer import (
     OpenCodeEventNormalizer,
     extract_final_assistant_message,
 )
+from .model_registry import normalize_provider_base_url
 from .process_manager import (
     OpenCodeServerLifecycleError,
     OpenCodeServerManager,
@@ -597,61 +599,406 @@ class OpenCodeRuntimeService:
             ),
         }
 
+    def validate_turn_selection(
+        self,
+        *,
+        endpoint_id: str,
+        provider_id: str,
+        provider_base_url: str,
+        provider_models: tuple[str, ...] = (),
+        model_id: str,
+    ) -> str:
+        selected_provider = str(provider_id or "").strip()
+        selected_model = str(model_id or "").strip()
+        if not selected_model:
+            raise OpenCodeServerLifecycleError("OpenCode model must not be empty.")
+        if not self._provider_selection_matches_loaded(
+            provider_id=selected_provider,
+            provider_base_url=provider_base_url,
+        ):
+            raise OpenCodeServerLifecycleError(
+                "The selected model belongs to a different OpenCode provider."
+            )
+        loaded_models = {
+            str(item or "").strip()
+            for item in self.config.provider_models
+            if str(item or "").strip()
+        }
+        selected_models = {
+            str(item or "").strip()
+            for item in provider_models
+            if str(item or "").strip()
+        }
+        available_models = selected_models or loaded_models
+        if available_models and selected_model not in available_models:
+            raise OpenCodeServerLifecycleError(
+                "The selected model is not available from the selected OpenCode provider."
+            )
+        return str(self.config.provider_id or selected_provider).strip()
+
+    @staticmethod
+    def _provider_url(value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return ""
+        return normalize_provider_base_url(normalized).casefold()
+
+    def _provider_selection_matches_loaded(
+        self,
+        *,
+        provider_id: str,
+        provider_base_url: str,
+    ) -> bool:
+        selected_provider = str(provider_id or "").strip()
+        loaded_provider = str(self.config.provider_id or "").strip()
+        selected_base = self._provider_url(provider_base_url)
+        loaded_base = self._provider_url(self.config.provider_base_url)
+        if selected_base and loaded_base:
+            return selected_base == loaded_base
+        return bool(selected_provider and selected_provider == loaded_provider)
+
+    @staticmethod
+    def _native_timestamp(value: Any) -> tuple[str | None, float]:
+        if value is None or value == "":
+            return None, 0.0
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            milliseconds = float(value)
+            if abs(milliseconds) < 100_000_000_000:
+                milliseconds *= 1000.0
+            try:
+                rendered = datetime.fromtimestamp(
+                    milliseconds / 1000.0,
+                    tz=timezone.utc,
+                ).isoformat().replace("+00:00", "Z")
+            except (OverflowError, OSError, ValueError):
+                return None, 0.0
+            return rendered, milliseconds
+        text = str(value or "").strip()
+        if not text:
+            return None, 0.0
+        try:
+            numeric = float(text)
+        except ValueError:
+            numeric = None
+        if numeric is not None:
+            return OpenCodeRuntimeService._native_timestamp(numeric)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.astimezone(timezone.utc)
+        except ValueError:
+            return text, 0.0
+        return parsed.isoformat().replace("+00:00", "Z"), parsed.timestamp() * 1000.0
+
+    @staticmethod
+    def _native_message_text(message: dict[str, Any]) -> str:
+        parts = message.get("parts") if isinstance(message.get("parts"), list) else []
+        text = " ".join(
+            str(part.get("text") or "").strip()
+            for part in parts
+            if isinstance(part, dict)
+            and str(part.get("type") or "") == "text"
+            and str(part.get("text") or "").strip()
+        )
+        return " ".join(text.split())
+
+    @classmethod
+    def _native_session_identity(
+        cls,
+        item: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> tuple[str, int, str]:
+        raw_model = item.get("model")
+        model_name = ""
+        if isinstance(raw_model, dict):
+            model_name = str(
+                raw_model.get("id")
+                or raw_model.get("modelID")
+                or ""
+            ).strip()
+        elif isinstance(raw_model, str):
+            model_name = raw_model.strip()
+
+        latest_user = ""
+        latest_assistant = ""
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            info = message.get("info") if isinstance(message.get("info"), dict) else {}
+            role = str(info.get("role") or "").strip().lower()
+            if not model_name and role == "user":
+                message_model = info.get("model")
+                if isinstance(message_model, dict):
+                    model_name = str(
+                        message_model.get("modelID")
+                        or message_model.get("id")
+                        or ""
+                    ).strip()
+            text = cls._native_message_text(message)
+            if not text:
+                continue
+            if role == "user" and not latest_user:
+                latest_user = text
+            elif role == "assistant" and not latest_assistant:
+                latest_assistant = text
+            if latest_user and latest_assistant and model_name:
+                break
+
+        preview = latest_user or latest_assistant
+        if len(preview) > 180:
+            preview = preview[:177].rstrip() + "..."
+        return model_name, len(messages), preview
+
+    @classmethod
+    def _native_session_view(
+        cls,
+        item: dict[str, Any],
+        active_id: str,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        session_id = str(item.get("id") or "").strip()
+        title = str(item.get("title") or item.get("name") or "").strip()
+        if not title:
+            title = "OpenCode Session"
+        raw_time = item.get("time") if isinstance(item.get("time"), dict) else {}
+        created_at, created_sort = cls._native_timestamp(
+            raw_time.get("created", item.get("createdAt"))
+        )
+        updated_at, updated_sort = cls._native_timestamp(
+            raw_time.get("updated", item.get("updatedAt"))
+        )
+        model_name, message_count, preview = cls._native_session_identity(
+            item,
+            messages or [],
+        )
+        return {
+            "id": session_id,
+            "title": title,
+            "active": bool(session_id and session_id == active_id),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "model_name": model_name,
+            "message_count": message_count,
+            "preview": preview,
+            "_sort_timestamp": updated_sort or created_sort,
+        }
+
+    async def list_native_sessions(
+        self,
+        odysseus_session_id: str,
+        *,
+        workspace: str = "",
+    ) -> dict[str, Any]:
+        conversation_id = str(odysseus_session_id or "").strip()
+        if not conversation_id:
+            raise ValueError("Odysseus session id is required.")
+        await self.health()
+        items = await asyncio.to_thread(
+            self.transport.list_sessions,
+            str(workspace or "").strip(),
+        )
+        normalized_workspace = str(workspace or "").strip()
+
+        async def load_messages(item: dict[str, Any]) -> list[dict[str, Any]]:
+            session_id = str(item.get("id") or "").strip()
+            if not session_id:
+                return []
+            try:
+                return await asyncio.to_thread(
+                    self.transport.list_messages,
+                    session_id,
+                    limit=10_000,
+                    directory=normalized_workspace,
+                )
+            except Exception:
+                return []
+
+        message_lists = await asyncio.gather(*(
+            load_messages(item) for item in items
+        ))
+        with self._lock:
+            active_id = self._sessions.get(conversation_id, "")
+        sessions = [
+            self._native_session_view(item, active_id, messages)
+            for item, messages in zip(items, message_lists)
+            if str(item.get("id") or "").strip()
+        ]
+        sessions.sort(key=lambda item: item["_sort_timestamp"], reverse=True)
+        for item in sessions:
+            item.pop("_sort_timestamp", None)
+        return {
+            "ok": True,
+            "odysseus_session_id": conversation_id,
+            "active_opencode_session_id": active_id,
+            "sessions": sessions,
+        }
+
+    async def create_conversation_session(
+        self,
+        odysseus_session_id: str,
+        *,
+        title: str,
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        conversation_id = str(odysseus_session_id or "").strip()
+        session_title = str(title or "").strip()
+        if not conversation_id:
+            raise ValueError("Odysseus session id is required.")
+        if not session_title:
+            raise ValueError("OpenCode session title is required.")
+        created = await asyncio.to_thread(self.transport.create_session, session_title)
+        with self._lock:
+            previous = self._sessions.get(conversation_id, "")
+            self._sessions[conversation_id] = created
+        message = f'OpenCode session created: "{session_title}".'
+        self._persist_transcript_message(
+            conversation_id,
+            "assistant",
+            message,
+            {
+                "runtime": "opencode",
+                "kind": "native_session_created",
+                "deterministic": True,
+                "opencode_session_id": created,
+                "previous_opencode_session_id": previous,
+            },
+        )
+        return {
+            "ok": True,
+            "message": message,
+            "odysseus_session_id": conversation_id,
+            "opencode_session_id": created,
+            "previous_opencode_session_id": previous,
+            "title": session_title,
+        }
+
     async def replace_conversation_session(
         self,
         odysseus_session_id: str,
         *,
         title: str = "",
     ) -> dict[str, Any]:
+        return await self.create_conversation_session(
+            odysseus_session_id,
+            title=str(title or "").strip() or "OpenCode Session",
+        )
+
+    async def attach_conversation_session(
+        self,
+        odysseus_session_id: str,
+        opencode_session_id: str,
+    ) -> dict[str, Any]:
         self._assert_idle()
         conversation_id = str(odysseus_session_id or "").strip()
-        if not conversation_id:
-            raise ValueError("Odysseus session id is required.")
-
-        session_title = str(title or "").strip() or "OpenCode Session"
-        created = await asyncio.to_thread(
-            self.transport.create_session,
-            session_title,
-        )
+        native_id = str(opencode_session_id or "").strip()
+        if not conversation_id or not native_id:
+            raise ValueError("Both Odysseus and OpenCode session ids are required.")
+        match = await asyncio.to_thread(self.transport.get_session, native_id)
+        if match is None:
+            raise KeyError("OpenCode session was not found.")
+        title = str(match.get("title") or match.get("name") or "OpenCode Session").strip()
         with self._lock:
             previous = self._sessions.get(conversation_id, "")
-            self._sessions[conversation_id] = created
-
-        if previous and previous != created:
-            try:
-                await asyncio.to_thread(
-                    self.transport.delete_session,
-                    previous,
-                )
-            except Exception:
-                self._log(
-                    "SESSION_REPLACED_OLD_DELETE_FAILED",
-                    odysseus_session_id=conversation_id,
-                    opencode_session_id=previous,
-                )
-
+            self._sessions[conversation_id] = native_id
+        if previous:
+            message = f'OpenCode session switched to "{title}".'
+        else:
+            message = f'OpenCode session started: "{title}".'
         self._persist_transcript_message(
             conversation_id,
             "assistant",
-            f"OpenCode started a new native session: {created}.",
+            message,
             {
                 "runtime": "opencode",
-                "kind": "native_session_replaced",
+                "kind": "native_session_attached",
                 "deterministic": True,
-                "opencode_session_id": created,
+                "opencode_session_id": native_id,
+                "previous_opencode_session_id": previous,
             },
         )
-        self._log(
-            "SESSION_REPLACED",
-            odysseus_session_id=conversation_id,
-            previous_opencode_session_id=previous,
-            opencode_session_id=created,
+        return {
+            "ok": True,
+            "message": message,
+            "odysseus_session_id": conversation_id,
+            "opencode_session_id": native_id,
+            "previous_opencode_session_id": previous,
+            "title": title,
+        }
+
+    async def rename_native_session(
+        self,
+        odysseus_session_id: str,
+        opencode_session_id: str,
+        title: str,
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        conversation_id = str(odysseus_session_id or "").strip()
+        native_id = str(opencode_session_id or "").strip()
+        normalized_title = str(title or "").strip()
+        if not conversation_id or not native_id:
+            raise ValueError("Both Odysseus and OpenCode session ids are required.")
+        if not normalized_title:
+            raise ValueError("OpenCode session title is required.")
+        if await asyncio.to_thread(self.transport.get_session, native_id) is None:
+            raise KeyError("OpenCode session was not found.")
+        updated = await asyncio.to_thread(
+            self.transport.update_session_title, native_id, normalized_title
         )
         return {
             "ok": True,
             "odysseus_session_id": conversation_id,
-            "opencode_session_id": created,
-            "previous_opencode_session_id": previous,
+            "opencode_session_id": native_id,
+            "title": str(updated.get("title") or normalized_title),
+        }
+
+    async def delete_native_session(
+        self,
+        odysseus_session_id: str,
+        opencode_session_id: str,
+        *,
+        title: str = "",
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        conversation_id = str(odysseus_session_id or "").strip()
+        native_id = str(opencode_session_id or "").strip()
+        if not conversation_id or not native_id:
+            raise ValueError("Both Odysseus and OpenCode session ids are required.")
+        existing = await asyncio.to_thread(self.transport.get_session, native_id)
+        resolved_title = str(
+            (existing or {}).get("title")
+            or (existing or {}).get("name")
+            or title
+            or "OpenCode Session"
+        ).strip()
+        deleted = await asyncio.to_thread(self.transport.delete_session, native_id)
+        with self._lock:
+            active_cleared = self._sessions.get(conversation_id, "") == native_id
+            if active_cleared:
+                self._sessions.pop(conversation_id, None)
+        message = f'OpenCode session deleted: "{resolved_title}".'
+        self._persist_transcript_message(
+            conversation_id,
+            "assistant",
+            message,
+            {
+                "runtime": "opencode",
+                "kind": "native_session_deleted",
+                "deterministic": True,
+                "opencode_session_id": "",
+                "deleted_opencode_session_id": native_id,
+                "active_session_cleared": active_cleared,
+            },
+        )
+        return {
+            "ok": True,
+            "deleted": bool(deleted),
+            "not_found": existing is None or not deleted,
+            "active_cleared": active_cleared,
+            "message": message,
+            "odysseus_session_id": conversation_id,
+            "opencode_session_id": native_id,
+            "title": resolved_title,
         }
 
     async def open_package_terminal(
@@ -681,6 +1028,50 @@ class OpenCodeRuntimeService:
             action=result.get("action"),
             terminal=result.get("terminal"),
             terminal_pid=result.get("pid"),
+        )
+        return {
+            "ok": True,
+            "odysseus_session_id": conversation_id,
+            **result,
+        }
+
+    async def open_native_tui(
+        self,
+        odysseus_session_id: str,
+        opencode_session_id: str,
+        *,
+        workspace: str = "",
+    ) -> dict[str, Any]:
+        self._assert_idle()
+        conversation_id = str(odysseus_session_id or "").strip()
+        native_id = str(opencode_session_id or "").strip()
+        if not conversation_id:
+            raise OpenCodeServerLifecycleError(
+                "Odysseus session id is required."
+            )
+        if not native_id:
+            raise OpenCodeServerLifecycleError(
+                "A valid OpenCode session ID is required."
+            )
+
+        await self.health()
+        existing = await asyncio.to_thread(
+            self.transport.get_session,
+            native_id,
+        )
+        if existing is None:
+            raise KeyError("OpenCode session was not found.")
+        result = await asyncio.to_thread(
+            self.server_manager.open_native_tui,
+            native_id,
+            workspace=str(workspace or "").strip(),
+        )
+        self._log(
+            "NATIVE_TUI_OPENED",
+            odysseus_session_id=conversation_id,
+            opencode_session_id=native_id,
+            terminal=result.get("terminal"),
+            endpoint=result.get("endpoint"),
         )
         return {
             "ok": True,
@@ -1553,10 +1944,15 @@ class OpenCodeRuntimeService:
         odysseus_session_id: str,
         title: str = "",
         permission_mode: str = "ask",
+        provider_id: str = "",
+        model_id: str = "",
+        attachment_parts: tuple[dict[str, Any], ...] = (),
+        attachment_refs: tuple[dict[str, Any], ...] = (),
     ) -> AsyncIterator[str]:
         normalized_message = str(message or "").strip()
         conversation_id = str(odysseus_session_id or "").strip()
-        if not normalized_message:
+        has_attachments = bool(attachment_parts)
+        if not normalized_message and not has_attachments:
             yield sse_frame({
                 "type": "runtime.failed",
                 "runtime": "opencode",
@@ -1591,8 +1987,9 @@ class OpenCodeRuntimeService:
             "RUN_REQUESTED",
             odysseus_session_id=conversation_id,
             prompt_length=len(normalized_message),
+            attachment_count=len(attachment_parts),
             title_length=len(str(title or "")),
-            model_id=self.config.model_id,
+            model_id=str(model_id or self.config.model_id),
             configured_workspace=(
                 self.config.workspace or str(Path.cwd())
             ),
@@ -1632,10 +2029,18 @@ class OpenCodeRuntimeService:
                 owned=launch.get("owned"),
                 pid=launch.get("pid"),
             )
-            session_id = await self._get_or_create_session(
-                conversation_id,
-                title=title,
-            )
+            if has_attachments:
+                with self._lock:
+                    session_id = self._sessions.get(conversation_id, "")
+                if not session_id:
+                    raise OpenCodeServerLifecycleError(
+                        "Start or select an OpenCode session before sending an image."
+                    )
+            else:
+                session_id = await self._get_or_create_session(
+                    conversation_id,
+                    title=title,
+                )
             run = ActiveOpenCodeRun(
                 run_id=run_id,
                 odysseus_session_id=conversation_id,
@@ -1705,7 +2110,7 @@ class OpenCodeRuntimeService:
                 self._persist_transcript_message,
                 conversation_id,
                 "user",
-                normalized_message,
+                normalized_message or "[Image attachment]",
                 {
                     "runtime": "opencode",
                     "run_id": run_id,
@@ -1714,6 +2119,7 @@ class OpenCodeRuntimeService:
                     "model_id": self.config.model_id,
                     "transcript_phase": "user",
                     "workspace": str(self._workspace_root()),
+                    "attachments": list(attachment_refs),
                 },
             )
 
@@ -1732,19 +2138,48 @@ class OpenCodeRuntimeService:
                 odysseus_session_id=conversation_id,
                 opencode_session_id=session_id,
                 prompt_length=len(normalized_message),
+                attachment_count=len(attachment_parts),
                 requested_model_id=self.config.model_id,
                 effective_model_id=self.config.model_id,
             )
-            await asyncio.to_thread(
-                self.transport.submit_prompt,
-                session_id,
-                normalized_message,
-            )
+            if provider_id or model_id:
+                submit_kwargs: dict[str, Any] = {
+                    "provider_id": str(provider_id or self.config.provider_id),
+                    "model_id": str(model_id or self.config.model_id),
+                }
+                if attachment_parts:
+                    submit_kwargs["file_parts"] = attachment_parts
+                await asyncio.to_thread(
+                    self.transport.submit_prompt,
+                    session_id,
+                    normalized_message,
+                    **submit_kwargs,
+                )
+            elif attachment_parts:
+                await asyncio.to_thread(
+                    self.transport.submit_prompt,
+                    session_id,
+                    normalized_message,
+                    file_parts=attachment_parts,
+                )
+            else:
+                await asyncio.to_thread(
+                    self.transport.submit_prompt,
+                    session_id,
+                    normalized_message,
+                )
             self._log(
                 "PROMPT_ACCEPTED",
                 run_id=run_id,
                 opencode_session_id=session_id,
             )
+            yield sse_frame({
+                "type": "runtime.accepted",
+                "runtime": "opencode",
+                "run_id": run_id,
+                "opencode_session_id": session_id,
+                "attachment_count": len(attachment_parts),
+            })
             run.status = "running"
             yield sse_frame({
                 "type": "runtime.status",
@@ -2099,8 +2534,6 @@ class OpenCodeRuntimeService:
             )
 
         with self._lock:
-            native_sessions = list(self._sessions.values())
-            self._sessions.clear()
             if workspace_changed:
                 approval_count = sum(
                     len(items)
@@ -2119,15 +2552,6 @@ class OpenCodeRuntimeService:
                 new_workspace=str(workspace_path),
                 removed=approval_count,
             )
-
-        for session_id in native_sessions:
-            try:
-                await asyncio.to_thread(
-                    self.transport.delete_session,
-                    session_id,
-                )
-            except Exception:
-                pass
 
         await asyncio.to_thread(self.server_manager.stop_owned)
 
@@ -2206,6 +2630,7 @@ class OpenCodeRuntimeService:
         provider_base_url: str = "",
         provider_models: tuple[str, ...] = (),
         provider_api_key: str = "",
+        create_if_missing: bool = True,
     ) -> dict[str, Any]:
         self._assert_idle()
         conversation_id = str(odysseus_session_id or "").strip()
@@ -2232,18 +2657,54 @@ class OpenCodeRuntimeService:
             )
 
         current_workspace = self._workspace_root()
+        provider_matches = self._provider_selection_matches_loaded(
+            provider_id=provider_id,
+            provider_base_url=provider_base_url,
+        )
+        selected_provider_models = {
+            str(item or "").strip()
+            for item in provider_models
+            if str(item or "").strip()
+        }
+        loaded_provider_models = {
+            str(item or "").strip()
+            for item in self.config.provider_models
+            if str(item or "").strip()
+        }
+        available_models = selected_provider_models or loaded_provider_models
+        selected_model_loaded = (
+            not available_models
+            or selected_model in available_models
+        )
         config_matches = (
-            self.config.model_id == selected_model
-            and (
-                not str(endpoint_id or "").strip()
-                or self.config.endpoint_id == str(endpoint_id).strip()
-            )
+            provider_matches
+            and selected_model_loaded
             and os.path.normcase(str(current_workspace))
             == os.path.normcase(str(workspace_path))
         )
 
         if config_matches:
             result = await self.health()
+            self.config = replace(
+                self.config,
+                endpoint_id=(
+                    str(endpoint_id or "").strip()
+                    or self.config.endpoint_id
+                ),
+                provider_name=(
+                    str(provider_name or "").strip()
+                    or self.config.provider_name
+                ),
+                provider_base_url=(
+                    str(provider_base_url or "").strip().rstrip("/")
+                    or self.config.provider_base_url
+                ),
+                provider_models=tuple(sorted(
+                    loaded_provider_models | selected_provider_models
+                )),
+                model_id=selected_model,
+            )
+            self.transport.config = self.config
             restarted = False
         else:
             result = await self.restart_server(
@@ -2264,29 +2725,36 @@ class OpenCodeRuntimeService:
         with self._lock:
             self._permission_modes[conversation_id] = normalized_permission
 
-        native_session_id = await self._get_or_create_session(
-            conversation_id,
-            title=title or "OpenCode Session",
-        )
-        ready_message = (
-            f"OpenCode is live with {self.config.model_id} in "
-            f"{self._workspace_root()}. The current chat is connected "
-            f"to native session {native_session_id}."
-        )
-        self._persist_transcript_message(
-            conversation_id,
-            "assistant",
-            ready_message,
-            {
-                "runtime": "opencode",
-                "kind": "runtime_ready",
-                "deterministic": True,
-                "opencode_session_id": native_session_id,
-                "provider_id": self.config.provider_id,
-                "model_id": self.config.model_id,
-                "workspace": str(self._workspace_root()),
-            },
-        )
+        if create_if_missing:
+            native_session_id = await self._get_or_create_session(
+                conversation_id,
+                title=title or "OpenCode Session",
+            )
+        else:
+            with self._lock:
+                native_session_id = self._sessions.get(conversation_id, "")
+        if create_if_missing and native_session_id:
+            ready_message = (
+                f"OpenCode is live with {self.config.model_id} in "
+                f"{self._workspace_root()}. The current chat is connected "
+                f"to native session {native_session_id}."
+            )
+            self._persist_transcript_message(
+                conversation_id,
+                "assistant",
+                ready_message,
+                {
+                    "runtime": "opencode",
+                    "kind": "runtime_ready",
+                    "deterministic": True,
+                    "opencode_session_id": native_session_id,
+                    "provider_id": self.config.provider_id,
+                    "model_id": self.config.model_id,
+                    "workspace": str(self._workspace_root()),
+                },
+            )
+        else:
+            ready_message = "OpenCode runtime prepared."
         self._log(
             "RUNTIME_PREPARED",
             odysseus_session_id=conversation_id,
@@ -2298,7 +2766,7 @@ class OpenCodeRuntimeService:
         return {
             **result,
             "ok": True,
-            "ready": True,
+            "ready": bool(create_if_missing and native_session_id),
             "restarted": restarted,
             "message": ready_message,
             "odysseus_session_id": conversation_id,
@@ -2328,10 +2796,12 @@ class OpenCodeRuntimeService:
             )
 
         await self.health()
-        native_session_id = await self._get_or_create_session(
-            conversation_id,
-            title="OpenCode Session",
-        )
+        with self._lock:
+            native_session_id = self._sessions.get(conversation_id, "")
+        if not native_session_id:
+            raise OpenCodeServerLifecycleError(
+                "Start or select an OpenCode session first."
+            )
 
         control = None
         manager_kwargs: dict[str, Any] = {

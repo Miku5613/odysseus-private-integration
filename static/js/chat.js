@@ -1340,15 +1340,41 @@ import runtimeControl from './runtimeControl.js';
       && _selectedRuntime === 'opencode'
     ) {
       const _openCodeInput = el('message');
+      const _openCodePendingInfo = fileHandlerModule.getPendingCount()
+        ? fileHandlerModule.getPendingInfo()
+        : [];
+      let _openCodeAttachmentIds = [];
       const _openCodeTitle = (
         sessionModule.getSessions().find(
           item => item.id === _runtimeSessionId
         ) || {}
       ).name || 'OpenCode chat';
 
-      if (_openCodeInput) {
-        _openCodeInput.value = '';
-        if (uiModule.autoResize) uiModule.autoResize(_openCodeInput);
+      if (_openCodePendingInfo.length) {
+        _openCodeAttachmentIds = await fileHandlerModule.uploadPending({
+          sessionId: _runtimeSessionId,
+          retainOnSuccess: true,
+        });
+        if (!_openCodeAttachmentIds.length) {
+          updateSubmitButton('idle', submitBtn);
+          _releaseSendFlag();
+          return;
+        }
+        const uploadedMeta = fileHandlerModule.getLastUploadedMeta?.() || [];
+        for (
+          let index = 0;
+          index < _openCodePendingInfo.length
+          && index < _openCodeAttachmentIds.length;
+          index++
+        ) {
+          _openCodePendingInfo[index].id = _openCodeAttachmentIds[index];
+          if (uploadedMeta[index]?.width) {
+            _openCodePendingInfo[index].width = uploadedMeta[index].width;
+          }
+          if (uploadedMeta[index]?.height) {
+            _openCodePendingInfo[index].height = uploadedMeta[index].height;
+          }
+        }
       }
       if (window._syncModelPickerAutohide) {
         window._syncModelPickerAutohide();
@@ -1362,6 +1388,18 @@ import runtimeControl from './runtimeControl.js';
           message: msg,
           sessionId: _runtimeSessionId,
           title: _openCodeTitle,
+          attachments: _openCodeAttachmentIds,
+          attachmentInfo: _openCodePendingInfo,
+          onAccepted: () => {
+            if (_openCodeInput && _openCodeInput.value === msg) {
+              _openCodeInput.value = '';
+              if (uiModule.autoResize) uiModule.autoResize(_openCodeInput);
+              _openCodeInput.dispatchEvent(new Event('input'));
+            }
+            if (_openCodeAttachmentIds.length) {
+              fileHandlerModule.commitLastUploadedPending?.();
+            }
+          },
         });
       } finally {
         updateSubmitButton('idle', submitBtn);

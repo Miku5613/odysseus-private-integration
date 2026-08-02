@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import os
 import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -10,6 +12,8 @@ from core.models import (
     get_session_manager_instance,
 )
 from src.auth_helpers import effective_user
+from src.attachment_refs import attachment_ref
+from src.chat_helpers import model_supports_vision
 from src.opencode_runtime import OpenCodeRuntimeService
 from src.opencode_runtime.model_registry import (
     resolve_model_selection,
@@ -53,6 +57,114 @@ def _verify_opencode_session_owner(
             status_code=403,
             detail="Session does not belong to the current user.",
         )
+
+
+def _resolve_opencode_image_attachments(
+    request: Request,
+    attachment_ids: list[str],
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+    if not attachment_ids:
+        return [], []
+    if len(attachment_ids) > 10:
+        raise HTTPException(
+            status_code=400,
+            detail="OpenCode accepts at most 10 image attachments per message.",
+        )
+
+    upload_handler = getattr(request.app.state, "upload_handler", None)
+    if upload_handler is None or not hasattr(upload_handler, "resolve_upload"):
+        raise HTTPException(
+            status_code=503,
+            detail="Image attachments are temporarily unavailable.",
+        )
+
+    owner = str(effective_user(request) or "").strip()
+    supported_mimes = {"image/png", "image/jpeg", "image/webp"}
+    parts: list[dict[str, str]] = []
+    references: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for raw_attachment_id in attachment_ids:
+        attachment_id = str(raw_attachment_id or "").strip()
+        if not attachment_id or attachment_id in seen:
+            continue
+        seen.add(attachment_id)
+        try:
+            info = upload_handler.resolve_upload(
+                attachment_id,
+                owner=owner,
+                allow_admin=False,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "An image attachment was not found or does not belong "
+                    "to the current user."
+                ),
+            ) from exc
+        if not isinstance(info, dict):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "An image attachment was not found or does not belong "
+                    "to the current user."
+                ),
+            )
+
+        mime = str(info.get("mime") or "").strip().lower()
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        if mime == "image/gif":
+            raise HTTPException(
+                status_code=400,
+                detail="OpenCode image attachments do not support GIF files.",
+            )
+        if mime not in supported_mimes:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Unsupported OpenCode attachment type. Use PNG, JPEG, "
+                    "or WebP images."
+                ),
+            )
+
+        path = str(info.get("path") or "").strip()
+        try:
+            inside_uploads = bool(upload_handler._inside_upload_dir(path))
+        except Exception:
+            inside_uploads = False
+        if not path or not inside_uploads or not os.path.isfile(path):
+            raise HTTPException(
+                status_code=404,
+                detail="An image attachment is no longer available.",
+            )
+        with open(path, "rb") as handle:
+            encoded = base64.b64encode(handle.read()).decode("ascii")
+
+        filename = str(
+            info.get("original_name")
+            or info.get("name")
+            or "image"
+        )
+        filename = " ".join(filename.split()).strip()[:240] or "image"
+        parts.append({
+            "type": "file",
+            "mime": mime,
+            "filename": filename,
+            "url": f"data:{mime};base64,{encoded}",
+        })
+        references.append(attachment_ref({
+            **info,
+            "id": attachment_id,
+            "mime": mime,
+            "name": filename,
+        }))
+    if not parts:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid OpenCode image attachments were supplied.",
+        )
+    return parts, references
 
 
 
@@ -157,9 +269,45 @@ _service = OpenCodeRuntimeService(
 
 
 class OpenCodeRuntimeRequest(BaseModel):
-    message: str = Field(min_length=1)
+    message: str = ""
     odysseus_session_id: str = Field(min_length=1)
     title: str = ""
+    permission_mode: str = "ask"
+    endpoint_id: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    attachments: list[str] = Field(default_factory=list, max_length=10)
+
+
+class OpenCodeNativeSessionRequest(BaseModel):
+    odysseus_session_id: str = Field(min_length=1)
+    opencode_session_id: str = Field(min_length=1)
+    endpoint_id: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    workspace: str = Field(min_length=1)
+    permission_mode: str = "ask"
+
+
+class OpenCodeNativeSessionTitleRequest(BaseModel):
+    odysseus_session_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=160)
+
+
+class OpenCodeNativeSessionDeleteRequest(BaseModel):
+    odysseus_session_id: str = Field(min_length=1)
+    title: str = Field(default="", max_length=160)
+
+
+class OpenCodeNativeTuiRequest(BaseModel):
+    odysseus_session_id: str = Field(min_length=1)
+    workspace: str = Field(min_length=1)
+
+
+class OpenCodeNativeSessionCreateRequest(BaseModel):
+    odysseus_session_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=160)
+    endpoint_id: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    workspace: str = Field(min_length=1)
     permission_mode: str = "ask"
 
 
@@ -229,12 +377,52 @@ async def stream_opencode_runtime(
         http_request,
         request.odysseus_session_id,
     )
+    try:
+        if not str(request.message or "").strip() and not request.attachments:
+            raise HTTPException(
+                status_code=400,
+                detail="OpenCode requires a message or image attachment.",
+            )
+        selection = resolve_model_selection(
+            endpoint_id=request.endpoint_id,
+            model_id=request.model_id,
+        )
+        effective_provider_id = _service.validate_turn_selection(
+            endpoint_id=selection.endpoint_id,
+            provider_id=selection.provider_id,
+            provider_base_url=selection.base_url,
+            provider_models=selection.models,
+            model_id=selection.model_id,
+        )
+        attachment_parts, attachment_refs = _resolve_opencode_image_attachments(
+            http_request,
+            request.attachments,
+        )
+        if attachment_parts and not model_supports_vision(
+            selection.model_id,
+            selection.base_url,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The selected OpenCode model does not support image input. "
+                    "Select a vision-capable model and try again."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return StreamingResponse(
         _service.stream(
             message=request.message,
             odysseus_session_id=request.odysseus_session_id,
             title=request.title,
             permission_mode=request.permission_mode,
+            provider_id=effective_provider_id,
+            model_id=selection.model_id,
+            attachment_parts=tuple(attachment_parts),
+            attachment_refs=tuple(attachment_refs),
         ),
         media_type="text/event-stream",
         headers={
@@ -575,6 +763,145 @@ async def release_session_manager_control(http_request: Request):
         "released": _service.release_session_manager_control(token),
         "odysseus_session_id": conversation_id,
     }
+
+
+@router.get("/native-sessions")
+async def list_opencode_native_sessions(
+    odysseus_session_id: str,
+    http_request: Request,
+    workspace: str = "",
+):
+    _verify_opencode_session_owner(http_request, odysseus_session_id)
+    try:
+        return await _service.list_native_sessions(
+            odysseus_session_id,
+            workspace=workspace,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/native-sessions")
+async def create_opencode_native_session(
+    request: OpenCodeNativeSessionCreateRequest,
+    http_request: Request,
+):
+    _verify_opencode_session_owner(http_request, request.odysseus_session_id)
+    try:
+        selection = resolve_model_selection(
+            endpoint_id=request.endpoint_id,
+            model_id=request.model_id,
+        )
+        await _service.prepare_runtime(
+            odysseus_session_id=request.odysseus_session_id,
+            title=request.title,
+            permission_mode=request.permission_mode,
+            endpoint_id=selection.endpoint_id,
+            provider_id=selection.provider_id,
+            provider_name=selection.provider_name,
+            provider_base_url=selection.base_url,
+            provider_models=selection.models,
+            provider_api_key=selection.api_key,
+            model_id=selection.model_id,
+            workspace=request.workspace,
+            create_if_missing=False,
+        )
+        return await _service.create_conversation_session(
+            request.odysseus_session_id,
+            title=request.title,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/native-sessions/activate")
+async def activate_opencode_native_session(
+    request: OpenCodeNativeSessionRequest,
+    http_request: Request,
+):
+    _verify_opencode_session_owner(http_request, request.odysseus_session_id)
+    try:
+        selection = resolve_model_selection(
+            endpoint_id=request.endpoint_id,
+            model_id=request.model_id,
+        )
+        await _service.prepare_runtime(
+            odysseus_session_id=request.odysseus_session_id,
+            title="",
+            permission_mode=request.permission_mode,
+            endpoint_id=selection.endpoint_id,
+            provider_id=selection.provider_id,
+            provider_name=selection.provider_name,
+            provider_base_url=selection.base_url,
+            provider_models=selection.models,
+            provider_api_key=selection.api_key,
+            model_id=selection.model_id,
+            workspace=request.workspace,
+            create_if_missing=False,
+        )
+        return await _service.attach_conversation_session(
+            request.odysseus_session_id,
+            request.opencode_session_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.delete("/native-sessions/{opencode_session_id}")
+async def delete_opencode_native_session(
+    opencode_session_id: str,
+    request: OpenCodeNativeSessionDeleteRequest,
+    http_request: Request,
+):
+    _verify_opencode_session_owner(http_request, request.odysseus_session_id)
+    try:
+        return await _service.delete_native_session(
+            request.odysseus_session_id,
+            opencode_session_id,
+            title=request.title,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/native-sessions/{opencode_session_id}/open-tui")
+async def open_native_opencode_tui(
+    opencode_session_id: str,
+    request: OpenCodeNativeTuiRequest,
+    http_request: Request,
+):
+    _verify_opencode_session_owner(http_request, request.odysseus_session_id)
+    try:
+        return await _service.open_native_tui(
+            request.odysseus_session_id,
+            opencode_session_id,
+            workspace=request.workspace,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.patch("/native-sessions/{opencode_session_id}")
+async def rename_opencode_native_session(
+    opencode_session_id: str,
+    request: OpenCodeNativeSessionTitleRequest,
+    http_request: Request,
+):
+    _verify_opencode_session_owner(http_request, request.odysseus_session_id)
+    try:
+        return await _service.rename_native_session(
+            request.odysseus_session_id,
+            opencode_session_id,
+            request.title,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/cancel/{run_id}")

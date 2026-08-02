@@ -14,6 +14,10 @@ from .config import OpenCodeRuntimeConfig
 class OpenCodeTransportError(RuntimeError):
     """Raised when the external OpenCode server rejects or loses a request."""
 
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class OpenCodeHttpTransport:
     """Small standard-library transport for the OpenCode headless server."""
@@ -64,7 +68,8 @@ class OpenCodeHttpTransport:
             body = exc.read().decode("utf-8", errors="replace")
             raise OpenCodeTransportError(
                 f"OpenCode HTTP {exc.code} for {method} {path}: "
-                f"{body[:500]}"
+                f"{body[:500]}",
+                status_code=int(exc.code),
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise OpenCodeTransportError(
@@ -105,17 +110,91 @@ class OpenCodeHttpTransport:
             )
         return session_id
 
-    def submit_prompt(self, session_id: str, message: str) -> None:
+    def list_sessions(self, directory: str = "") -> list[dict[str, Any]]:
+        path = "/session"
+        normalized_directory = str(directory or "").strip()
+        if normalized_directory:
+            path += "?" + urllib.parse.urlencode({
+                "directory": normalized_directory,
+            })
+        status, value = self.request_json("GET", path)
+        if status != 200:
+            raise OpenCodeTransportError(
+                f"OpenCode session listing returned HTTP {status}."
+            )
+        if isinstance(value, dict) and isinstance(value.get("data"), list):
+            value = value["data"]
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
         encoded = urllib.parse.quote(session_id, safe="")
+        try:
+            status, value = self.request_json("GET", f"/session/{encoded}")
+        except OpenCodeTransportError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        if status != 200:
+            return None
+        if isinstance(value, dict) and isinstance(value.get("data"), dict):
+            value = value["data"]
+        return value if isinstance(value, dict) else None
+
+    def update_session_title(self, session_id: str, title: str) -> dict[str, Any]:
+        encoded = urllib.parse.quote(session_id, safe="")
+        status, value = self.request_json(
+            "PATCH",
+            f"/session/{encoded}",
+            {"title": str(title or "").strip()},
+        )
+        if status not in {200, 204}:
+            raise OpenCodeTransportError(
+                f"OpenCode session rename returned HTTP {status}."
+            )
+        if isinstance(value, dict) and isinstance(value.get("data"), dict):
+            value = value["data"]
+        return value if isinstance(value, dict) else {"id": session_id, "title": title}
+
+    def submit_prompt(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        provider_id: str = "",
+        model_id: str = "",
+        file_parts: tuple[dict[str, Any], ...] = (),
+    ) -> None:
+        encoded = urllib.parse.quote(session_id, safe="")
+        parts: list[dict[str, Any]] = []
+        normalized_message = str(message or "").strip()
+        if normalized_message:
+            parts.append({"type": "text", "text": normalized_message})
+        for item in file_parts:
+            if not isinstance(item, dict):
+                continue
+            parts.append({
+                "type": "file",
+                "mime": str(item.get("mime") or ""),
+                "filename": str(item.get("filename") or "image"),
+                "url": str(item.get("url") or ""),
+            })
         payload = {
             "agent": self.config.agent,
             "system": self.config.system_prompt,
             "model": {
-                "providerID": self.config.provider_id,
-                "modelID": self.config.model_id,
+                "providerID": str(provider_id or self.config.provider_id),
+                "modelID": str(model_id or self.config.model_id),
             },
-            "parts": [{"type": "text", "text": message}],
+            "parts": parts,
         }
+        if file_parts and self._uses_ollama_provider():
+            # OpenCode otherwise injects every core and MCP tool schema into
+            # the multimodal request. Ollama commonly runs local vision models
+            # with a 4K active context, which pushes the image itself out of
+            # context and triggers OpenCode's misleading media-size compaction.
+            payload["tools"] = {"*": False}
         status, _ = self.request_json(
             "POST",
             f"/session/{encoded}/prompt_async",
@@ -126,11 +205,32 @@ class OpenCodeHttpTransport:
                 f"OpenCode prompt admission returned HTTP {status}."
             )
 
-    def list_messages(self, session_id: str) -> list[dict[str, Any]]:
+    def _uses_ollama_provider(self) -> bool:
+        value = str(self.config.provider_base_url or "").strip()
+        if not value:
+            return False
+        parsed = urllib.parse.urlparse(value)
+        host = (parsed.hostname or "").lower()
+        return parsed.port == 11434 or "ollama" in host
+
+    def list_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 100,
+        directory: str = "",
+    ) -> list[dict[str, Any]]:
         encoded = urllib.parse.quote(session_id, safe="")
+        query: dict[str, Any] = {}
+        if int(limit or 0) > 0:
+            query["limit"] = int(limit)
+        normalized_directory = str(directory or "").strip()
+        if normalized_directory:
+            query["directory"] = normalized_directory
+        suffix = "?" + urllib.parse.urlencode(query) if query else ""
         status, value = self.request_json(
             "GET",
-            f"/session/{encoded}/message?limit=100",
+            f"/session/{encoded}/message{suffix}",
         )
         if status != 200:
             raise OpenCodeTransportError(
@@ -152,10 +252,15 @@ class OpenCodeHttpTransport:
 
     def delete_session(self, session_id: str) -> bool:
         encoded = urllib.parse.quote(session_id, safe="")
-        status, value = self.request_json(
-            "DELETE",
-            f"/session/{encoded}",
-        )
+        try:
+            status, value = self.request_json(
+                "DELETE",
+                f"/session/{encoded}",
+            )
+        except OpenCodeTransportError as exc:
+            if exc.status_code == 404:
+                return False
+            raise
         return status == 200 and value is True
 
     def reply_permission(

@@ -263,6 +263,7 @@ def test_service_reconciles_tools_before_terminal_completion():
                 model_id="qwen3:8b",
                 agent="build",
             )
+            self.message_reads = 0
 
         def health(self):
             return {"healthy": True}
@@ -287,6 +288,9 @@ def test_service_reconciles_tools_before_terminal_completion():
             }
 
         def list_messages(self, session_id):
+            self.message_reads += 1
+            if self.message_reads == 1:
+                return []
             return [
                 {
                     "info": {
@@ -716,7 +720,7 @@ def test_service_health_reports_external_or_managed_launch_state():
     }
     assert health["server"]["version"] == "1.18.5"
 
-def test_service_restart_reconfigures_model_workspace_and_clears_sessions(
+def test_service_restart_reconfigures_model_workspace_and_preserves_sessions(
     tmp_path,
     monkeypatch,
 ):
@@ -800,10 +804,10 @@ def test_service_restart_reconfigures_model_workspace_and_clears_sessions(
         )
     )
 
-    assert deleted == ["ses-old"]
+    assert deleted == []
     assert service.config.model_id == "new-model"
     assert service.config.workspace == str(tmp_path.resolve())
-    assert service._sessions == {}
+    assert service._sessions == {"chat-1": "ses-old"}
     assert health["ok"] is True
     assert health["model"]["model_id"] == "new-model"
 
@@ -1704,7 +1708,7 @@ def test_permission_reply_failure_is_logged_and_remains_pending(tmp_path):
         == "per_reply_failure"
     )
 
-def test_runtime_started_uses_full_message_as_planner_objective():
+def test_runtime_started_uses_safe_generic_planner_objective():
     import ast as _ast
     from pathlib import Path as _Path
 
@@ -1733,5 +1737,5 @@ def test_runtime_started_uses_full_message_as_planner_objective():
             matches.append(objective_value)
 
     assert len(matches) == 1
-    assert isinstance(matches[0], _ast.Name)
-    assert matches[0].id == "message"
+    assert isinstance(matches[0], _ast.Constant)
+    assert matches[0].value == "Complete the requested task"

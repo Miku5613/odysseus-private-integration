@@ -114,6 +114,20 @@ def test_managed_config_injects_registry_provider(tmp_path) -> None:
         "http://127.0.0.1:11434/v1"
     )
     assert set(provider["models"]) == {"qwen3:8b", "gemma4:12b"}
+    assert provider["models"]["qwen3:8b"]["modalities"] == {
+        "input": ["text"],
+        "output": ["text"],
+    }
+    assert provider["models"]["gemma4:12b"]["modalities"] == {
+        "input": ["text", "image"],
+        "output": ["text"],
+    }
+    assert provider["models"]["gemma4:12b"]["attachment"] is True
+    assert provider["models"]["gemma4:12b"]["options"] == {
+        "reasoningEffort": "none",
+    }
+    assert "attachment" not in provider["models"]["qwen3:8b"]
+    assert "options" not in provider["models"]["qwen3:8b"]
     assert any(
         item["location"] == "provider.odysseus_test"
         for item in changes

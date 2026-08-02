@@ -10,17 +10,18 @@ def _source(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_composer_button_prepares_then_opens_terminal_session_manager():
+def test_composer_tui_button_requires_then_opens_active_session():
     source = _source("static/js/runtimeControl.js")
     assert "function handleOpenCodeSessionManagerClick()" in source
-    assert "prepareOpenCodeForCurrentChat()" in source
-    assert "/api/opencode/runtime/prepare" in source
     assert "/api/opencode/runtime/server/session-manager-terminal" in source
-    assert "sessionModule.materializePendingSession()" in source
-    assert "getWorkspace()" in source
     assert "OpenCode Session Manager" in source
     assert "runtime-quick-reset-btn" in source
-    assert "Start OpenCode or open OpenCode Session Manager" in source
+    assert "Start or select an OpenCode session first." in source
+    handler_start = source.index("function handleOpenCodeSessionManagerClick()")
+    handler_end = source.index("\nfunction simplifyOpenCodeSettings", handler_start)
+    handler = source[handler_start:handler_end]
+    assert "currentOpenCodeReadyState()" in handler
+    assert "prepareOpenCodeForCurrentChat()" not in handler
 
 
 def test_composer_ready_state_is_bound_to_chat_model_and_workspace():

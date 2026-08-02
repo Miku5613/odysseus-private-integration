@@ -60,6 +60,7 @@ let _initialized = false;
 let _runtimePanel = null;
 let _runtimeTab = null;
 let _indicator = null;
+let _sessionManagerButton = null;
 let _quickResetButton = null;
 let _healthMessage = null;
 let _defaultMessage = null;
@@ -928,7 +929,7 @@ async function loadLangGraphSettings() {
 
 async function saveLangGraphSettings() {
   const config = collectLangGraphSettings();
-  setLangGraphMessage('Savingâ€¦');
+  setLangGraphMessage('Saving...');
   const payload = await runtimeJsonRequest('/api/auth/settings', {
     method: 'POST',
     body: JSON.stringify({ langgraph_runtime: config }),
@@ -1180,6 +1181,26 @@ async function runtimeJsonRequest(path, options = {}) {
     throw new Error(String(detail));
   }
   return payload;
+}
+
+async function openCodeResponseError(response, fallback = '') {
+  const defaultMessage = fallback || `HTTP ${response.status}`;
+  const contentType = String(response.headers?.get('content-type') || '').toLowerCase();
+  if (contentType.includes('text/html')) return defaultMessage;
+  let detail = '';
+  try {
+    const payload = await response.clone().json();
+    const value = payload?.detail ?? payload?.error ?? payload?.message;
+    detail = typeof value === 'string' ? value : (value ? JSON.stringify(value) : '');
+  } catch (_) {
+    try { detail = await response.text(); } catch (_) {}
+  }
+  detail = String(detail || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+  return detail || defaultMessage;
 }
 
 export async function restartOpenCodeServer() {
@@ -1689,10 +1710,9 @@ async function materializedOpenCodeSessionId() {
   return sessionId;
 }
 
-function openCodeReadyKey(sessionId, modelId, workspace) {
+function openCodeReadyKey(sessionId, _modelId, workspace) {
   return [
     String(sessionId || '').trim(),
-    String(modelId || '').trim(),
     String(workspace || '').trim().toLowerCase(),
   ].join('|');
 }
@@ -1820,30 +1840,18 @@ async function openOpenCodeSessionManagerTerminal(sessionId) {
 }
 
 async function handleOpenCodeSessionManagerClick() {
-  if (_activeRun) return null;
-  if (_openCodePreparePromise) return _openCodePreparePromise;
-  if (_openCodeSessionManagerBusy) return null;
+  if (_activeRun || _openCodeSessionManagerBusy) return null;
+  const ready = currentOpenCodeReadyState();
+  if (!ready) return null;
 
   _openCodeSessionManagerBusy = true;
   refreshRuntimeIndicator();
   try {
-    let ready = currentOpenCodeReadyState();
-    if (!ready) {
-      ready = await prepareOpenCodeForCurrentChat();
-      return { action: 'prepared', ...ready };
-    }
-
     const payload = await openOpenCodeSessionManagerTerminal(ready.sessionId);
     return {
       action: payload.focused ? 'focused' : 'opened',
       ...payload,
     };
-  } catch (error) {
-    renderOpenCodeRuntimeStatus(
-      `OpenCode could not start: ${error.message || error}`,
-      { failed: true }
-    );
-    throw error;
   } finally {
     _openCodeSessionManagerBusy = false;
     refreshRuntimeIndicator();
@@ -1922,6 +1930,483 @@ function simplifyOpenCodeSettings() {
 }
 
 
+function escapeOpenCodeSessionText(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function closeOpenCodeSessionPanel() {
+  document.getElementById('opencode-session-panel-backdrop')?.remove();
+}
+
+function openSessionNameDialog({ title = '', heading = 'New OpenCode Session' } = {}) {
+  return new Promise(resolve => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'opencode-session-dialog-backdrop';
+    backdrop.innerHTML = `
+      <div class="opencode-session-dialog" role="dialog" aria-modal="true">
+        <h3>${escapeOpenCodeSessionText(heading)}</h3>
+        <label>
+          <span>Session name</span>
+          <input type="text" maxlength="160" value="${escapeOpenCodeSessionText(title)}"
+                 placeholder="Gauntlet of Gods - Main Project">
+        </label>
+        <div class="opencode-session-dialog-actions">
+          <button type="button" data-action="cancel">Cancel</button>
+          <button type="button" class="primary" data-action="save">${title ? 'Rename' : 'Create'}</button>
+        </div>
+      </div>`;
+    const finish = value => {
+      backdrop.remove();
+      resolve(value);
+    };
+    backdrop.addEventListener('click', event => {
+      if (event.target === backdrop || event.target.closest('[data-action="cancel"]')) finish('');
+      if (event.target.closest('[data-action="save"]')) {
+        const value = backdrop.querySelector('input')?.value.trim() || '';
+        if (value) finish(value);
+      }
+    });
+    backdrop.addEventListener('keydown', event => {
+      if (event.key === 'Escape') finish('');
+      if (event.key === 'Enter') {
+        const value = backdrop.querySelector('input')?.value.trim() || '';
+        if (value) finish(value);
+      }
+    });
+    document.body.appendChild(backdrop);
+    const input = backdrop.querySelector('input');
+    input?.focus();
+    input?.select();
+  });
+}
+
+function openSessionConfirmDialog({ heading, message, confirmLabel = 'Delete' }) {
+  return new Promise(resolve => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'opencode-session-dialog-backdrop';
+    backdrop.innerHTML = `
+      <div class="opencode-session-dialog opencode-session-confirm" role="alertdialog" aria-modal="true">
+        <h3>${escapeOpenCodeSessionText(heading)}</h3>
+        <p>${escapeOpenCodeSessionText(message)}</p>
+        <div class="opencode-session-dialog-actions">
+          <button type="button" data-action="cancel">Cancel</button>
+          <button type="button" class="danger" data-action="confirm">${escapeOpenCodeSessionText(confirmLabel)}</button>
+        </div>
+      </div>`;
+    const finish = value => {
+      backdrop.remove();
+      resolve(value);
+    };
+    backdrop.addEventListener('click', event => {
+      if (event.target === backdrop || event.target.closest('[data-action="cancel"]')) finish(false);
+      if (event.target.closest('[data-action="confirm"]')) finish(true);
+    });
+    backdrop.addEventListener('keydown', event => {
+      if (event.key === 'Escape') finish(false);
+    });
+    document.body.appendChild(backdrop);
+    backdrop.querySelector('[data-action="cancel"]')?.focus();
+  });
+}
+
+function openCodeSessionRelativeTime(value) {
+  const when = new Date(value || 0).getTime();
+  if (!Number.isFinite(when) || when <= 0) return '';
+  const seconds = Math.max(1, Math.round((Date.now() - when) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+async function loadNativeOpenCodeSessions() {
+  const sessionId = await materializedOpenCodeSessionId();
+  const workspace = activeOpenCodeWorkspace();
+  const payload = await runtimeJsonRequest(
+    `/api/opencode/runtime/native-sessions?odysseus_session_id=${encodeURIComponent(sessionId)}&workspace=${encodeURIComponent(workspace)}`
+  );
+  const selection = activeOpenCodeSelection();
+  const readyKey = openCodeReadyKey(sessionId, selection.modelId, workspace);
+  if (payload?.active_opencode_session_id) {
+    _openCodeReadySessions.set(readyKey, { sessionId, modelId: selection.modelId, workspace, payload });
+  } else {
+    _openCodeReadySessions.delete(readyKey);
+  }
+  refreshRuntimeIndicator();
+  return payload;
+}
+
+async function activateNativeOpenCodeSession(nativeSessionId) {
+  const sessionId = await materializedOpenCodeSessionId();
+  const workspace = activeOpenCodeWorkspace();
+  if (!workspace) throw new Error('Select an active workspace before starting an OpenCode session.');
+  if (!_openCodeModelEndpoints.length) await loadOpenCodeModelOptions();
+  const selection = activeOpenCodeSelection();
+  if (!selection.modelId || !selection.endpointId) {
+    throw new Error('Select an enabled model before starting an OpenCode session.');
+  }
+  const payload = await runtimeJsonRequest('/api/opencode/runtime/native-sessions/activate', {
+    method: 'POST',
+    body: JSON.stringify({
+      odysseus_session_id: sessionId,
+      opencode_session_id: nativeSessionId,
+      permission_mode: permissionMode(),
+      endpoint_id: selection.endpointId,
+      model_id: selection.modelId,
+      workspace,
+    }),
+  });
+  const ready = { sessionId, modelId: selection.modelId, workspace, payload };
+  _openCodeReadySessions.set(openCodeReadyKey(sessionId, selection.modelId, workspace), ready);
+  renderOpenCodeRuntimeStatus(payload.message || 'OpenCode session activated.', {
+    ready: true,
+    opencode_session_id: payload.opencode_session_id,
+  });
+  refreshRuntimeIndicator();
+  return payload;
+}
+
+async function createNativeOpenCodeSession(title) {
+  const sessionId = await materializedOpenCodeSessionId();
+  const workspace = activeOpenCodeWorkspace();
+  if (!workspace) throw new Error('Select an active workspace before creating an OpenCode session.');
+  if (!_openCodeModelEndpoints.length) await loadOpenCodeModelOptions();
+  const selection = activeOpenCodeSelection();
+  if (!selection.modelId || !selection.endpointId) {
+    throw new Error('Select an enabled model before creating an OpenCode session.');
+  }
+  const payload = await runtimeJsonRequest('/api/opencode/runtime/native-sessions', {
+    method: 'POST',
+    body: JSON.stringify({
+      odysseus_session_id: sessionId,
+      title,
+      permission_mode: permissionMode(),
+      endpoint_id: selection.endpointId,
+      model_id: selection.modelId,
+      workspace,
+    }),
+  });
+  const ready = { sessionId, modelId: selection.modelId, workspace, payload };
+  _openCodeReadySessions.set(openCodeReadyKey(sessionId, selection.modelId, workspace), ready);
+  renderOpenCodeRuntimeStatus(payload.message || `OpenCode session created: "${title}".`, {
+    ready: true,
+    opencode_session_id: payload.opencode_session_id,
+  });
+  refreshRuntimeIndicator();
+  return payload;
+}
+
+async function renameNativeOpenCodeSession(nativeSessionId, currentTitle) {
+  const title = await openSessionNameDialog({ title: currentTitle, heading: 'Rename OpenCode Session' });
+  if (!title) return false;
+  const sessionId = await materializedOpenCodeSessionId();
+  await runtimeJsonRequest(`/api/opencode/runtime/native-sessions/${encodeURIComponent(nativeSessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ odysseus_session_id: sessionId, title }),
+  });
+  return true;
+}
+
+async function deleteNativeOpenCodeSession(nativeSessionId, currentTitle, { announce = true } = {}) {
+  const sessionId = await materializedOpenCodeSessionId();
+  const payload = await runtimeJsonRequest(
+    `/api/opencode/runtime/native-sessions/${encodeURIComponent(nativeSessionId)}`,
+    {
+      method: 'DELETE',
+      body: JSON.stringify({ odysseus_session_id: sessionId, title: currentTitle }),
+    }
+  );
+  if (payload.active_cleared) {
+    const selection = activeOpenCodeSelection();
+    const workspace = activeOpenCodeWorkspace();
+    _openCodeReadySessions.delete(openCodeReadyKey(sessionId, selection.modelId, workspace));
+    refreshRuntimeIndicator();
+  }
+  if (announce) {
+    renderOpenCodeRuntimeStatus(payload.message || `OpenCode session deleted: "${currentTitle}".`, {
+      ready: false,
+      opencode_session_id: '',
+    });
+  }
+  return payload;
+}
+
+async function openNativeOpenCodeTui(nativeSessionId) {
+  const sessionId = await materializedOpenCodeSessionId();
+  const workspace = activeOpenCodeWorkspace();
+  if (!workspace) {
+    throw new Error('Select an active workspace before opening OpenCode TUI.');
+  }
+  const payload = await runtimeJsonRequest(
+    `/api/opencode/runtime/native-sessions/${encodeURIComponent(nativeSessionId)}/open-tui`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        odysseus_session_id: sessionId,
+        workspace,
+      }),
+    }
+  );
+  renderOpenCodeRuntimeStatus('Opened the selected session in OpenCode TUI.', {
+    deterministic: true,
+    opencode_session_id: nativeSessionId,
+  });
+  return payload;
+}
+
+function nativeOpenCodeSessionMatches(item, search) {
+  if (!search) return true;
+  return [item?.title, item?.model_name, item?.preview, item?.id]
+    .map(value => String(value || '').toLowerCase())
+    .some(value => value.includes(search));
+}
+
+function renderNativeOpenCodeSessions(panel, payload, state) {
+  const list = panel.querySelector('.opencode-session-list');
+  const search = String(panel.querySelector('.opencode-session-search')?.value || '').trim().toLowerCase();
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const filtered = sessions.filter(item => nativeOpenCodeSessionMatches(item, search));
+  const availableIds = new Set(sessions.map(item => String(item.id || '')));
+  for (const selectedId of state.selected) {
+    if (!availableIds.has(selectedId)) state.selected.delete(selectedId);
+  }
+  panel.querySelector('.opencode-session-count').textContent = `${sessions.length} session${sessions.length === 1 ? '' : 's'}`;
+  panel.querySelector('.opencode-session-mode-toggle').textContent = state.selectMode ? 'Cancel' : 'Select';
+  panel.querySelector('.opencode-session-select-summary').hidden = !state.selectMode;
+  panel.querySelector('.opencode-session-selected-count').textContent = `${state.selected.size} Selected`;
+  panel.querySelector('.opencode-session-batch-delete').disabled = state.selected.size === 0;
+  const visibleIds = filtered.map(item => String(item.id || ''));
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => state.selected.has(id));
+  panel.querySelector('.opencode-session-select-all').setAttribute('aria-pressed', String(allVisibleSelected));
+  if (!filtered.length) {
+    list.innerHTML = '<div class="opencode-session-empty">No OpenCode sessions found.</div>';
+    return;
+  }
+  list.innerHTML = filtered.map(item => {
+    const active = !!item.active;
+    const time = openCodeSessionRelativeTime(item.updated_at || item.created_at);
+    const modelName = String(item.model_name || '').trim() || 'Unknown model';
+    const messageCount = Math.max(0, Number(item.message_count) || 0);
+    const shortId = String(item.id || '').slice(-8);
+    const preview = String(item.preview || '').trim()
+      || `Native session ...${shortId}`;
+    const meta = [
+      modelName,
+      `${messageCount} message${messageCount === 1 ? '' : 's'}`,
+      time || 'time unavailable',
+    ].join(' | ');
+    return `
+      <article class="opencode-session-row${active ? ' is-active' : ''}" data-session-id="${escapeOpenCodeSessionText(item.id)}">
+        ${state.selectMode ? `<input type="checkbox" class="opencode-session-select-control" data-action="select" aria-label="Select ${escapeOpenCodeSessionText(item.title)}" ${state.selected.has(String(item.id || '')) ? 'checked' : ''}>` : ''}
+        <div class="opencode-session-row-copy">
+          <div class="opencode-session-title">${escapeOpenCodeSessionText(item.title)}</div>
+          <div class="opencode-session-meta">${escapeOpenCodeSessionText(meta)}</div>
+          <div class="opencode-session-preview">${escapeOpenCodeSessionText(preview)}</div>
+        </div>
+        ${active ? '<span class="opencode-session-active-pill">ACTIVE</span>' : ''}
+        <button type="button" class="opencode-session-more" aria-label="Session actions">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3" r="1.2"></circle><circle cx="8" cy="8" r="1.2"></circle><circle cx="8" cy="13" r="1.2"></circle></svg>
+        </button>
+        <div class="opencode-session-menu" hidden>
+          ${active ? '' : `<button type="button" data-action="activate">${payload.active_opencode_session_id ? 'Switch' : 'Start'}</button>`}
+          <button type="button" data-action="open-native-tui">Open in OpenCode TUI</button>
+          <button type="button" data-action="rename">Rename</button>
+          <button type="button" class="danger" data-action="delete">Delete</button>
+        </div>
+      </article>`;
+  }).join('');
+}
+
+async function openOpenCodeSessionPanel() {
+  if (_activeRun) return;
+  closeOpenCodeSessionPanel();
+  const backdrop = document.createElement('div');
+  backdrop.id = 'opencode-session-panel-backdrop';
+  backdrop.className = 'opencode-session-panel-backdrop';
+  backdrop.innerHTML = `
+    <section class="opencode-session-panel" role="dialog" aria-modal="true" aria-label="OpenCode Sessions">
+      <header>
+        <div><h2>OpenCode Sessions</h2><span class="opencode-session-count">Loading...</span></div>
+        <button type="button" class="opencode-session-close" aria-label="Close">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13"></path></svg>
+        </button>
+      </header>
+      <div class="opencode-session-toolbar">
+        <button type="button" class="opencode-session-recent" data-action="recent" aria-pressed="true">Recent</button>
+        <button type="button" class="opencode-session-mode-toggle" data-action="select-mode">Select</button>
+        <button type="button" class="opencode-session-new">+ New Session</button>
+      </div>
+      <div class="opencode-session-select-summary" hidden>
+        <button type="button" class="opencode-session-select-all" data-action="select-all" aria-pressed="false">All</button>
+        <span class="opencode-session-selected-count">0 Selected</span>
+        <button type="button" class="opencode-session-batch-delete danger" data-action="batch-delete" disabled>Delete</button>
+        <button type="button" class="opencode-session-select-close" data-action="select-close" aria-label="Exit selection mode">X</button>
+      </div>
+      <div class="opencode-session-search-wrap">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5L14 14"></path></svg>
+        <input class="opencode-session-search" type="search" placeholder="Search sessions...">
+      </div>
+      <div class="opencode-session-list"><div class="opencode-session-empty">Loading sessions...</div></div>
+    </section>`;
+  document.body.appendChild(backdrop);
+  const panel = backdrop.querySelector('.opencode-session-panel');
+  const state = { selectMode: false, selected: new Set() };
+  let payload = await loadNativeOpenCodeSessions();
+  renderNativeOpenCodeSessions(panel, payload, state);
+  backdrop.addEventListener('click', async event => {
+    if (event.target === backdrop || event.target.closest('.opencode-session-close')) {
+      closeOpenCodeSessionPanel();
+      return;
+    }
+    const more = event.target.closest('.opencode-session-more');
+    if (more) {
+      const row = more.closest('.opencode-session-row');
+      panel.querySelectorAll('.opencode-session-menu').forEach(menu => {
+        if (menu !== row.querySelector('.opencode-session-menu')) menu.hidden = true;
+      });
+      const menu = row.querySelector('.opencode-session-menu');
+      menu.hidden = !menu.hidden;
+      return;
+    }
+    const action = event.target.closest('[data-action]');
+    if (!action) return;
+    if (action.dataset.action === 'recent') {
+      const searchInput = panel.querySelector('.opencode-session-search');
+      if (searchInput) searchInput.value = '';
+      renderNativeOpenCodeSessions(panel, payload, state);
+      return;
+    }
+    if (action.dataset.action === 'select-mode' || action.dataset.action === 'select-close') {
+      state.selectMode = action.dataset.action === 'select-mode' ? !state.selectMode : false;
+      state.selected.clear();
+      renderNativeOpenCodeSessions(panel, payload, state);
+      return;
+    }
+    if (action.dataset.action === 'select-all') {
+      const search = String(panel.querySelector('.opencode-session-search')?.value || '').trim().toLowerCase();
+      const visible = (Array.isArray(payload?.sessions) ? payload.sessions : [])
+        .filter(item => nativeOpenCodeSessionMatches(item, search))
+        .map(item => String(item.id || ''));
+      const allSelected = visible.length > 0 && visible.every(id => state.selected.has(id));
+      visible.forEach(id => allSelected ? state.selected.delete(id) : state.selected.add(id));
+      renderNativeOpenCodeSessions(panel, payload, state);
+      return;
+    }
+    if (action.dataset.action === 'batch-delete') {
+      const selectedIds = [...state.selected];
+      if (!selectedIds.length) return;
+      const confirmed = await openSessionConfirmDialog({
+        heading: 'Delete OpenCode Sessions',
+        message: `Permanently delete ${selectedIds.length} native OpenCode session${selectedIds.length === 1 ? '' : 's'} and their history?`,
+        confirmLabel: `Delete ${selectedIds.length}`,
+      });
+      if (!confirmed) return;
+      let success = 0;
+      let failed = 0;
+      const byId = new Map((payload.sessions || []).map(item => [String(item.id || ''), item]));
+      for (const selectedId of selectedIds) {
+        try {
+          await deleteNativeOpenCodeSession(selectedId, String(byId.get(selectedId)?.title || ''), { announce: false });
+          success += 1;
+        } catch (_) {
+          failed += 1;
+        }
+      }
+      const message = failed
+        ? `Deleted ${success} OpenCode sessions. ${failed} could not be deleted.`
+        : `Deleted ${success} OpenCode sessions.`;
+      renderOpenCodeRuntimeStatus(message, { deterministic: true });
+      state.selected.clear();
+      state.selectMode = false;
+      payload = await loadNativeOpenCodeSessions();
+      renderNativeOpenCodeSessions(panel, payload, state);
+      return;
+    }
+    const row = action.closest('.opencode-session-row');
+    const nativeId = row?.dataset.sessionId || '';
+    const currentTitle = row?.querySelector('.opencode-session-title')?.textContent?.trim() || '';
+    try {
+      if (action.dataset.action === 'select') {
+        if (action.checked) state.selected.add(nativeId);
+        else state.selected.delete(nativeId);
+        renderNativeOpenCodeSessions(panel, payload, state);
+        return;
+      } else if (action.dataset.action === 'activate') {
+        await activateNativeOpenCodeSession(nativeId);
+      } else if (action.dataset.action === 'open-native-tui') {
+        await openNativeOpenCodeTui(nativeId);
+      } else if (action.dataset.action === 'rename') {
+        if (!await renameNativeOpenCodeSession(nativeId, currentTitle)) return;
+      } else if (action.dataset.action === 'delete') {
+        const confirmed = await openSessionConfirmDialog({
+          heading: 'Delete OpenCode Session',
+          message: `Permanently delete "${currentTitle}" and its native OpenCode history?`,
+        });
+        if (!confirmed) return;
+        await deleteNativeOpenCodeSession(nativeId, currentTitle);
+      }
+      payload = await loadNativeOpenCodeSessions();
+      renderNativeOpenCodeSessions(panel, payload, state);
+    } catch (error) {
+      renderOpenCodeRuntimeStatus(`OpenCode session action failed: ${error.message || error}`, { failed: true });
+    }
+  });
+  panel.querySelector('.opencode-session-search')?.addEventListener('input', () => {
+    renderNativeOpenCodeSessions(panel, payload, state);
+  });
+  panel.querySelector('.opencode-session-new')?.addEventListener('click', async () => {
+    const title = await openSessionNameDialog();
+    if (!title) return;
+    try {
+      await createNativeOpenCodeSession(title);
+      payload = await loadNativeOpenCodeSessions();
+      renderNativeOpenCodeSessions(panel, payload, state);
+    } catch (error) {
+      renderOpenCodeRuntimeStatus(`OpenCode session creation failed: ${error.message || error}`, { failed: true });
+    }
+  });
+}
+
+function createOpenCodeSessionManagerButton() {
+  if (_sessionManagerButton || document.getElementById('opencode-session-manager-btn')) {
+    _sessionManagerButton = document.getElementById('opencode-session-manager-btn');
+    return;
+  }
+  const right = document.querySelector('.chat-input-right');
+  if (!right) return;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'opencode-session-manager-btn';
+  button.className = 'input-icon-btn tool-indicator opencode-session-manager-btn';
+  button.style.display = 'none';
+  button.title = 'OpenCode Sessions';
+  button.setAttribute('aria-label', 'OpenCode Sessions');
+  button.innerHTML = `
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="5" rx="1"></rect>
+      <rect x="3" y="10" width="18" height="5" rx="1"></rect>
+      <rect x="3" y="16" width="18" height="4" rx="1"></rect>
+    </svg>`;
+  button.addEventListener('click', () => openOpenCodeSessionPanel().catch(error => {
+    renderOpenCodeRuntimeStatus(`OpenCode sessions could not load: ${error.message || error}`, { failed: true });
+  }));
+  const tui = document.getElementById('runtime-quick-reset-btn');
+  if (tui) right.insertBefore(button, tui);
+  else {
+    const modeToggle = right.querySelector('.mode-toggle');
+    if (modeToggle) right.insertBefore(button, modeToggle);
+    else right.appendChild(button);
+  }
+  _sessionManagerButton = button;
+}
+
 function createRuntimeQuickReset() {
   if (
     _quickResetButton
@@ -1942,11 +2427,8 @@ function createRuntimeQuickReset() {
   button.className =
     'input-icon-btn tool-indicator runtime-quick-reset-btn';
   button.style.display = 'none';
-  button.title = 'Start OpenCode for this chat';
-  button.setAttribute(
-    'aria-label',
-    'Start OpenCode or open OpenCode Session Manager'
-  );
+  button.title = 'Start or select an OpenCode session first.';
+  button.setAttribute('aria-label', 'Open active OpenCode session in TUI');
   button.innerHTML = `
     <svg width="15" height="15" viewBox="0 0 24 24"
          fill="none" stroke="currentColor" stroke-width="2"
@@ -2005,12 +2487,19 @@ export function refreshRuntimeIndicator() {
       'runtime-quick-reset-btn'
     );
   }
+  const managerVisible = visible && runtime === 'opencode';
+  const ready = !!currentOpenCodeReadyState();
+  if (!_sessionManagerButton) {
+    _sessionManagerButton = document.getElementById('opencode-session-manager-btn');
+  }
+  if (_sessionManagerButton) {
+    _sessionManagerButton.style.display = managerVisible ? '' : 'none';
+    _sessionManagerButton.disabled = !!_activeRun;
+  }
   if (_quickResetButton) {
-    const managerVisible = visible && runtime === 'opencode';
-    const ready = !!currentOpenCodeReadyState();
     _quickResetButton.style.display = managerVisible ? '' : 'none';
     _quickResetButton.disabled =
-      !!_activeRun || _openCodeSessionManagerBusy;
+      !ready || !!_activeRun || _openCodeSessionManagerBusy;
     _quickResetButton.classList.toggle('is-ready', ready);
     _quickResetButton.classList.toggle('active', ready);
     _quickResetButton.setAttribute(
@@ -2018,8 +2507,8 @@ export function refreshRuntimeIndicator() {
       ready ? 'true' : 'false'
     );
     _quickResetButton.title = ready
-      ? 'Open OpenCode Session Manager'
-      : 'Start OpenCode for this chat';
+      ? 'Open active OpenCode session in TUI'
+      : 'Start or select an OpenCode session first.';
   }
 }
 
@@ -2531,22 +3020,39 @@ export async function streamOpenCodeTurn({
   message,
   sessionId,
   title = 'OpenCode chat',
+  attachments = [],
+  attachmentInfo = [],
+  onAccepted = null,
 } = {}) {
   const id = String(sessionId || '').trim();
   const prompt = String(message || '').trim();
+  const attachmentIds = Array.isArray(attachments)
+    ? attachments.map(value => String(value || '').trim()).filter(Boolean)
+    : [];
   if (!id) throw new Error('OpenCode requires an Odysseus chat session.');
-  if (!prompt) return { status: 'empty' };
+  if (!prompt && !attachmentIds.length) return { status: 'empty', accepted: false };
   if (_activeRun) throw new Error('An OpenCode run is already active.');
 
   ensureSessionRuntime(id);
+  const ready = currentOpenCodeReadyState();
+  if (!ready) {
+    throw new Error('Start or create an OpenCode session before sending a message.');
+  }
+  const selection = activeOpenCodeSelection();
+  if (!selection.modelId || !selection.endpointId) {
+    throw new Error('Select an enabled model for the next OpenCode query.');
+  }
   if (!boolSetting(REUSE_SESSION_KEY, true)) {
     await resetOpenCodeSession(id);
   }
 
   const userTimestamp = new Date().toISOString();
-  chatRenderer.addMessage('user', prompt, '', {
+  chatRenderer.addMessage('user', prompt || '[Image attachment]', '', {
     runtime: 'opencode',
     timestamp: userTimestamp,
+    ...(Array.isArray(attachmentInfo) && attachmentInfo.length
+      ? { attachments: attachmentInfo }
+      : {}),
   });
 
   const context = {
@@ -2571,6 +3077,14 @@ export async function streamOpenCodeTurn({
     context,
   };
   refreshRuntimeIndicator();
+  let accepted = false;
+  const acceptOnce = () => {
+    if (accepted) return;
+    accepted = true;
+    if (typeof onAccepted === 'function') {
+      try { onAccepted(); } catch (_) {}
+    }
+  };
 
   try {
     const response = await fetch('/api/opencode/runtime/stream', {
@@ -2585,12 +3099,22 @@ export async function streamOpenCodeTurn({
         odysseus_session_id: id,
         title,
         permission_mode: permissionMode(),
+        endpoint_id: selection.endpointId,
+        model_id: selection.modelId,
+        attachments: attachmentIds,
       }),
       signal: controller.signal,
     });
 
-    if (!response.ok || !response.body) {
-      throw new Error(`OpenCode stream returned HTTP ${response.status}`);
+    if (!response.ok) {
+      const detail = await openCodeResponseError(
+        response,
+        `OpenCode stream returned HTTP ${response.status}`
+      );
+      throw new Error(`OpenCode failed: ${detail}`);
+    }
+    if (!response.body) {
+      throw new Error('OpenCode failed: the stream response had no body.');
     }
 
     const reader = response.body.getReader();
@@ -2608,6 +3132,7 @@ export async function streamOpenCodeTurn({
         const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/);
         buffer = buffer.slice(boundary + (separator ? separator[0].length : 2));
         const event = parseSseFrame(frame);
+        if (event.type === 'runtime.accepted') acceptOnce();
         captureOpenCodeTranscriptMetadata(context, event);
         if (handleRuntimeEvent(context, event)) {
           try { await reader.cancel(); } catch (_) {}
@@ -2632,6 +3157,7 @@ export async function streamOpenCodeTurn({
 
     return {
       status: context.terminal,
+      accepted,
       runId: _activeRun && _activeRun.runId,
       content: context.accumulated,
     };
@@ -2641,7 +3167,7 @@ export async function streamOpenCodeTurn({
         renderTerminalFailure(context, 'Cancelled by user.', true);
         context.terminal = 'cancelled';
       }
-      return { status: 'cancelled' };
+      return { status: 'cancelled', accepted };
     }
 
     if (!context.terminal) {
@@ -2654,6 +3180,7 @@ export async function streamOpenCodeTurn({
     }
     return {
       status: 'failed',
+      accepted,
       error: error.message || String(error),
     };
   } finally {
@@ -2687,6 +3214,7 @@ export async function initRuntimeControl() {
   simplifyOpenCodeSettings();
   createRuntimeIndicator();
   createRuntimeQuickReset();
+  createOpenCodeSessionManagerButton();
   watchComposerState();
 
   try {

@@ -16,6 +16,8 @@ import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
+from src.chat_helpers import is_vision_model
+
 from .config import OpenCodeRuntimeConfig
 
 
@@ -241,6 +243,14 @@ class OpenCodeServerManager:
         if has_registry_provider:
             provider_id = str(self.config.provider_id).strip()
             model_id = str(self.config.model_id).strip()
+            provider_url = urlparse(
+                str(self.config.provider_base_url or "").strip()
+            )
+            provider_host = (provider_url.hostname or "").lower()
+            is_ollama_provider = (
+                provider_url.port == 11434
+                or "ollama" in provider_host
+            )
             model_ids = []
             seen = set()
             for value in (*tuple(self.config.provider_models or ()), model_id):
@@ -273,7 +283,38 @@ class OpenCodeServerManager:
                 ),
                 "options": options,
                 "models": {
-                    candidate: {"name": candidate}
+                    candidate: {
+                        "name": candidate,
+                        # OpenCode treats custom OpenAI-compatible models as
+                        # text-only unless their input modalities are explicit.
+                        # A file part still appears in session history in that
+                        # state, but is stripped before the provider request.
+                        "modalities": {
+                            "input": (
+                                ["text", "image"]
+                                if is_vision_model(candidate)
+                                else ["text"]
+                            ),
+                            "output": ["text"],
+                        },
+                        **(
+                            {"attachment": True}
+                            if is_vision_model(candidate)
+                            else {}
+                        ),
+                        **(
+                            {
+                                "options": {
+                                    "reasoningEffort": "none",
+                                }
+                            }
+                            if (
+                                is_ollama_provider
+                                and is_vision_model(candidate)
+                            )
+                            else {}
+                        ),
+                    }
                     for candidate in model_ids
                 },
             }
@@ -1069,6 +1110,123 @@ class OpenCodeServerManager:
             "opencode_session_id": native_session_id,
             "client": "odysseus-custom-tui",
             "control_enabled": bool(bridge_url),
+        }
+
+    def open_native_tui(
+        self,
+        opencode_session_id: str,
+        *,
+        workspace: str = "",
+    ) -> dict[str, Any]:
+        """Open the installed OpenCode TUI attached to one native session."""
+        launch = self.ensure_running()
+        native_session_id = str(opencode_session_id or "").strip()
+        if not native_session_id or any(
+            marker in native_session_id for marker in ("\x00", "\r", "\n")
+        ):
+            raise OpenCodeServerLifecycleError(
+                "A valid OpenCode session ID is required."
+            )
+
+        workspace_path = Path(
+            str(workspace or self.config.workspace or Path.cwd())
+        ).expanduser().resolve()
+        if not workspace_path.is_dir():
+            raise OpenCodeServerLifecycleError(
+                f"OpenCode workspace does not exist: {workspace_path}"
+            )
+
+        executable = self._resolve_executable()
+        cli_args = [
+            executable,
+            "attach",
+            self.config.base_url,
+            "--dir",
+            str(workspace_path),
+            "--session",
+            native_session_id,
+        ]
+        environment = os.environ.copy()
+        effective_config_path, _ = self._prepare_managed_config()
+        if effective_config_path:
+            environment["OPENCODE_CONFIG"] = effective_config_path
+        if self.config.username:
+            environment["OPENCODE_SERVER_USERNAME"] = self.config.username
+        if self.config.password:
+            environment["OPENCODE_SERVER_PASSWORD"] = self.config.password
+
+        terminal = "direct"
+        command = list(cli_args)
+        creationflags = 0
+        if os.name == "nt":
+            comspec = os.environ.get("COMSPEC", "cmd.exe")
+            console_command = [
+                comspec,
+                "/d",
+                "/s",
+                "/k",
+                subprocess.list2cmdline(cli_args),
+            ]
+            windows_terminal = shutil.which("wt.exe")
+            if windows_terminal:
+                terminal = "windows-terminal"
+                command = [
+                    windows_terminal,
+                    "new-tab",
+                    "--title",
+                    "OpenCode",
+                    "-d",
+                    str(workspace_path),
+                    *console_command,
+                ]
+                creationflags = getattr(
+                    subprocess,
+                    "CREATE_NEW_PROCESS_GROUP",
+                    0,
+                )
+            else:
+                terminal = "windows-console"
+                command = console_command
+                creationflags = (
+                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                )
+
+        try:
+            process = self.process_factory(
+                command,
+                cwd=str(workspace_path),
+                env=environment,
+                creationflags=creationflags,
+                start_new_session=(os.name != "nt"),
+            )
+        except FileNotFoundError as exc:
+            raise OpenCodeServerLifecycleError(
+                "OpenCode executable was not found."
+            ) from exc
+        except OSError as exc:
+            raise OpenCodeServerLifecycleError(
+                "The native OpenCode TUI could not be opened."
+            ) from exc
+
+        terminal_pid = getattr(process, "pid", None)
+        self.log_event(
+            "NATIVE_TUI_OPENED",
+            terminal=terminal,
+            terminal_pid=terminal_pid,
+            endpoint=self.config.base_url,
+            configured_workspace=str(workspace_path),
+            opencode_session_id=native_session_id,
+            server_mode=launch.get("mode"),
+        )
+        return {
+            "opened": True,
+            "terminal": terminal,
+            "pid": terminal_pid,
+            "endpoint": self.config.base_url,
+            "workspace": str(workspace_path),
+            "opencode_session_id": native_session_id,
+            "client": "opencode-native-tui",
         }
 
     def open_package_terminal(

@@ -13,6 +13,7 @@ let uploaded = [];
 // uploadPending() so callers can stamp width/height onto their attachment
 // objects without changing uploadPending()'s return signature.
 let _lastUploadedMeta = [];
+let _lastUploadedPendingFiles = [];
 let API_BASE = '';
 let _uploadSpinners = [];
 let _uploadAbortCtrl = null;
@@ -270,6 +271,8 @@ export function removePending(idx) {
 export async function uploadPending(opts = {}) {
   if (pendingFiles.length === 0) return [];
   _lastUploadCancelled = false;
+  _lastUploadedPendingFiles = [];
+  const uploadingFiles = [...pendingFiles];
 
   // The message bubble is shown immediately, but the upload can take a moment —
   // dim the chips and overlay a whirlpool so it's clear the files are still
@@ -293,7 +296,7 @@ export async function uploadPending(opts = {}) {
   }
 
   const fd = new FormData();
-  pendingFiles.forEach(f => fd.append('files', f, f.name || 'paste.png'));
+  uploadingFiles.forEach(f => fd.append('files', f, f.name || 'paste.png'));
   if (opts.sessionId) fd.append('session_id', opts.sessionId);
   _uploadAbortCtrl = new AbortController();
   _uploading = true;
@@ -326,7 +329,13 @@ export async function uploadPending(opts = {}) {
       try { localStorage.setItem('gallery-fresh-chat-upload', String(Date.now())); } catch (_) {}
       window.dispatchEvent(new CustomEvent('gallery-refresh', { detail: { source: 'chat-upload' } }));
     }
-    pendingFiles = [];          // clear only on success
+    _lastUploadedPendingFiles = uploadingFiles;
+    if (!opts.retainOnSuccess) {
+      const uploadedSet = new Set(uploadingFiles);
+      pendingFiles = pendingFiles.filter(file => !uploadedSet.has(file));
+      uploadingFiles.forEach(_revokePreviewUrl);
+      _lastUploadedPendingFiles = [];
+    }
     // Stash the full meta (incl. width/height for images) on the module so
     // callers that want it can grab it via getLastUploadedMeta(). Keep the
     // returned shape as `ids` for backward-compatibility with existing call sites.
@@ -437,7 +446,19 @@ export function clearPending() {
   if (_uploading) cancelUpload();
   pendingFiles.forEach(_revokePreviewUrl);
   pendingFiles = [];
+  _lastUploadedPendingFiles = [];
   renderAttachStrip();
+}
+
+/** Remove exactly the files from the most recent retained successful upload. */
+export function commitLastUploadedPending() {
+  if (!_lastUploadedPendingFiles.length) return false;
+  const committed = new Set(_lastUploadedPendingFiles);
+  pendingFiles = pendingFiles.filter(file => !committed.has(file));
+  _lastUploadedPendingFiles.forEach(_revokePreviewUrl);
+  _lastUploadedPendingFiles = [];
+  renderAttachStrip();
+  return true;
 }
 
 /** Full meta (incl. width/height for images) from the most recent uploadPending(). */
@@ -474,6 +495,7 @@ const fileHandlerModule = {
   getPendingInfo,
   getPendingRaw,
   clearPending,
+  commitLastUploadedPending,
   getLastUploadedMeta,
   isUploading,
   wasLastUploadCancelled,

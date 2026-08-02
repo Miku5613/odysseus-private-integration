@@ -194,15 +194,16 @@ def test_workspace_policy_keeps_risky_actions_gated():
 
 
 
-def test_composer_has_quick_opencode_session_reset():
+def test_composer_tui_button_only_opens_an_active_session():
     source = runtime_source()
 
     assert "runtime-quick-reset-btn" in source
     assert "createRuntimeQuickReset()" in source
-    assert "Start OpenCode or open OpenCode Session Manager" in source
-    assert "await resetOpenCodeSession(id)" in source
+    assert "Start or select an OpenCode session first." in source
+    assert "const ready = currentOpenCodeReadyState();" in source
+    assert "if (!ready) return null;" in source
     assert "managerVisible = visible && runtime === 'opencode'" in source
-    assert "!!_activeRun || _openCodeSessionManagerBusy" in source
+    assert "!ready || !!_activeRun || _openCodeSessionManagerBusy" in source
 
 
 
