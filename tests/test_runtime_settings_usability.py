@@ -37,3 +37,12 @@ def test_runtime_settings_collapse_inside_a_floating_container():
     assert ".runtime-select-row" in STYLE
     assert "min-width: 0" in STYLE
     assert "max-width: 100%" in STYLE
+
+def test_runtime_settings_offer_task_planner_toggle_and_collapsible_cards():
+    assert 'id="set-task-planner-ui-enabled"' in RUNTIME
+    assert "multiGraphTracker.setEnabled(plannerEnabled)" in RUNTIME
+    assert 'data-runtime-collapse="opencode"' in RUNTIME
+    assert 'data-runtime-collapse="langgraph"' in RUNTIME
+    assert "restoreRuntimeSectionStates()" in RUNTIME
+    assert ".runtime-settings-card.is-collapsed" in STYLE
+    assert ".runtime-card-collapse" in STYLE

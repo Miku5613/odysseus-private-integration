@@ -11,11 +11,14 @@ import markdownModule from './markdown.js';
 import { getWorkspace } from './workspace.js';
 
 import openCodeTaskPlannerAdapter from './openCodeTaskPlannerAdapter.js';
+import multiGraphTracker from './multiGraphTracker.js';
 
 const DEFAULT_RUNTIME_KEY = 'odysseus-agent-runtime-default-v1';
 const SESSION_RUNTIME_KEY = 'odysseus-agent-runtime-sessions-v1';
 const REUSE_SESSION_KEY = 'odysseus-opencode-reuse-session-v1';
 const RESET_ON_SWITCH_KEY = 'odysseus-opencode-reset-on-switch-v1';
+const TASK_PLANNER_UI_KEY = 'odysseus-task-planner-ui-enabled-v1';
+const RUNTIME_SECTION_STATE_PREFIX = 'odysseus-runtime-section-collapsed-v1:';
 const OPENCODE_MODEL_KEY = 'odysseus-opencode-model-v1';
 const OPENCODE_ENDPOINT_KEY = 'odysseus-opencode-endpoint-v1';
 const OPENCODE_WORKSPACE_KEY = 'odysseus-opencode-workspace-v1';
@@ -344,6 +347,20 @@ function createRuntimePanel() {
         </select>
       </label>
 
+      <label class="runtime-lifecycle-option runtime-global-planner-toggle">
+        <span class="runtime-choice-copy">
+          <strong>Task Planner UI</strong>
+          <small>Show live OpenCode and LangGraph plan progress above the composer.</small>
+        </span>
+        <span class="runtime-toggle">
+          <input id="set-task-planner-ui-enabled" type="checkbox" checked
+                 role="switch" aria-label="Show Task Planner UI">
+          <span class="runtime-toggle-track" aria-hidden="true">
+            <span class="runtime-toggle-thumb"></span>
+          </span>
+        </span>
+      </label>
+
       <div id="runtime-default-message"
            class="runtime-settings-message runtime-inline-message"></div>
     </div>
@@ -352,7 +369,12 @@ function createRuntimePanel() {
          class="admin-card runtime-settings-card runtime-console-card runtime-minimal-card">
       <div class="runtime-minimal-heading">
         <span class="runtime-card-kicker">Standalone runtime</span>
-        <h2 class="runtime-card-title">OpenCode Console</h2>
+        <div class="runtime-card-title-row">
+          <h2 class="runtime-card-title">OpenCode Console</h2>
+          <button type="button" class="runtime-card-collapse"
+                  data-runtime-collapse="opencode" aria-expanded="true"
+                  aria-label="Collapse OpenCode settings">⌃</button>
+        </div>
         <p class="settings-help-text">
           Control how OpenCode conversation context is retained.
         </p>
@@ -418,7 +440,12 @@ function createRuntimePanel() {
          class="admin-card runtime-settings-card runtime-console-card runtime-minimal-card hidden">
       <div class="runtime-minimal-heading">
         <span class="runtime-card-kicker">Native agent runtime</span>
-        <h2 class="runtime-card-title">LangGraph Runtime</h2>
+        <div class="runtime-card-title-row">
+          <h2 class="runtime-card-title">LangGraph Runtime</h2>
+          <button type="button" class="runtime-card-collapse"
+                  data-runtime-collapse="langgraph" aria-expanded="true"
+                  aria-label="Collapse LangGraph settings">⌃</button>
+        </div>
         <p class="settings-help-text">
           These global defaults apply to newly created Agent chats. Existing
           chats keep their assigned runtime.
@@ -686,6 +713,10 @@ function syncSettingsControls() {
   const reset = document.getElementById('set-opencode-reset-on-switch');
   if (reuse) reuse.checked = boolSetting(REUSE_SESSION_KEY, true);
   if (reset) reset.checked = boolSetting(RESET_ON_SWITCH_KEY, false);
+  const plannerToggle = document.getElementById('set-task-planner-ui-enabled');
+  const plannerEnabled = boolSetting(TASK_PLANNER_UI_KEY, true);
+  if (plannerToggle) plannerToggle.checked = plannerEnabled;
+  multiGraphTracker.setEnabled(plannerEnabled);
 
   const permissionSelect = document.getElementById(
     'runtime-opencode-permission-mode'
@@ -1229,10 +1260,32 @@ async function openOpenCodeLogTerminal() {
   return payload;
 }
 
+function setRuntimeSectionCollapsed(section, collapsed) {
+  const panel = document.getElementById(`runtime-${section}-panel`);
+  const button = document.querySelector(`[data-runtime-collapse="${section}"]`);
+  if (!panel || !button) return;
+  panel.classList.toggle('is-collapsed', collapsed);
+  button.setAttribute('aria-expanded', String(!collapsed));
+  button.textContent = collapsed ? '⌄' : '⌃';
+  safeStorageSet(`${RUNTIME_SECTION_STATE_PREFIX}${section}`, String(collapsed));
+}
+
+function restoreRuntimeSectionStates() {
+  for (const section of ['opencode', 'langgraph']) {
+    setRuntimeSectionCollapsed(
+      section,
+      boolSetting(`${RUNTIME_SECTION_STATE_PREFIX}${section}`, false)
+    );
+  }
+}
+
 function wireRuntimeSettings() {
   const runtimeSelect = document.getElementById('set-runtime-default');
   const reuse = document.getElementById('set-opencode-reuse-session');
   const reset = document.getElementById('set-opencode-reset-on-switch');
+  const plannerToggle = document.getElementById(
+    'set-task-planner-ui-enabled'
+  );
   const sessionManagerButton = document.getElementById(
     'runtime-session-manager-settings-btn'
   );
@@ -1293,6 +1346,27 @@ function wireRuntimeSettings() {
       }
     });
   }
+  if (plannerToggle) {
+    plannerToggle.addEventListener('change', () => {
+      const enabled = !!plannerToggle.checked;
+      safeStorageSet(TASK_PLANNER_UI_KEY, String(enabled));
+      multiGraphTracker.setEnabled(enabled);
+    });
+  }
+
+  document.querySelectorAll('[data-runtime-collapse]').forEach(button => {
+    button.addEventListener('click', () => {
+      const section = String(button.dataset.runtimeCollapse || '');
+      const panel = document.getElementById(`runtime-${section}-panel`);
+      if (!panel) return;
+      setRuntimeSectionCollapsed(
+        section,
+        !panel.classList.contains('is-collapsed')
+      );
+    });
+  });
+  restoreRuntimeSectionStates();
+
   if (reuse) {
     reuse.addEventListener('change', () => {
       safeStorageSet(REUSE_SESSION_KEY, String(!!reuse.checked));

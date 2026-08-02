@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
 
 def _event_payload(raw: dict[str, Any]) -> dict[str, Any]:
@@ -41,6 +41,44 @@ def event_session_id(raw: dict[str, Any]) -> str:
         if isinstance(aggregate, str) and aggregate.startswith("ses_"):
             return aggregate
     return ""
+
+
+def _message_info(message: dict[str, Any]) -> dict[str, Any]:
+    info = message.get("info")
+    return info if isinstance(info, dict) else message
+
+
+def _message_id(message: dict[str, Any]) -> str:
+    return str(_message_info(message).get("id") or "")
+
+
+def _tool_call_ids(message: dict[str, Any]) -> set[str]:
+    info = _message_info(message)
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        parts = info.get("parts")
+    if not isinstance(parts, list):
+        return set()
+    return {
+        str(part.get("callID") or part.get("id") or "")
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "tool"
+    } - {""}
+
+
+def snapshot_boundaries(
+    messages: Iterable[dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    message_ids: set[str] = set()
+    call_ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        message_id = _message_id(message)
+        if message_id:
+            message_ids.add(message_id)
+        call_ids.update(_tool_call_ids(message))
+    return message_ids, call_ids
 
 
 def _safe_tool_summary(tool: str, state: dict[str, Any]) -> str:
@@ -83,6 +121,21 @@ class OpenCodeEventNormalizer:
     tool_statuses: dict[str, str] = field(default_factory=dict)
     tool_started_calls: set[str] = field(default_factory=set)
     tool_completed_calls: set[str] = field(default_factory=set)
+    baseline_message_ids: set[str] = field(default_factory=set)
+    baseline_call_ids: set[str] = field(default_factory=set)
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        session_id: str,
+        messages: Iterable[dict[str, Any]],
+    ) -> "OpenCodeEventNormalizer":
+        message_ids, call_ids = snapshot_boundaries(messages)
+        return cls(
+            session_id=session_id,
+            baseline_message_ids=message_ids,
+            baseline_call_ids=call_ids,
+        )
 
     def normalize(self, raw: dict[str, Any]) -> list[dict[str, Any]]:
         event = _event_payload(raw)
@@ -160,6 +213,15 @@ class OpenCodeEventNormalizer:
                 return []
             part_id = str(part.get("id") or "")
             part_type = str(part.get("type") or "")
+            message_id = str(
+                part.get("messageID")
+                or part.get("message_id")
+                or props.get("messageID")
+                or props.get("message_id")
+                or ""
+            )
+            if message_id and message_id in self.baseline_message_ids:
+                return []
             if part_id and part_type:
                 self.part_types[part_id] = part_type
 
@@ -189,6 +251,11 @@ class OpenCodeEventNormalizer:
 
         if event_type == "message.part.delta":
             part_id = str(props.get("partID") or "")
+            message_id = str(
+                props.get("messageID") or props.get("message_id") or ""
+            )
+            if message_id and message_id in self.baseline_message_ids:
+                return []
             field_name = str(props.get("field") or "")
             delta = props.get("delta")
             if (
@@ -239,6 +306,8 @@ class OpenCodeEventNormalizer:
 
         output: list[dict[str, Any]] = []
         for message in messages:
+            if _message_id(message) in self.baseline_message_ids:
+                continue
             info = message.get("info")
             if not isinstance(info, dict):
                 info = message
@@ -274,6 +343,8 @@ class OpenCodeEventNormalizer:
             state = {}
         status = str(state.get("status") or "pending").lower()
 
+        if call_id in self.baseline_call_ids:
+            return []
         if call_id in self.tool_completed_calls:
             return []
 
@@ -322,10 +393,15 @@ class OpenCodeEventNormalizer:
 
 def extract_final_assistant_message(
     messages: list[dict[str, Any]],
+    *,
+    excluded_message_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Return the latest completed assistant text and model metadata."""
 
+    excluded = excluded_message_ids or set()
     for message in reversed(messages):
+        if _message_id(message) in excluded:
+            continue
         info = message.get("info")
         if not isinstance(info, dict):
             info = message

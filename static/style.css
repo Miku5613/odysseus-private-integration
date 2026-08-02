@@ -42606,3 +42606,37 @@ body.theme-frosted .modal {
   }
 }
 /* ── End Runtime settings minimal layout v1 ───────────────────── */
+
+/* OPENCODE_TOOL_UI_RUNTIME_SETTINGS_PATCH */
+.runtime-card-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.runtime-card-title-row .runtime-card-title {
+  margin: 0;
+}
+.runtime-card-collapse {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--input-border, rgba(255, 255, 255, .14));
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.runtime-card-collapse:hover {
+  background: var(--input-bg, rgba(255, 255, 255, .05));
+}
+.runtime-settings-card.is-collapsed > :not(.runtime-minimal-heading) {
+  display: none !important;
+}
+.runtime-settings-card.is-collapsed
+.runtime-minimal-heading > .settings-help-text {
+  display: none;
+}
+.runtime-global-planner-toggle {
+  margin-top: 14px;
+}

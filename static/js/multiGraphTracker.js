@@ -58,6 +58,7 @@ let subtitle = null;
 let statusBadge = null;
 let spinner = null;
 let composerObserver = null;
+let trackerEnabled = true;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -818,6 +819,7 @@ function scheduleHide(ms = 7000) {
 }
 
 function handleEvent(event) {
+  if (!trackerEnabled) return;
   clearHideTimer();
 
   const next = reduceTaskEvent(state, event);
@@ -947,6 +949,16 @@ function handleMetrics(metrics, options = {}) {
   }
 }
 
+function setEnabled(value) {
+  trackerEnabled = value !== false;
+  if (!trackerEnabled) reset();
+  return trackerEnabled;
+}
+
+function isEnabled() {
+  return trackerEnabled;
+}
+
 function reset() {
   clearHideTimer();
 
@@ -968,6 +980,8 @@ export {
   normalizePlanUpdate,
   reduceTaskEvent,
   reset,
+  setEnabled,
+  isEnabled,
 };
 
 export default {
@@ -977,4 +991,6 @@ export default {
   handleToolOutput,
   handleMetrics,
   reset,
+  setEnabled,
+  isEnabled,
 };

@@ -1655,7 +1655,17 @@ class OpenCodeRuntimeService:
                     self.config.workspace or str(Path.cwd())
                 ),
             )
-            normalizer = OpenCodeEventNormalizer(session_id=session_id)
+            try:
+                baseline_messages = await asyncio.to_thread(
+                    self.transport.list_messages,
+                    session_id,
+                )
+            except OpenCodeTransportError:
+                baseline_messages = []
+            normalizer = OpenCodeEventNormalizer.from_snapshot(
+                session_id,
+                baseline_messages,
+            )
 
             def event_worker() -> None:
                 self._log(
@@ -1712,9 +1722,7 @@ class OpenCodeRuntimeService:
                 "runtime": "opencode",
                 "run_id": run_id,
                 "opencode_session_id": session_id,
-                "objective": (
-                    message
-                ),
+                "objective": "Complete the requested task",
                 "label": "OpenCode runtime",
             })
 
@@ -1868,7 +1876,10 @@ class OpenCodeRuntimeService:
                     opencode_session_id=session_id,
                 )
                 yield sse_frame(event)
-            final = extract_final_assistant_message(messages)
+            final = extract_final_assistant_message(
+                messages,
+                excluded_message_ids=normalizer.baseline_message_ids,
+            )
             if not final["text"]:
                 run.status = "failed"
                 session_error = self._run_errors.pop(run_id, "")

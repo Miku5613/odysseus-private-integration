@@ -270,12 +270,13 @@ def test_runtime_contract_requests_internal_todowrite() -> None:
     assert "Do not output a task plan" in prompt
 
 
-def test_service_exposes_objective_and_plan_updates() -> None:
+def test_service_exposes_safe_objective_and_plan_updates() -> None:
     source = (
         ROOT / "src" / "opencode_runtime" / "service.py"
     ).read_text(encoding="utf-8")
 
-    assert '"objective": (' in source
+    assert '"objective": "Complete the requested task"' in source
+    assert '"objective": (\n                    message' not in source
     assert '"runtime.plan.updated"' in source
     assert '"todo.updated"' in source
 
@@ -393,3 +394,55 @@ def test_runtime_completion_closes_every_planner_item(tmp_path: Path) -> None:
         """,
     )
     assert result.returncode == 0, result.stderr or result.stdout
+
+def test_normalizer_ignores_tool_parts_from_preexisting_messages() -> None:
+    from src.opencode_runtime.normalizer import OpenCodeEventNormalizer
+
+    old = {
+        "info": {"id": "msg-old", "role": "assistant"},
+        "parts": [{
+            "id": "part-old",
+            "callID": "call-old",
+            "type": "tool",
+            "tool": "glob",
+            "state": {
+                "status": "completed",
+                "input": {"pattern": "**/*"},
+            },
+        }],
+    }
+    new = {
+        "info": {"id": "msg-new", "role": "assistant"},
+        "parts": [{
+            "id": "part-new",
+            "callID": "call-new",
+            "type": "tool",
+            "tool": "blender-mcp_get_scene_info",
+            "state": {
+                "status": "completed",
+                "input": {},
+            },
+        }],
+    }
+
+    normalizer = OpenCodeEventNormalizer.from_snapshot("ses-1", [old])
+    events = normalizer.reconcile_messages([old, new])
+
+    completed = [
+        event["call_id"]
+        for event in events
+        if event["type"] == "tool.completed"
+    ]
+    assert completed == ["call-new"]
+
+
+def test_runtime_started_uses_safe_generic_fallback_objective() -> None:
+    source = (
+        ROOT / "src" / "opencode_runtime" / "service.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"objective": "Complete the requested task"' in source
+    assert (
+        '"objective": (\n                    message\n                )'
+        not in source
+    )
