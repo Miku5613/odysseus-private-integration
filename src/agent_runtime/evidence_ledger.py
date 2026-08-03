@@ -43,6 +43,16 @@ def _query_terms(query: str | None) -> set[str]:
     return {t for t in terms if t not in stop}
 
 
+def _contains_term(text: str, term: str) -> bool:
+    normalized = str(term or "").lower().replace("_", " ").replace("-", " ")
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])",
+            text,
+        )
+    )
+
+
 def relevance_score(text: str, query: str | None, path: str | None = None) -> int:
     terms = _query_terms(query)
     if not terms:
@@ -66,23 +76,23 @@ def path_intent_score(path: str | None, query: str | None) -> int:
     agent_words = {"agent", "agent loop", "tool call", "tool calls"}
     chat_route_words = {"chat_routes", "chat routes", "chat route"}
 
-    if any(word in q for word in frontend_words):
+    if any(_contains_term(q, word) for word in frontend_words):
         if p.startswith("static\\") or "\\static\\" in p or p.endswith((".js", ".jsx", ".ts", ".tsx", ".css", ".html")):
             score += 14
         if p.startswith("routes\\") or p.startswith("src\\") or p.startswith("core\\"):
             score -= 6
 
-    if any(word in q for word in backend_words):
+    if any(_contains_term(q, word) for word in backend_words):
         if p.startswith("routes\\") or p.startswith("src\\") or p.startswith("services\\") or p.startswith("core\\"):
             score += 8
 
-    if any(word in q for word in agent_words):
+    if any(_contains_term(q, word) for word in agent_words):
         if "src\\agent_loop.py" in p:
             score += 12
         elif p.startswith("src\\"):
             score += 4
 
-    if any(word in q for word in chat_route_words):
+    if any(_contains_term(q, word) for word in chat_route_words):
         if "routes\\chat_routes.py" in p:
             score += 14
 
@@ -118,14 +128,14 @@ def _has_exact_or_action_signal(text: str | None, query: str | None) -> bool:
     if any(x in str(text or "").lower() for x in exact_identifiers):
         return True
 
-    if "save" in q and re.search(r'\bsave|saved|saving|commit|insert|create\b', hay):
+    if _contains_term(q, "save") and re.search(r'\bsave|saved|saving|commit|insert|create\b', hay):
         return True
 
-    if any(word in q for word in ["execute", "executes", "executing", "run", "runs", "running"]):
+    if any(_contains_term(q, word) for word in ["execute", "executes", "executing", "run", "runs", "running"]):
         if re.search(r'\bexecute|invoke|called|call\(|await |for .* in |\.invoke\(', hay):
             return True
 
-    if any(word in q for word in ["handle", "handles", "handling"]):
+    if any(_contains_term(q, word) for word in ["handle", "handles", "handling"]):
         if re.search(r'\bif\b|\belif\b|\bcase\b|\bswitch\b|\bhandler\b|\bevent\b|\btype\b', hay):
             return True
 
@@ -172,7 +182,7 @@ def _looks_like_concrete_call_site(text: str | None, query: str | None) -> bool:
 
     # Method/function invocation.
     if re.search(r'[A-Za-z_][A-Za-z0-9_\.]*\s*\(', compact):
-        if any(word in q for word in ["execute", "executes", "executing", "run", "runs", "running", "call", "calls"]):
+        if any(_contains_term(q, word) for word in ["execute", "executes", "executing", "run", "runs", "running", "call", "calls"]):
             call_terms = [
                 "execute_tool_block",
                 "invoke(",
@@ -184,7 +194,7 @@ def _looks_like_concrete_call_site(text: str | None, query: str | None) -> bool:
             ]
             return any(term in lowered for term in call_terms)
 
-        if any(word in q for word in ["save", "saves", "saving", "saved"]):
+        if any(_contains_term(q, word) for word in ["save", "saves", "saving", "saved"]):
             return any(term in lowered for term in ["save_assistant_response", "message_saved", "commit("])
 
     return False
@@ -199,7 +209,7 @@ def _call_site_score(text: str | None, query: str | None) -> int:
     # Penalize definitions/imports for action questions. They are useful context,
     # but not the implementation site.
     q = str(query or "").lower()
-    if any(word in q for word in ["execute", "executes", "executing", "run", "runs", "running", "save", "saves", "saving", "saved"]):
+    if any(_contains_term(q, word) for word in ["execute", "executes", "executing", "run", "runs", "running", "save", "saves", "saving", "saved"]):
         if _looks_like_definition_or_import(raw):
             return -10
         if "parse_tool_blocks" in raw or "_resolve_tool_blocks" in raw:

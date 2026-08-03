@@ -56,9 +56,6 @@ def _required_semantic_groups(query: str | None) -> list[tuple[str, set[str]]]:
     q = _norm(query)
     groups: list[tuple[str, set[str]]] = []
 
-    if any(_contains_term(q, word) for word in ["frontend", "front end", "client", "ui", "browser"]):
-        groups.append(("frontend/client handling", {"tool output", "tool_output", "json type", "event", "handler", "if", "elif"}))
-
     if "tool calls" in q or "tool call" in q:
         groups.append(("tool-call concept", {"tool call", "tool_calls", "tool block", "tool_blocks", "toolmessage", "tool message"}))
 
@@ -68,16 +65,55 @@ def _required_semantic_groups(query: str | None) -> list[tuple[str, set[str]]]:
     if "assistant response" in q or "assistant" in q and "response" in q:
         groups.append(("assistant response", {"assistant", "response", "full_response", "reply"}))
 
-    if any(_contains_term(q, word) for word in ["execute", "executes", "executing", "execution", "run", "runs", "running"]):
+    if _requires_execution_call_site(query):
         groups.append(("execution action", {"execute", "executes", "executing", "execution", "invoke", "invoke(", ".invoke(", "await", "tool_obj", "execute_tool_block", "call"}))
 
-    if any(_contains_term(q, word) for word in ["handle", "handles", "handling", "handler"]):
+    if any(
+        phrase in q
+        for phrase in [
+            "handling branch",
+            "event handler",
+            "handler branch",
+            "switch branch",
+        ]
+    ):
         groups.append(("handling branch", {"handle", "handler", "if", "elif", "case", "switch", "event", "type", "json type"}))
 
     if any(_contains_term(q, word) for word in ["stream", "streaming", "streamed"]):
         groups.append(("streaming context", {"stream", "streaming", "chunk", "delta", "[done]", "data: [done]", "yield", "stream_with_save"}))
 
     return groups
+
+
+def _requires_execution_call_site(query: str | None) -> bool:
+    """Recognize an explicit call-site obligation, not a generic code lookup."""
+
+    q = _norm(query)
+    if any(
+        phrase in q
+        for phrase in [
+            "call site",
+            "callsite",
+            "execution flow",
+            "execution path",
+            "invocation site",
+            "where it is invoked",
+            "where this is invoked",
+            "where it is called",
+            "where this is called",
+        ]
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\bhow\b.{0,80}\b(?:execute|executes|run|runs)\b",
+            q,
+        )
+        or re.search(
+            r"\bwhere\b.{0,80}\b(?:execute|executes|executed|called|invoked)\b",
+            q,
+        )
+    )
 
 
 def _path_obligation_ok(path: str | None, query: str | None) -> tuple[bool, str]:
@@ -117,25 +153,46 @@ def _context_text(obs: dict[str, Any]) -> str:
 def _is_probably_prompt_or_header(obs: dict[str, Any]) -> bool:
     content = str(obs.get("content") or "")
     text = _norm(content)
-
-    # Header/import/docstring windows should not be enough for action claims.
-    if int(obs.get("line_start") or 0) <= 50:
-        has_implementation = bool(
-            re.search(r"\b(?:async\s+def|def)\s+[a-z_][a-z0-9_]*\s*\(", content)
-            and (
-                "await " in content
-                or re.search(r"\breturn\b", content)
-            )
+    has_implementation = bool(
+        re.search(
+            r"\b(?:async\s+def|def|class)\s+[a-z_][a-z0-9_]*",
+            content,
+            flags=re.IGNORECASE,
         )
-        if (
-            not has_implementation
-            and any(tok in text for tok in ["import ", "from ", "chat routes", "streamingresponse"])
-        ):
-            return True
+        and (
+            "await " in content
+            or re.search(r"\breturn\b", content)
+            or re.search(r"\b(?:if|for|while|try)\b", content)
+        )
+    )
+
+    # Import-only windows remain headers regardless of their line number.
+    if (
+        not has_implementation
+        and (
+            re.search(
+                r"(?m)^\s*(?:\d+:\s*)?(?:from\s+\S+\s+import|import\s+\S+)",
+                content,
+            )
+            or "streamingresponse" in text
+        )
+    ):
+        return True
 
     # Large system prompt/rules blocks are usually instructions about behavior,
     # not the implementation site of that behavior.
-    if "_agent_rules" in text or "you declare when the job is done" in text or "after a tool succeeds" in text:
+    if (
+        not has_implementation
+        and (
+            "_agent_rules" in text
+            or "you declare when the job is done" in text
+            or "after a tool succeeds" in text
+            or (
+                re.search(r'(?:"""|\'\'\')', content)
+                and re.search(r"\b(?:prompt|rules|instructions)\b", text)
+            )
+        )
+    ):
         return True
 
     return False
@@ -147,13 +204,14 @@ def _context_has_concrete_call_site(obs: dict[str, Any], query: str | None) -> b
     lowered = text.lower()
     q = _norm(query)
 
-    if any(_contains_term(q, word) for word in ["execute", "executes", "executing", "execution", "run", "runs", "running"]):
+    if _requires_execution_call_site(query):
         patterns = [
             r'return\s+await\s+execute_tool_block\s*\(',
             r'await\s+execute_tool_block\s*\(',
             r'execute_tool_block\s*\(',
             r'\.invoke\s*\(',
             r'tool_obj\.invoke\s*\(',
+            r'\b(?:return\s+)?await\s+[A-Za-z_][A-Za-z0-9_\.]*\s*\(',
         ]
         return any(re.search(p, text) for p in patterns)
 
@@ -222,7 +280,14 @@ def _obligation_report(obs: dict[str, Any], query: str) -> dict[str, Any]:
     if header_or_prompt:
         reasons.append("context appears to be header/import/prompt-rules, not implementation evidence")
     if not concrete_call_site_ok:
-        reasons.append("expanded context does not contain a concrete call/execution/save/handler site")
+        if _requires_execution_call_site(query):
+            reasons.append(
+                "missing execution call site explicitly required by the query"
+            )
+        else:
+            reasons.append(
+                "expanded context does not contain the required save/handler site"
+            )
     if not done_marker_ok:
         reasons.append("query asks for data: [DONE] / [DONE], but expanded context does not contain that exact marker")
 
@@ -326,6 +391,26 @@ def evaluate_code_location_support(
             "reason": reason,
             "best_observation": best_line,
             "obligation_report": failing_contexts[0]["obligation_report"] if failing_contexts else {},
+        }
+
+    if failing_contexts:
+        best_context = sorted(
+            failing_contexts,
+            key=lambda o: (
+                -int(o.get("confidence", 0)),
+                -int(o.get("query_relevance", 0)),
+                str(o.get("source_path", "")),
+                int(o.get("line_start") or 0),
+            ),
+        )[0]
+        report = best_context["obligation_report"]
+        return {
+            "claim_type": "code_location",
+            "support_level": "insufficient",
+            "supported_by": [],
+            "reason": "Best source window was rejected because: " + report["reason"],
+            "best_observation": best_context,
+            "obligation_report": report,
         }
 
     return {

@@ -761,6 +761,143 @@ def test_code_claim_support_does_not_infer_ui_from_acquire_substring():
     )
 
 
+def test_read_only_async_backend_implementation_window_is_strong_evidence():
+    from src.agent_runtime.claim_support import evaluate_code_location_support
+    from src.agent_runtime.evidence_ledger import make_observation
+
+    query = (
+        "Inspect the backend implementation of async admission and workspace "
+        "routing."
+    )
+    observation = make_observation(
+        observation_id="backend-window",
+        kind="context_window",
+        source_path="src/agent_runtime/agent_admission.py",
+        line_start=20,
+        line_end=31,
+        content=(
+            "async def assess_admission_and_route_workspace(request):\n"
+            "    assessment = await assess_intent_complexity(request)\n"
+            "    return route_workspace_source(assessment)\n"
+        ),
+        source_tool="read_file_around",
+        query=query,
+    )
+
+    support = evaluate_code_location_support(
+        query=query,
+        observations=[observation],
+    )
+
+    assert support["support_level"] == "strong"
+    assert support["obligation_report"]["concrete_call_site_ok"] is True
+
+
+def test_function_that_runs_admission_does_not_imply_call_site_obligation():
+    from src.agent_runtime.claim_support import evaluate_code_location_support
+    from src.agent_runtime.evidence_ledger import make_observation
+
+    query = "Inspect the function that runs async admission routing."
+    observation = make_observation(
+        observation_id="admission-function",
+        kind="context_window",
+        source_path="src/agent_runtime/agent_admission.py",
+        line_start=70,
+        line_end=78,
+        content=(
+            "async def run_admission_routing(request):\n"
+            "    decision = await assess_admission(request)\n"
+            "    return route_admission(decision)\n"
+        ),
+        source_tool="read_file_around",
+        query=query,
+    )
+
+    support = evaluate_code_location_support(
+        query=query,
+        observations=[observation],
+    )
+
+    assert support["support_level"] == "strong"
+
+
+def test_explicit_execution_call_site_query_reports_missing_call_site():
+    from src.agent_runtime.claim_support import evaluate_code_location_support
+    from src.agent_runtime.evidence_ledger import make_observation
+
+    query = "Find the call site where admission routing is invoked."
+    observation = make_observation(
+        observation_id="definition-only",
+        kind="context_window",
+        source_path="src/agent_runtime/agent_admission.py",
+        line_start=70,
+        line_end=76,
+        content=(
+            "async def admission_routing(request):\n"
+            "    return build_admission_result(request)\n"
+        ),
+        source_tool="read_file_around",
+        query=query,
+    )
+
+    support = evaluate_code_location_support(
+        query=query,
+        observations=[observation],
+    )
+
+    assert support["support_level"] != "strong"
+    assert "missing execution call site" in support["reason"]
+
+
+def test_import_only_and_prompt_only_windows_are_not_implementation_evidence():
+    from src.agent_runtime.claim_support import evaluate_code_location_support
+    from src.agent_runtime.evidence_ledger import make_observation
+
+    query = "Inspect the admission routing implementation."
+    contents = (
+        "from src.agent_runtime.router import route_admission\n",
+        (
+            'ADMISSION_PROMPT = """Admission routing instructions: route '
+            'workspace requests to the admitted source."""\n'
+        ),
+    )
+
+    for index, content in enumerate(contents):
+        observation = make_observation(
+            observation_id=f"non-implementation-{index}",
+            kind="context_window",
+            source_path="src/agent_runtime/agent_admission.py",
+            line_start=100 + index * 20,
+            line_end=110 + index * 20,
+            content=content,
+            source_tool="read_file_around",
+            query=query,
+        )
+        support = evaluate_code_location_support(
+            query=query,
+            observations=[observation],
+        )
+
+        assert support["support_level"] != "strong"
+        assert "header/import/prompt-rules" in support["reason"]
+
+
+def test_evidence_ranking_uses_term_boundaries_for_acquire_and_runtime():
+    from src.agent_runtime.evidence_ledger import (
+        _call_site_score,
+        path_intent_score,
+    )
+
+    query = "Acquire details on runtime admission."
+    content = "async def assess_runtime():\n    return admission_result\n"
+
+    assert path_intent_score(
+        "src/agent_runtime/agent_admission.py",
+        query,
+    ) == 0
+    assert _call_site_score(content, query) == 0
+
+
 def test_code_worker_scopes_multi_goal_retrieval_concepts_to_step_objective(
     tmp_path,
 ):
