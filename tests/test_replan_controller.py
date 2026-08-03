@@ -10,6 +10,7 @@ from src.agent_runtime.execution_resolver import (
 from src.agent_runtime.plan_execution import (
     complete_step,
     initialize_plan_execution,
+    partial_step,
     request_replan,
     start_step,
     step_execution,
@@ -19,6 +20,7 @@ from src.agent_runtime.replan_controller import (
     begin_replanned_execution_from_request,
     build_task_replanner_prompt,
     exact_reusable_completed_step_ids,
+    exact_reusable_partial_step_ids,
     replan_task_from_request,
     run_task_plan_with_replanning,
 )
@@ -423,6 +425,38 @@ def test_unchanged_completed_step_is_reused_exactly():
         revised_state,
         "second",
     ).status == "ready"
+
+
+def test_unchanged_partial_evidence_is_preserved_through_replanning():
+    first = _step("first")
+    second = _step("second")
+    plan = _plan(first, second)
+    state = initialize_plan_execution(plan)
+    state = start_step(state, "first")
+    partial_result = WorkerResult(
+        capability="first_cap",
+        status="partial",
+        summary="Useful incomplete evidence.",
+        data={"artifact": "partial-a"},
+    )
+    state = partial_step(state, "first", output=partial_result)
+    request = request_replan(
+        state,
+        reason="Second step needs user-provided scope.",
+        trigger_step_id="second",
+    )
+
+    assert exact_reusable_partial_step_ids(state, plan) == ("first",)
+    revised = begin_replanned_execution_from_request(
+        state,
+        plan,
+        request,
+    )
+
+    preserved = step_execution(revised, "first")
+    assert preserved.status == "partial"
+    assert preserved.output is partial_result
+    assert step_execution(revised, "second").status == "ready"
 
 
 def test_stale_replan_request_is_rejected():

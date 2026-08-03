@@ -1181,7 +1181,7 @@ async def stream_multi_graph_coordinator_sse(
     })
     terminal_status = (
         "COMPLETED"
-        if control.orchestration.status == "completed"
+        if control.orchestration.status in {"completed", "partial"}
         else (
             "AWAITING_CLARIFICATION"
             if question is not None

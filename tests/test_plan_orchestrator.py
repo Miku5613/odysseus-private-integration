@@ -90,7 +90,7 @@ def _resolved_payload(surface_id):
     }
 
 
-def _runner(capability, calls, *, fail=False, clarify=False):
+def _runner(capability, calls, *, fail=False, clarify=False, partial=False):
     def run(handoff, *, session_id=None):
         calls.append(
             (
@@ -114,6 +114,15 @@ def _runner(capability, calls, *, fail=False, clarify=False):
                 status="needs_clarification",
                 summary="Need more scope.",
                 missing_information=("scope",),
+            )
+
+        if partial:
+            return WorkerResult(
+                capability=capability,
+                status="partial",
+                summary=f"{capability} partial evidence",
+                data={"artifact": f"{capability}-partial"},
+                missing_information=("uncovered evidence",),
             )
 
         return WorkerResult(
@@ -519,6 +528,50 @@ def test_unsupported_resolution_is_real_step_failure_but_independent_work_contin
         result.state,
         "independent",
     ).status == "completed"
+
+
+def test_partial_step_preserves_evidence_and_independent_steps_continue():
+    partial = _step("partial")
+    independent_a = _step("independent_a")
+    independent_b = _step("independent_b")
+    dependent = _step("dependent", depends_on=("partial",))
+    surfaces = (
+        _surface("partial_cap"),
+        _surface("independent_a_cap"),
+        _surface("independent_b_cap"),
+    )
+    calls = []
+
+    result = asyncio.run(
+        run_task_plan(
+            _plan(partial, independent_a, independent_b, dependent),
+            resolver_model=_ResolverModel([
+                ("Execute partial.", _resolved_payload(surfaces[0].id)),
+                ("Execute independent_a.", _resolved_payload(surfaces[1].id)),
+                ("Execute independent_b.", _resolved_payload(surfaces[2].id)),
+            ]),
+            surfaces=surfaces,
+            worker_runners={
+                "partial_cap": _runner("partial_cap", calls, partial=True),
+                "independent_a_cap": _runner("independent_a_cap", calls),
+                "independent_b_cap": _runner("independent_b_cap", calls),
+            },
+        )
+    )
+
+    assert result.status == "partial"
+    assert result.execution_order == (
+        "partial",
+        "independent_a",
+        "independent_b",
+    )
+    partial_state = step_execution(result.state, "partial")
+    assert partial_state.status == "partial"
+    assert partial_state.output.data["artifact"] == "partial_cap-partial"
+    assert step_execution(result.state, "independent_a").status == "completed"
+    assert step_execution(result.state, "independent_b").status == "completed"
+    assert step_execution(result.state, "dependent").status == "blocked"
+    assert result.replan_request is None
 
 
 def test_unbound_legacy_execution_is_not_mislabeled_as_semantic_failure():

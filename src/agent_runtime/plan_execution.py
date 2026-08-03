@@ -19,12 +19,14 @@ StepStatus = Literal[
     "ready",
     "running",
     "completed",
+    "partial",
     "failed",
     "blocked",
 ]
 
 _TERMINAL_STATUSES = {
     "completed",
+    "partial",
     "failed",
     "blocked",
 }
@@ -65,6 +67,7 @@ class ReplanRequest:
     plan_fingerprint: str
     trigger_step_id: str | None
     completed_step_ids: tuple[str, ...]
+    partial_step_ids: tuple[str, ...]
     failed_step_ids: tuple[str, ...]
     blocked_step_ids: tuple[str, ...]
 
@@ -180,6 +183,7 @@ def _validate_execution_state(
         "ready",
         "running",
         "completed",
+        "partial",
         "failed",
         "blocked",
     }
@@ -227,19 +231,25 @@ def _refresh_waiting_statuses(
         for step_id, step_state in states.items()
         if step_state.status == "failed"
     )
+    partial = tuple(
+        step_id
+        for step_id, step_state in states.items()
+        if step_state.status == "partial"
+    )
+    unavailable = (*failed, *partial)
 
     ready = set(
         ready_step_ids(
             state.plan,
             completed_step_ids=completed,
-            failed_step_ids=failed,
+            failed_step_ids=unavailable,
         )
     )
     blocked = set(
         blocked_step_ids(
             state.plan,
             completed_step_ids=completed,
-            failed_step_ids=failed,
+            failed_step_ids=unavailable,
         )
     )
 
@@ -251,6 +261,7 @@ def _refresh_waiting_statuses(
         if current.status in {
             "running",
             "completed",
+            "partial",
             "failed",
         }:
             refreshed.append(current)
@@ -425,6 +436,33 @@ def complete_step(
     )
 
 
+def partial_step(
+    state: PlanExecutionState,
+    step_id: str,
+    *,
+    output: Any,
+    artifact_refs: tuple[str, ...] | list[str] = (),
+) -> PlanExecutionState:
+    """Preserve useful incomplete evidence without unlocking dependents."""
+
+    current = step_execution(state, step_id)
+    if current.status != "running":
+        raise ValueError(
+            f"Step {current.step_id} cannot become partial from "
+            f"status {current.status}"
+        )
+    return _replace_step_state(
+        state,
+        replace(
+            current,
+            status="partial",
+            output=output,
+            artifact_refs=_clean_artifact_refs(artifact_refs),
+            error="",
+        ),
+    )
+
+
 def fail_step(
     state: PlanExecutionState,
     step_id: str,
@@ -489,6 +527,11 @@ def request_replan(
         for step_state in state.step_states
         if step_state.status == "completed"
     )
+    partial = tuple(
+        step_state.step_id
+        for step_state in state.step_states
+        if step_state.status == "partial"
+    )
     failed = tuple(
         step_state.step_id
         for step_state in state.step_states
@@ -508,6 +551,7 @@ def request_replan(
         ),
         trigger_step_id=normalized_trigger,
         completed_step_ids=completed,
+        partial_step_ids=partial,
         failed_step_ids=failed,
         blocked_step_ids=blocked,
     )
@@ -529,8 +573,8 @@ def begin_replanned_execution(
 ) -> PlanExecutionState:
     """Start a new plan revision with explicit, safe output reuse.
 
-    Completed outputs are never reused implicitly. A caller may explicitly
-    preserve a completed step only when the revised plan contains the exact
+    Completed and partial outputs are never reused implicitly. A caller may
+    explicitly preserve either only when the revised plan contains the exact
     same semantic PlanStep definition.
     """
 
@@ -583,9 +627,9 @@ def begin_replanned_execution(
                 "in the previous plan"
             )
 
-        if previous_execution.status != "completed":
+        if previous_execution.status not in {"completed", "partial"}:
             raise ValueError(
-                f"Reusable step {step_id} must be completed"
+                f"Reusable step {step_id} must be completed or partial"
             )
 
         try:
@@ -611,7 +655,7 @@ def begin_replanned_execution(
 
         new_by_id[step_id] = replace(
             new_by_id[step_id],
-            status="completed",
+            status=previous_execution.status,
             output=previous_execution.output,
             artifact_refs=(
                 previous_execution.artifact_refs
@@ -649,6 +693,7 @@ __all__ = [
     "complete_step",
     "fail_step",
     "initialize_plan_execution",
+    "partial_step",
     "request_replan",
     "start_step",
     "step_execution",

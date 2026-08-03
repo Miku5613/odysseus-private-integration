@@ -34,6 +34,7 @@ from src.agent_runtime.worker_dispatcher import WorkerRunner
 
 PlanRunStatus = Literal[
     "completed",
+    "partial",
     "failed",
     "needs_replan",
     "execution_unavailable",
@@ -290,6 +291,10 @@ async def run_task_plan(
         )
 
         if not ready_ids:
+            partial_ids = _status_ids(
+                current,
+                "partial",
+            )
             failed_ids = _status_ids(
                 current,
                 "failed",
@@ -303,7 +308,7 @@ async def run_task_plan(
                 "running",
             )
 
-            if failed_ids or blocked_ids:
+            if failed_ids:
                 return PlanOrchestrationResult(
                     state=current,
                     status="failed",
@@ -312,6 +317,32 @@ async def run_task_plan(
                     message=(
                         "Plan reached a terminal failure boundary. "
                         f"failed={list(failed_ids)}, "
+                        f"blocked={list(blocked_ids)}"
+                    ),
+                )
+
+            if partial_ids:
+                return PlanOrchestrationResult(
+                    state=current,
+                    status="partial",
+                    worker_results=tuple(worker_results),
+                    execution_order=tuple(execution_order),
+                    message=(
+                        "Plan reached a truthful partial boundary after all "
+                        "independent runnable steps finished. "
+                        f"partial={list(partial_ids)}, "
+                        f"blocked={list(blocked_ids)}"
+                    ),
+                )
+
+            if blocked_ids:
+                return PlanOrchestrationResult(
+                    state=current,
+                    status="failed",
+                    worker_results=tuple(worker_results),
+                    execution_order=tuple(execution_order),
+                    message=(
+                        "Plan reached a terminal blocked boundary. "
                         f"blocked={list(blocked_ids)}"
                     ),
                 )
@@ -515,7 +546,7 @@ async def run_task_plan(
                         "COMPLETED"
                         if result.status == "completed"
                         else (
-                            "RUNNING"
+                            "PARTIAL"
                             if result.status == "partial"
                             else "FAILED"
                         )

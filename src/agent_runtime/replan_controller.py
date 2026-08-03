@@ -321,6 +321,9 @@ def build_task_replanner_prompt(
                 "completed_step_ids": list(
                     request.completed_step_ids
                 ),
+                "partial_step_ids": list(
+                    request.partial_step_ids
+                ),
                 "failed_step_ids": list(
                     request.failed_step_ids
                 ),
@@ -445,6 +448,26 @@ def exact_reusable_completed_step_ids(
     )
 
 
+def exact_reusable_partial_step_ids(
+    previous_state: PlanExecutionState,
+    revised_plan: TaskPlan,
+) -> tuple[str, ...]:
+    """Return partial evidence steps whose semantic definition is unchanged."""
+
+    reusable: list[str] = []
+    for execution in previous_state.step_states:
+        if execution.status != "partial":
+            continue
+        try:
+            previous_step = previous_state.plan.step_by_id(execution.step_id)
+            revised_step = revised_plan.step_by_id(execution.step_id)
+        except KeyError:
+            continue
+        if previous_step == revised_step:
+            reusable.append(execution.step_id)
+    return tuple(reusable)
+
+
 def begin_replanned_execution_from_request(
     previous_state: PlanExecutionState,
     revised_plan: TaskPlan,
@@ -457,10 +480,14 @@ def begin_replanned_execution_from_request(
         request,
     )
     reusable = (
-        exact_reusable_completed_step_ids(
+        *exact_reusable_completed_step_ids(
             previous_state,
             revised_plan,
-        )
+        ),
+        *exact_reusable_partial_step_ids(
+            previous_state,
+            revised_plan,
+        ),
     )
 
     return begin_replanned_execution(
@@ -668,6 +695,7 @@ __all__ = [
     "begin_replanned_execution_from_request",
     "build_task_replanner_prompt",
     "exact_reusable_completed_step_ids",
+    "exact_reusable_partial_step_ids",
     "replan_task_from_request",
     "replan_task_from_request_async",
     "run_task_plan_with_replanning",
