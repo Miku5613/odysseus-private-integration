@@ -13,6 +13,14 @@ This version preserves the upstream Odysseus workspace and adds two independent 
 
 ## Quick Startup Guide
 
+### 0. Open the Folder you want the project to install
+
+Following shell commands would be installed in the opened file directory. For example:
+
+```powershell
+cd D:\AI\odysseus
+```
+
 ### 1. Clone this fork
 
 ```powershell
@@ -28,9 +36,7 @@ On Windows, run:
 & '.\Express Installation.bat'
 ```
 
-The installer sets up the mandatory Python environment and checks what is already present before showing any prompt. Installed compatible components are skipped. A missing optional component gets an **install** prompt; a detected incompatible or outdated component gets a separate **update** prompt. It does **not** install or offer any model library.
-
-At the end, the installer can create `Quick Launch Odysseus.bat` from the tracked portable launcher template. If the launcher already exists and matches the template, it is skipped without asking; if its template changed, the installer asks whether to update it.
+The installer sets up the mandatory Python environment, then separately asks whether to install LangGraph, OpenCode, and upstream optional feature extras. It does **not** install or offer any model library.
 
 To inspect the machine without installing anything:
 
@@ -40,15 +46,21 @@ To inspect the machine without installing anything:
 
 ### 3. Configure a model provider
 
-Odysseus does not bundle a model. For the quickest local start, this fork recommends [Ollama](https://ollama.com/) because it has a small setup surface. Install it manually on Windows:
+Odysseus does not bundle a model. For the quickest local start, this fork recommends [Ollama](https://ollama.com/) because it has a small setup surface. Install it manually on Windows
 
 ```powershell
 winget install --id Ollama.Ollama -e
-ollama pull qwen3:8b
 ```
 
 Ollama is a recommendation, not an Odysseus dependency, and the express installer never installs it. LM Studio or any compatible local/remote provider can be configured instead.
 
+You will also need to download a suitable LLM model for your needs. Check the inbuilt Odysseus cookbook for hardware-specific recommended models directly from HuggingFace. Alternatively, you can download any ollama listed models directly from shell
+
+```powershell
+ollama run llama3
+```
+
+This installs the specific LLM model llama3 in your Ollama model library, you replace the LLM id with any desired one you want.
 ### 4. Start Odysseus
 
 ```powershell
@@ -103,7 +115,6 @@ LangGraph is integrated as a native Odysseus orchestration layer rather than a s
 6. **Final synthesis** uses the selected synthesis model to write a non-empty user-facing answer from verified worker results.
 7. **Checkpointing** stores run state, decisions, step attempts, events, and recovery data in SQLite so interrupted work can be inspected or resumed safely.
 
-<!-- Suggested image: Live Task Planner showing a multi-step LangGraph run. -->
 
 ### LangGraph settings
 
@@ -151,7 +162,6 @@ It does not import LangGraph and does not use LangGraph or Legacy as a hidden fa
 5. Permission requests, tool activity, todos, deltas, completion, cancellation, and errors are normalized into Odysseus events.
 6. The final non-empty answer and native session identifiers are persisted to the Odysseus transcript.
 
-<!-- Suggested image: OpenCode response stream and Session Manager launch control. -->
 
 ### OpenCode settings and controls
 
@@ -162,6 +172,9 @@ It does not import LangGraph and does not use LangGraph or Legacy as a hidden fa
 - **Start, stop, restart, health, logs, cancellation, and conversation reset** are exposed through the adapter rather than requiring a separately managed server terminal.
 
 ### Session Manager and TUI
+
+<img width="1159" height="785" alt="image" src="https://github.com/user-attachments/assets/ff535103-c04b-4af6-accc-18e4961e8b93" />
+
 
 The **Open Session Manager** action opens an authenticated native terminal view for the current Odysseus/OpenCode context. It supports:
 
@@ -213,19 +226,7 @@ Creates `venv`, installs `requirements.txt`, and runs first-time setup. It then 
 - the OpenCode CLI (and Node.js only if that approved path requires it);
 - upstream optional document, speech, search, and PDF extras.
 
-It never offers or installs Ollama, LM Studio, another model library, Docker Desktop, WSL, GPU drivers, or vendor API credentials. Optional install questions appear only for missing components. Update questions use the explicit wording **“Do you want to update the current version of …?”** and appear only when the installed version does not satisfy the required version or OpenCode reports a newer registry version.
-
-### Portable quick launcher
-
-The express installer can create `Quick Launch Odysseus.bat` in the repository root from `scripts/portable-quick-launch-template.bat`. It is portable with the repository because every path is resolved relative to the batch file.
-
-Every launch performs a lightweight preflight:
-
-- required application files, Python 3.11+, `venv`, mandatory Python requirements, data-directory writeability, SQLite access, and port 7000;
-- optional LangGraph requirements, OpenCode CLI/version state, upstream optional extras, ChromaDB reachability, and local model-endpoint reachability;
-- immediate controlled exit naming the failed dependency when a mandatory check fails;
-- one confirmation before booting when optional components are absent, outdated, or unreachable;
-- direct startup with `venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 7000` after preflight passes.
+It never offers or installs Ollama, LM Studio, another model library, Docker Desktop, WSL, GPU drivers, or vendor API credentials.
 
 ## Configuration Reference
 
