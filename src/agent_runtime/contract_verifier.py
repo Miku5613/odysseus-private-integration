@@ -4,6 +4,20 @@ import re
 from typing import Any
 
 from src.agent_runtime.exact_terms import exact_term_present
+from src.agent_runtime.claim_support import is_implementation_source_window
+
+
+_DIMENSION_STOP_WORDS = frozenset({
+    "and",
+    "code",
+    "implementation",
+    "project",
+    "responsibility",
+    "runtime",
+    "source",
+    "system",
+    "worker",
+})
 
 
 def _norm(text: str | None) -> str:
@@ -16,6 +30,79 @@ def _all_observation_text(observations: list[dict[str, Any]] | None) -> str:
 
 def _paths(observations: list[dict[str, Any]] | None) -> list[str]:
     return [str(o.get("source_path") or "") for o in (observations or []) if o.get("source_path")]
+
+
+def _dimension_terms(value: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        term
+        for term in re.findall(r"[a-z][a-z0-9]{2,}", _norm(value))
+        if term not in _DIMENSION_STOP_WORDS
+    ))
+
+
+def _term_pattern(term: str) -> re.Pattern[str]:
+    stem = term
+    if term.endswith("ing") and len(term) > 6:
+        stem = term[:-3]
+        if len(stem) > 3 and stem[-1] == stem[-2]:
+            stem = stem[:-1]
+    elif term.endswith("ion") and len(term) > 6:
+        stem = term[:-3]
+    elif term.endswith("ed") and len(term) > 5:
+        stem = term[:-2]
+    elif term.endswith("s") and len(term) > 4:
+        stem = term[:-1]
+    return re.compile(rf"(?<![a-z0-9]){re.escape(stem)}[a-z0-9]*(?![a-z0-9])")
+
+
+def _evidence_dimension_status(
+    term: str,
+    observations: list[dict[str, Any]],
+) -> tuple[bool, str, list[str]]:
+    required = _dimension_terms(term)
+    if not required:
+        return False, "dimension has no concrete admitted evidence terms", []
+
+    matched: set[str] = set()
+    supported_by: list[str] = []
+    for observation in observations:
+        direct_document_read = bool(
+            observation.get("kind") == "context_window"
+            and observation.get("source_tool") == "read_file"
+            and observation.get("source_authority") == "document"
+            and str(observation.get("content") or "").strip()
+        )
+        if not (
+            is_implementation_source_window(observation)
+            or direct_document_read
+        ):
+            continue
+        text = _norm(
+            str(observation.get("source_path") or "")
+            + " "
+            + str(observation.get("content") or "")
+        )
+        observation_matches = {
+            value
+            for value in required
+            if _term_pattern(value).search(text)
+        }
+        if observation_matches:
+            matched.update(observation_matches)
+            observation_id = str(
+                observation.get("observation_id") or ""
+            ).strip()
+            if observation_id and observation_id not in supported_by:
+                supported_by.append(observation_id)
+
+    missing = [value for value in required if value not in matched]
+    if missing:
+        return (
+            False,
+            "missing admitted dimension term(s): " + ", ".join(missing),
+            supported_by,
+        )
+    return True, "grounded implementation evidence covers this dimension", supported_by
 
 
 def should_avoid_runtime_sources(contract: dict[str, Any] | None, query: str | None) -> bool:
@@ -156,6 +243,12 @@ def obligation_statuses(
             ok = bool("save_assistant_response(" in all_text or "message_saved" in all_text)
             reason = "save/event evidence found" if ok else "save/event evidence missing"
 
+        elif kind == "evidence_dimension":
+            ok, reason, supported_by = _evidence_dimension_status(
+                term,
+                obs,
+            )
+
         else:
             ok = (claim_support or {}).get("support_level") == "strong"
             reason = "delegated to claim support"
@@ -163,6 +256,8 @@ def obligation_statuses(
         new_ob = dict(ob)
         new_ob["status"] = "satisfied" if ok else "missing"
         new_ob["reason"] = reason
+        if kind == "evidence_dimension":
+            new_ob["supported_by"] = supported_by
         statuses.append(new_ob)
 
     return statuses

@@ -10,6 +10,7 @@ from src.agent_runtime.plan_execution import (
     ReplanRequest,
     complete_step,
     fail_step,
+    partial_step,
     request_replan,
 )
 from src.agent_runtime.supervisor_contracts import (
@@ -267,10 +268,17 @@ def apply_worker_result_to_plan_state(
             worker_result=result,
         )
 
-    if result.status in {
-        "needs_clarification",
-        "partial",
-    }:
+    if result.status == "partial":
+        return StepExecutionOutcome(
+            state=partial_step(
+                state,
+                step_id,
+                output=result,
+            ),
+            worker_result=result,
+        )
+
+    if result.status == "needs_clarification":
         replan = request_replan(
             state,
             reason=_clarification_reason(result),

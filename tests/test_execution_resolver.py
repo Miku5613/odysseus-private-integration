@@ -587,6 +587,9 @@ def test_plan_step_remains_backend_independent():
         "uses_dependency_state",
         "requires_external_state",
         "requires_mutation",
+        "requested_sources",
+        "excluded_sources",
+        "retrieval_concepts",
     }
 
 

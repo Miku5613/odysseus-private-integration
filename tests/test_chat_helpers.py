@@ -381,6 +381,7 @@ def test_successful_langgraph_save_excludes_progress_from_transcript():
     )
 
     message = sess.history[-1]
+    assert len(sess.history) == 1
     assert message.content == "One final synthesized answer."
     assert message.metadata["model"] == "qwen3:8b"
     assert "tool_events" not in message.metadata

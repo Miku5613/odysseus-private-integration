@@ -175,6 +175,9 @@ def _plan_payload(plan: TaskPlan) -> dict[str, Any]:
                 "uses_dependency_state": step.uses_dependency_state,
                 "requires_external_state": step.requires_external_state,
                 "requires_mutation": step.requires_mutation,
+                "requested_sources": list(step.requested_sources),
+                "excluded_sources": list(step.excluded_sources),
+                "retrieval_concepts": list(step.retrieval_concepts),
             }
             for step in plan.steps
         ],
@@ -205,6 +208,51 @@ def _bounded_value(
         "original_chars": len(serialized),
         "full_value_retained_by_runtime_artifact_policy": True,
     }
+
+
+def _without_redundant_response_steps(plan: TaskPlan) -> TaskPlan:
+    """Leave final answer composition to the coordinator's bounded synthesis.
+
+    A terminal dependency-only step that merely asks for the final response
+    duplicates the coordinator stage and expands compact worker results back
+    into a much larger dependency prompt.  Substantive dependency reasoning
+    steps remain untouched.
+    """
+
+    depended_on = {
+        dependency
+        for step in plan.steps
+        for dependency in step.depends_on
+    }
+    removable_ids = {
+        step.id
+        for step in plan.steps
+        if step.id not in depended_on
+        and step.depends_on
+        and step.uses_dependency_state
+        and not step.requires_external_state
+        and not step.requires_mutation
+        and any(
+            marker in step.objective.lower()
+            for marker in (
+                "final comparison",
+                "final answer",
+                "final response",
+                "final synthesis",
+                "synthesizing the findings",
+                "synthesise the findings",
+                "synthesize the findings",
+            )
+        )
+    }
+    if not removable_ids or len(removable_ids) == len(plan.steps):
+        return plan
+    return replace(
+        plan,
+        steps=tuple(
+            step for step in plan.steps if step.id not in removable_ids
+        ),
+    )
 
 
 def _worker_payload(result: WorkerResult) -> dict[str, Any]:
@@ -242,6 +290,8 @@ def _execution_payload(
                 "objective": step.objective,
                 "depends_on": list(step.depends_on),
                 "uses_dependency_state": step.uses_dependency_state,
+                "requested_sources": list(step.requested_sources),
+                "excluded_sources": list(step.excluded_sources),
                 "status": execution.status,
                 "output": output,
                 "artifact_refs": list(execution.artifact_refs),
@@ -256,6 +306,41 @@ def _execution_payload(
         "revisions_applied": control.revisions_applied,
         "execution_order": list(orchestration.execution_order),
         "steps": step_payloads,
+    }
+
+
+def _authoritative_plan_payload(
+    control: ReplanControlResult,
+    *,
+    plan_id: str,
+) -> dict[str, Any]:
+    plan = control.orchestration.state.plan
+    execution = _execution_payload(control)
+    steps = []
+    for item in execution["steps"]:
+        output = item.get("output")
+        worker_label = ""
+        result_summary = ""
+        if isinstance(output, dict):
+            worker_label = str(output.get("capability") or "")
+            result_summary = str(output.get("summary") or "")
+        steps.append({
+            **item,
+            "worker_label": worker_label,
+            "progress": (
+                result_summary if item.get("status") == "running" else ""
+            ),
+            "result_summary": result_summary,
+        })
+    return {
+        "runtime": RUNTIME_VERSION,
+        "plan_id": plan_id,
+        "revision": control.orchestration.state.revision,
+        "status": control.orchestration.status,
+        "objective": plan.objective,
+        "reasoning_summary": plan.reasoning_summary,
+        "detail": control.orchestration.message,
+        "steps": steps,
     }
 
 
@@ -306,6 +391,36 @@ def _synthesis_prompt(
     plan: TaskPlan,
     control: ReplanControlResult,
 ) -> str:
+    compact_steps = []
+    for step in control.orchestration.state.plan.steps:
+        execution = next(
+            item
+            for item in control.orchestration.state.step_states
+            if item.step_id == step.id
+        )
+        result = execution.output
+        compact_steps.append({
+            "id": step.id,
+            "objective": step.objective,
+            "status": execution.status,
+            "summary": (
+                result.summary[:6000]
+                if isinstance(result, WorkerResult)
+                else str(result or "")[:3000]
+            ),
+            "missing_information": (
+                list(result.missing_information)
+                if isinstance(result, WorkerResult)
+                else []
+            ),
+            "error": (
+                result.error
+                if isinstance(result, WorkerResult)
+                else execution.error
+            ),
+            "artifact_refs": list(execution.artifact_refs),
+        })
+
     prompt = "\n".join([
         "You are the final-response stage of the Odysseus multi-graph coordinator.",
         "",
@@ -328,12 +443,21 @@ def _synthesis_prompt(
         "",
         "EXECUTION RESULTS:",
         json.dumps(
-            _execution_payload(control),
+            {
+                "status": control.orchestration.status,
+                "message": control.orchestration.message,
+                "stopped_reason": control.stopped_reason,
+                "revisions_applied": control.revisions_applied,
+                "execution_order": list(
+                    control.orchestration.execution_order
+                ),
+                "steps": compact_steps,
+            },
             ensure_ascii=False,
             default=str,
         ),
     ])
-    max_prompt_chars = 120_000
+    max_prompt_chars = 48_000
     if len(prompt) <= max_prompt_chars:
         return prompt
     return (
@@ -789,10 +913,17 @@ async def stream_multi_graph_coordinator_sse(
         max_tokens=900,
         llm_caller=llm_caller,
     )
+    synthesis_token_budget = (
+        max_tokens
+        if isinstance(max_tokens, int)
+        and not isinstance(max_tokens, bool)
+        and max_tokens >= 8192
+        else 8192
+    )
     synthesizer = final_model or _RuntimeFallbackModel(
         role_candidates("final_synthesis"),
         prompt_type=prompt_type,
-        max_tokens=max_tokens,
+        max_tokens=synthesis_token_budget,
         temperature=temperature,
         llm_caller=llm_caller,
     )
@@ -806,6 +937,7 @@ async def stream_multi_graph_coordinator_sse(
             assessment,
             model=planner,
         )
+        plan = _without_redundant_response_steps(plan)
 
         if len(plan.steps) > max_plan_steps:
             raise ValueError(
@@ -856,6 +988,7 @@ async def stream_multi_graph_coordinator_sse(
         "type": "plan_update",
         "data": {
             "runtime": RUNTIME_VERSION,
+            "plan_id": lifecycle.identity.run_id,
             "revision": 1,
             "status": "planned",
             **_plan_payload(plan),
@@ -1096,6 +1229,13 @@ async def stream_multi_graph_coordinator_sse(
     ))
     for frame in frames:
         yield frame
+    yield _frame(lifecycle.event({
+        "type": "plan_update",
+        "data": _authoritative_plan_payload(
+            control,
+            plan_id=lifecycle.identity.run_id,
+        ),
+    }))
 
     question = _clarification_question(control)
     if question:
@@ -1176,7 +1316,7 @@ async def stream_multi_graph_coordinator_sse(
     })
     terminal_status = (
         "COMPLETED"
-        if control.orchestration.status == "completed"
+        if control.orchestration.status in {"completed", "partial"}
         else (
             "AWAITING_CLARIFICATION"
             if question is not None

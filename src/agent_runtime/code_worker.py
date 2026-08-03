@@ -200,6 +200,39 @@ _GENERAL_EVIDENCE_TOOLS = frozenset({
 })
 
 
+def _handoff_semantic_dimensions(
+    handoff: WorkerHandoff,
+) -> tuple[str, ...]:
+    """Preserve explicit responsibility dimensions beyond planner concepts."""
+
+    dimensions = list(
+        handoff.context.get("retrieval_concepts", ()) or ()
+    )
+    if not dimensions:
+        return ()
+    objective = handoff.objective.lower()
+    aliases = (
+        (("planning", "planner"), "plan"),
+        (("coordination", "coordinator", "orchestration"), "coordinat"),
+        (("replanning", "replan"), "replan"),
+    )
+    for phrases, dimension in aliases:
+        already_covered = any(
+            dimension in str(existing).lower()
+            for existing in dimensions
+        )
+        if (
+            not already_covered
+            and any(phrase in objective for phrase in phrases)
+        ):
+            dimensions.append(dimension)
+    return tuple(dict.fromkeys(
+        str(value).strip()
+        for value in dimensions
+        if str(value).strip()
+    ))
+
+
 def _finalize_recovered_step(
     handoff: WorkerHandoff,
     *,
@@ -218,7 +251,10 @@ def _finalize_recovered_step(
     produces the step answer and explicitly verifies semantic fulfillment.
     """
 
-    task_contract = build_task_contract(handoff.objective)
+    task_contract = build_task_contract(
+        handoff.objective,
+        semantic_dimensions=_handoff_semantic_dimensions(handoff),
+    )
     contract_report = contract_support_report(
         contract=task_contract,
         observations=ledger_observations,
@@ -229,6 +265,17 @@ def _finalize_recovered_step(
         has_strong_claim_support(claim_support)
         and contract_ready
     )
+    dimension_statuses = [
+        item
+        for item in contract_report.get("obligations", ())
+        if item.get("kind") == "evidence_dimension"
+    ]
+    missing_dimensions = [
+        str(item.get("term") or "").strip()
+        for item in dimension_statuses
+        if item.get("status") != "satisfied"
+        and str(item.get("term") or "").strip()
+    ]
 
     base_data = {
         "objective": handoff.objective,
@@ -241,6 +288,8 @@ def _finalize_recovered_step(
         "claim_support_reason": claim_support.get("reason"),
         "contract_support": contract_report.get("support_level"),
         "contract_support_reason": contract_report.get("reason"),
+        "evidence_dimension_coverage": dimension_statuses,
+        "missing_evidence_dimensions": missing_dimensions,
         "grounded_finalizer_used": False,
         "task_fulfillment_complete": False,
     }
@@ -252,6 +301,10 @@ def _finalize_recovered_step(
             summary=fallback_summary,
             data=base_data,
             evidence=tuple(evidence),
+            missing_information=tuple(
+                f"Missing evidence dimension: {dimension}"
+                for dimension in missing_dimensions
+            ),
         )
 
     candidates = tuple(finalizer_candidates or ())
@@ -270,14 +323,22 @@ def _finalize_recovered_step(
             ),
         )
 
+    prioritized_evidence = sorted(
+        evidence,
+        key=lambda item: {
+            "read_file_around": 0,
+            "read_file": 1,
+            "grep": 2,
+        }.get(str(item.get("tool") or ""), 3),
+    )
     raw_tool_evidence = "\n\n---\n\n".join(
         (
             f"{item.get('tool')}: "
             f"{item.get('args')}\n"
             f"{item.get('output')}"
         )
-        for item in evidence
-    )[:16000]
+        for item in prioritized_evidence
+    )[:24000]
 
     prompt = build_grounded_worker_finalizer_prompt(
         objective=handoff.objective,
@@ -290,7 +351,7 @@ def _finalize_recovered_step(
         contract_report=format_contract_report(contract_report),
         observations_summary=format_observations(
             ledger_observations,
-            limit=16,
+            limit=10,
         ),
         raw_tool_evidence=raw_tool_evidence,
     )
@@ -305,8 +366,10 @@ def _finalize_recovered_step(
                 }
             ],
             temperature=0.0,
-            max_tokens=2200,
+            max_tokens=1600,
             prompt_type=finalizer_prompt_type,
+            structured_output=True,
+            reasoning_effort="none",
             response_validator=(
                 parse_grounded_worker_finalizer_response
             ),
@@ -513,6 +576,9 @@ def run_code_worker(
         "workspace": workspace,
         "session_id": session_id,
         "owner": handoff.context.get("owner"),
+        "semantic_dimensions": tuple(
+            handoff.context.get("retrieval_concepts", ()) or ()
+        ),
     }
     try:
         signature = inspect.signature(stream_factory)

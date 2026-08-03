@@ -19,6 +19,9 @@ from src.agent_runtime.plan_orchestrator import (
     PlanOrchestrationResult,
     run_task_plan,
 )
+from src.agent_runtime.plan_source_contract import (
+    constrain_replanned_sources,
+)
 from src.agent_runtime.step_execution import (
     StepExecutionContext,
     StepSurfaceExecutor,
@@ -112,6 +115,9 @@ def _step_payload(
         "requires_mutation": (
             step.requires_mutation
         ),
+        "requested_sources": list(step.requested_sources),
+        "excluded_sources": list(step.excluded_sources),
+        "retrieval_concepts": list(step.retrieval_concepts),
     }
 
 
@@ -229,6 +235,15 @@ def build_task_replanner_prompt(
                 "uses_dependency_state": False,
                 "requires_external_state": False,
                 "requires_mutation": False,
+                "requested_sources": [
+                    "previously admitted source required by this step"
+                ],
+                "excluded_sources": [
+                    "sources forbidden by the current plan"
+                ],
+                "retrieval_concepts": [
+                    "semantic evidence concept for this step"
+                ],
             }
         ],
         "reasoning_summary": (
@@ -264,7 +279,11 @@ def build_task_replanner_prompt(
         "10. Planning never grants permission to mutate persistent or external "
         "state.",
         "11. work_domains remain semantic labels only.",
-        "12. Return only one JSON object matching the TaskPlan schema.",
+        "12. Preserve each step's admitted requested_sources and "
+        "excluded_sources. A revision must never widen to a source absent from "
+        "the current plan.",
+        "13. Keep retrieval_concepts scoped to the revised step objective.",
+        "14. Return only one JSON object matching the TaskPlan schema.",
         "",
         "ORIGINAL USER REQUEST:",
         normalized_query,
@@ -301,6 +320,9 @@ def build_task_replanner_prompt(
                 ),
                 "completed_step_ids": list(
                     request.completed_step_ids
+                ),
+                "partial_step_ids": list(
+                    request.partial_step_ids
                 ),
                 "failed_step_ids": list(
                     request.failed_step_ids
@@ -358,8 +380,9 @@ def replan_task_from_request(
             "replan_task_from_request_async"
         )
 
-    return parse_task_plan_response(
-        response
+    return constrain_replanned_sources(
+        state.plan,
+        parse_task_plan_response(response),
     )
 
 
@@ -382,7 +405,10 @@ async def replan_task_from_request_async(
     return await invoke_structured_model_async(
         model,
         prompt,
-        parse_task_plan_response,
+        lambda response: constrain_replanned_sources(
+            state.plan,
+            parse_task_plan_response(response),
+        ),
     )
 
 
@@ -422,6 +448,26 @@ def exact_reusable_completed_step_ids(
     )
 
 
+def exact_reusable_partial_step_ids(
+    previous_state: PlanExecutionState,
+    revised_plan: TaskPlan,
+) -> tuple[str, ...]:
+    """Return partial evidence steps whose semantic definition is unchanged."""
+
+    reusable: list[str] = []
+    for execution in previous_state.step_states:
+        if execution.status != "partial":
+            continue
+        try:
+            previous_step = previous_state.plan.step_by_id(execution.step_id)
+            revised_step = revised_plan.step_by_id(execution.step_id)
+        except KeyError:
+            continue
+        if previous_step == revised_step:
+            reusable.append(execution.step_id)
+    return tuple(reusable)
+
+
 def begin_replanned_execution_from_request(
     previous_state: PlanExecutionState,
     revised_plan: TaskPlan,
@@ -434,10 +480,14 @@ def begin_replanned_execution_from_request(
         request,
     )
     reusable = (
-        exact_reusable_completed_step_ids(
+        *exact_reusable_completed_step_ids(
             previous_state,
             revised_plan,
-        )
+        ),
+        *exact_reusable_partial_step_ids(
+            previous_state,
+            revised_plan,
+        ),
     )
 
     return begin_replanned_execution(
@@ -645,6 +695,7 @@ __all__ = [
     "begin_replanned_execution_from_request",
     "build_task_replanner_prompt",
     "exact_reusable_completed_step_ids",
+    "exact_reusable_partial_step_ids",
     "replan_task_from_request",
     "replan_task_from_request_async",
     "run_task_plan_with_replanning",

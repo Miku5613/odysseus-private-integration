@@ -13,6 +13,7 @@ from src.agent_runtime.intent_complexity import (
 )
 from src.agent_runtime.multi_graph_coordinator import (
     _RuntimeFallbackModel,
+    _without_redundant_response_steps,
     stream_multi_graph_coordinator_sse,
 )
 from src.agent_runtime.run_lifecycle import (
@@ -20,6 +21,28 @@ from src.agent_runtime.run_lifecycle import (
 )
 from src.agent_runtime.research_worker import run_research_worker
 from src.agent_runtime.supervisor_contracts import WorkerResult
+from src.agent_runtime.task_plan import PlanStep, TaskPlan
+
+
+def test_terminal_response_only_step_is_left_to_coordinator_synthesis():
+    plan = TaskPlan(
+        objective="Inspect two files and compare them.",
+        steps=(
+            PlanStep(id="a", objective="Inspect a.", requires_external_state=True),
+            PlanStep(id="b", objective="Inspect b.", requires_external_state=True),
+            PlanStep(
+                id="final",
+                objective="Produce one concise final comparison.",
+                depends_on=("a", "b"),
+                uses_dependency_state=True,
+                work_domains=("synthesis",),
+            ),
+        ),
+    )
+
+    normalized = _without_redundant_response_steps(plan)
+
+    assert [step.id for step in normalized.steps] == ["a", "b"]
 
 
 class Model:
@@ -58,6 +81,8 @@ def _assessment():
         missing_information=(),
         clarification_needed=False,
         reasoning_summary="Two dependent goals.",
+        requested_sources=("attached_document",),
+        excluded_sources=("public_web",),
     )
 
 
@@ -124,6 +149,7 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     captured = {}
 
     def gather(handoff, *, session_id=None):
+        captured["gather_context"] = dict(handoff.context)
         return WorkerResult(
             capability="gather_cap",
             status="completed",
@@ -170,7 +196,20 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
         if frame.startswith("data: ")
         and frame != "data: [DONE]\n\n"
     ]
-    assert any(item.get("type") == "plan_update" for item in payloads)
+    plan_updates = [
+        item["data"]
+        for item in payloads
+        if item.get("type") == "plan_update"
+    ]
+    assert len(plan_updates) == 2
+    assert plan_updates[0]["plan_id"] == plan_updates[1]["plan_id"]
+    assert plan_updates[1]["status"] == "completed"
+    assert [step["status"] for step in plan_updates[1]["steps"]] == [
+        "completed",
+        "completed",
+    ]
+    assert plan_updates[1]["steps"][0]["worker_label"] == "gather_cap"
+    assert plan_updates[1]["steps"][0]["result_summary"] == "Evidence A"
     assert any(item.get("delta") == "Final answer" for item in payloads)
     runtime_run = next(
         item["data"]
@@ -189,7 +228,15 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     assert metrics["execution_order"] == ["gather", "combine"]
     assert metrics["multi_graph"] is True
     assert captured["dependency_outputs"]["gather"]["summary"] == "Evidence A"
-    assert captured["retrieval_concepts"] == [
+    assert captured["gather_context"]["source_contract"] == {
+        "requested_sources": ["attached_document"],
+        "excluded_sources": ["public_web"],
+        "retrieval_concepts": [
+            "runtime admission",
+            "workspace source",
+        ],
+    }
+    assert captured["gather_context"]["retrieval_concepts"] == [
         "runtime admission",
         "workspace source",
     ]
@@ -415,7 +462,7 @@ def test_completed_research_report_enters_dependency_and_final_synthesis():
     assert report in captured["final_prompt"]
 
 
-def test_partial_worker_result_stops_at_replan_boundary_instead_of_crashing():
+def test_partial_worker_result_terminates_without_false_clarification():
     surface = (
         ExecutionSurfaceDescriptor(
             id="langgraph:partial_cap",
@@ -470,9 +517,130 @@ def test_partial_worker_result_stops_at_replan_boundary_instead_of_crashing():
         for item in payloads
         if item.get("type") == "metrics"
     )
-    assert metrics["plan_status"] == "needs_replan"
-    assert metrics["clarification_needed"] is True
-    assert any(item.get("type") == "ask_user" for item in payloads)
+    assert metrics["plan_status"] == "partial"
+    assert metrics["clarification_needed"] is False
+    assert metrics["fallback_scope"] == "none"
+    assert not any(item.get("type") == "ask_user" for item in payloads)
+    assert any(item.get("delta") == "Need more information." for item in payloads)
+    terminal = next(
+        item for item in payloads if item.get("type") == "runtime_terminal"
+    )
+    assert terminal["data"]["status"] == "COMPLETED"
+
+
+def test_workspace_only_n_graph_continues_after_partial_and_synthesizes_once():
+    assessment = IntentComplexityAssessment(
+        execution_class="multi_graph",
+        goals=tuple(
+            IntentGoal(
+                id=step_id,
+                objective=objective,
+                work_domains=("code",),
+                requires_external_state=True,
+                retrieval_concepts=(concept,),
+            )
+            for step_id, objective, concept in (
+                ("inspect_a", "Inspect planning.", "planning"),
+                ("inspect_b", "Inspect coordination.", "coordination"),
+                ("inspect_c", "Inspect replanning.", "replanning"),
+            )
+        ),
+        needs_planning=True,
+        missing_information=(),
+        clarification_needed=False,
+        reasoning_summary="Three independent workspace inspections.",
+        requested_sources=("authorized_workspace_files",),
+        excluded_sources=("public_web",),
+    )
+    plan = {
+        "objective": "Inspect three independent areas.",
+        "steps": [
+            {
+                "id": step_id,
+                "objective": objective,
+                "depends_on": [],
+                "work_domains": ["code"],
+                "uses_dependency_state": False,
+                "requires_external_state": True,
+                "requires_mutation": False,
+            }
+            for step_id, objective in (
+                ("inspect_a", "Inspect planning."),
+                ("inspect_b", "Inspect coordination."),
+                ("inspect_c", "Inspect replanning."),
+            )
+        ],
+        "reasoning_summary": "Independent inspections may run in order.",
+    }
+    calls = []
+
+    def code_runner(handoff, *, session_id=None):
+        calls.append(handoff.objective)
+        if handoff.objective == "Inspect planning.":
+            return WorkerResult(
+                capability="code_inspection",
+                status="partial",
+                summary="Planning evidence is partial.",
+                data={"evidence": "planning-partial"},
+            )
+        return WorkerResult(
+            capability="code_inspection",
+            status="completed",
+            summary=f"Completed {handoff.objective}",
+        )
+
+    final_model = Model(lambda prompt: "Selected-model synthesis.")
+    frames = asyncio.run(_collect(stream_multi_graph_coordinator_sse(
+        "http://example",
+        "model",
+        [{"role": "user", "content": "Inspect three workspace areas."}],
+        admission_assessment=assessment,
+        planner_model=Model(lambda prompt: plan),
+        resolver_model=Model(lambda prompt: {
+            "compatible_surface_ids": ["langgraph:code_inspection"],
+            "clarification_needed": False,
+            "missing_information": [],
+            "reasoning_summary": "Workspace owner is available.",
+        }),
+        replanner_model=Model(lambda prompt: plan),
+        action_model=Model(lambda prompt: {
+            "action": "inspect",
+            "clarification_needed": False,
+            "missing_information": [],
+            "reasoning_summary": "Inspect the admitted workspace source.",
+        }),
+        final_model=final_model,
+        worker_runners={"code_inspection": code_runner},
+        surfaces=(ExecutionSurfaceDescriptor(
+            id="langgraph:code_inspection",
+            kind="langgraph",
+            description="Direct authorized workspace inspection.",
+            capability_name="code_inspection",
+            supports_external_state=True,
+        ),),
+    )))
+
+    payloads = [
+        json.loads(frame[6:])
+        for frame in frames
+        if frame.startswith("data: ") and frame != "data: [DONE]\n\n"
+    ]
+    metrics = next(item["data"] for item in payloads if item.get("type") == "metrics")
+    terminal = next(item["data"] for item in payloads if item.get("type") == "runtime_terminal")
+
+    assert calls == [
+        "Inspect planning.",
+        "Inspect coordination.",
+        "Inspect replanning.",
+    ]
+    assert metrics["plan_status"] == "partial"
+    assert metrics["execution_order"] == ["inspect_a", "inspect_b", "inspect_c"]
+    assert metrics["clarification_needed"] is False
+    assert metrics["fallback_scope"] == "none"
+    assert len(final_model.prompts) == 1
+    assert sum(item.get("delta") == "Selected-model synthesis." for item in payloads) == 1
+    assert terminal["status"] == "COMPLETED"
+    assert terminal["whole_query_legacy_fallback"] is False
 
 def test_multi_graph_coordinator_leaves_persistence_to_chat_route():
     source = (

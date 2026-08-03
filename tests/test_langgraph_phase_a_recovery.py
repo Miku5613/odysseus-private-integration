@@ -139,14 +139,34 @@ def test_step_attempt_resume_outcomes_and_history_survive_reopen(tmp_path):
         input_refs={"objective": "Write file", "dependency_outputs": {}},
         side_effect_classification="external_effect",
     )
+    partial = first.create_step_attempt(
+        run_id="run-a",
+        plan_id="plan-a",
+        plan_revision=1,
+        step_id="partial-step",
+        worker_kind="code",
+        input_refs={"objective": "Inspect code", "dependency_outputs": {}},
+        side_effect_classification="read_only",
+    )
+    partial = first.complete_step_attempt(
+        partial["attempt_id"],
+        status="PARTIAL",
+        result={"summary": "useful partial evidence"},
+    )
     assert read["resumability"] == "SAFE_TO_RESTART"
     assert write["resumability"] == "REQUIRES_VERIFICATION"
+    assert partial["resumability"] == "NOT_RESUMABLE"
     first.close()
 
     reopened = DurableRunCheckpointStore(path)
     assert reopened.latest_step_attempt(
         run_id="run-a", step_id="read-step"
     )["attempt_id"] == read["attempt_id"]
+    reopened_partial = reopened.latest_step_attempt(
+        run_id="run-a", step_id="partial-step"
+    )
+    assert reopened_partial["status"] == "PARTIAL"
+    assert reopened_partial["result"]["summary"] == "useful partial evidence"
     completed = reopened.complete_step_attempt(
         read["attempt_id"],
         status="COMPLETED",

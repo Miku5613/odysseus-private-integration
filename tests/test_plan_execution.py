@@ -9,6 +9,7 @@ from src.agent_runtime.plan_execution import (
     complete_step,
     fail_step,
     initialize_plan_execution,
+    partial_step,
     request_replan,
     start_step,
     step_execution,
@@ -297,6 +298,31 @@ def test_replan_request_captures_failure_context_and_revision():
     assert request.plan_fingerprint == (
         task_plan_fingerprint(state.plan)
     )
+
+
+def test_partial_step_preserves_output_and_blocks_only_dependents():
+    state = initialize_plan_execution(_plan())
+    state = start_step(state, "project_state")
+    state = partial_step(
+        state,
+        "project_state",
+        output={"evidence": "useful partial"},
+        artifact_refs=("artifact://partial",),
+    )
+
+    partial = step_execution(state, "project_state")
+    assert partial.status == "partial"
+    assert partial.output == {"evidence": "useful partial"}
+    assert partial.artifact_refs == ("artifact://partial",)
+    assert step_execution(state, "current_research").status == "ready"
+    assert step_execution(state, "synthesize").status == "blocked"
+
+    request = request_replan(
+        state,
+        reason="A separate step needs genuine clarification.",
+        trigger_step_id="current_research",
+    )
+    assert request.partial_step_ids == ("project_state",)
 
 
 def test_replanned_execution_increments_revision_and_lineage():

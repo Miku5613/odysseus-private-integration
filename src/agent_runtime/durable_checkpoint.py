@@ -776,6 +776,9 @@ class DurableRunCheckpointStore:
         if normalized == "COMPLETED":
             receipt = "confirmed_completed"
             resumability = "ALREADY_COMPLETED"
+        elif normalized == "PARTIAL":
+            receipt = "confirmed_partial"
+            resumability = "NOT_RESUMABLE"
         elif normalized == "FAILED":
             receipt = "confirmed_failed"
             resumability = (
@@ -789,7 +792,11 @@ class DurableRunCheckpointStore:
         else:
             receipt = current["receipt_status"]
             resumability = current["resumability"]
-        completed_at = time.time() if normalized in {"COMPLETED", "FAILED"} else None
+        completed_at = (
+            time.time()
+            if normalized in {"COMPLETED", "PARTIAL", "FAILED"}
+            else None
+        )
         with self._lock:
             self._connection.execute(
                 """

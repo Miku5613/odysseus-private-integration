@@ -34,6 +34,18 @@ def test_checkpoint_survives_store_restart_and_recovers_active_plan(tmp_path):
             "steps": [{"id": "gather"}, {"id": "synthesize"}],
         },
     })
+    lifecycle.event({
+        "type": "plan_update",
+        "data": {
+            "plan_id": "run-1",
+            "revision": 2,
+            "status": "partial",
+            "steps": [
+                {"id": "gather", "status": "partial"},
+                {"id": "synthesize", "status": "blocked"},
+            ],
+        },
+    })
     thread_id = lifecycle.identity.thread_id
     checkpoint_ns = lifecycle.identity.checkpoint_ns
     first_store.close()
@@ -48,13 +60,18 @@ def test_checkpoint_survives_store_restart_and_recovers_active_plan(tmp_path):
     assert recovered is not None
     assert recovered.identity.run_id == "run-1"
     assert recovered.status == "RUNNING"
-    assert recovered.current_plan["steps"][0]["id"] == "gather"
-    assert recovered.event_cursor == 2
+    assert recovered.current_plan["revision"] == 2
+    assert recovered.current_plan["status"] == "partial"
+    assert recovered.current_plan["steps"][0] == {
+        "id": "gather",
+        "status": "partial",
+    }
+    assert recovered.event_cursor == 3
     continued = recovered.event({
         "type": "worker_update",
         "data": {"step_id": "gather"},
     })
-    assert continued["data"]["event_cursor"] == 3
+    assert continued["data"]["event_cursor"] == 4
     restarted_store.close()
 
 

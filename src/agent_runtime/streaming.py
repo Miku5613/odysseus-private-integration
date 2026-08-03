@@ -17,6 +17,7 @@ from src.agent_runtime.durable_checkpoint import (
 from src.agent_runtime.run_lifecycle import LangGraphRunIdentity
 from src.agent_runtime.tool_adapters import bind_workspace
 from src.agent_runtime.tool_policy import infer_tool_scope
+from src.agent_runtime.task_contract import build_task_contract
 
 
 _SENTINEL = object()
@@ -27,6 +28,7 @@ def run_stream(
     workspace: str | None = None,
     session_id: str | None = None,
     owner: str | None = None,
+    semantic_dimensions: tuple[str, ...] = (),
 ) -> Iterator[dict]:
     """Run the LangGraph runtime and yield event dicts as they happen.
 
@@ -112,6 +114,10 @@ def run_stream(
                     "scope": scope,
                     "events": [],
                     "evidence_hits": [],
+                    "task_contract": build_task_contract(
+                        question,
+                        semantic_dimensions=semantic_dimensions,
+                    ),
                 },
                 config={
                     "recursion_limit": 30,

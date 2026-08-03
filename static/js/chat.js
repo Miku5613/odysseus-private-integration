@@ -3494,6 +3494,13 @@ import runtimeControl from './runtimeControl.js';
                   chatRenderer.renderAskUserCard(_askPayload);
                 }
 
+              } else if (
+                json.type === 'runtime_state' ||
+                json.type === 'runtime_terminal'
+              ) {
+                if (_isBg) continue;
+                multiGraphTracker.handleRuntimeStatus(json);
+
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
                 multiGraphTracker.handlePlanUpdate(json);

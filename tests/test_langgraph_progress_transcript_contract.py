@@ -28,3 +28,12 @@ def test_active_and_interrupted_durable_replay_routes_remain_available():
     assert '"/api/chat/stream_status/{session_id}"' in source
     assert '"/api/chat/resume/{session_id}"' in source
     assert "runtime_replay_complete" in source
+    assert '"runtime_state"' in source
+
+
+def test_runtime_pause_and_terminal_states_reach_task_planner_projection():
+    source = (ROOT / "static" / "js" / "chat.js").read_text(encoding="utf-8")
+
+    assert "json.type === 'runtime_state'" in source
+    assert "json.type === 'runtime_terminal'" in source
+    assert "multiGraphTracker.handleRuntimeStatus(json);" in source

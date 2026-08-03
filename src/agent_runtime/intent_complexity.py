@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -215,6 +216,10 @@ def build_intent_complexity_prompt(
         "one filesystem provenance domain and can be inspected by one Code "
         "specialist. Multiple files or application layers do not by themselves "
         "require multi_graph.",
+        "- Treat several file inspections as one bounded unit only when they "
+        "serve one coupled investigation whose useful result stands or falls "
+        "together. A shared filesystem source or specialist capability does "
+        "not erase independently useful deliverables.",
         "- A single cross-layer trace through one feature remains one Code "
         "goal. In contrast, a request to independently inspect several "
         "distinct protection subsystems and then compare their behavior has "
@@ -244,6 +249,15 @@ def build_intent_complexity_prompt(
         "- Do not collapse 'acquire A + acquire B + combine A and B' into one "
         "graph merely because the final comparison, recommendation, or report "
         "is a single response.",
+        "- Independently useful goals may share authorized_workspace_files and "
+        "the same downstream specialist. When one goal can be partial, "
+        "unavailable, or blocked while the others should still produce useful "
+        "results, preserve them as separate goals and classify multi_graph so "
+        "the planner can isolate that failure.",
+        "- An explicit request to continue independent goals after one goal is "
+        "partial is direct evidence that one all-or-nothing execution unit is "
+        "insufficient. This remains multi_graph even when every goal reads the "
+        "same authorized workspace.",
         "- needs_planning must be true.",
         "- Do not invent exact PlanSteps here. A separate Task Planner owns "
         "decomposition, dependencies, and the final graph count.",
@@ -791,6 +805,84 @@ def parse_intent_complexity_response(
     )
 
 
+def _explicit_independent_goal_clauses(
+    raw_query: str,
+) -> tuple[str, ...]:
+    """Return user-authored numbered goals with an explicit isolation rule.
+
+    Numbered prose alone is not enough to change semantic complexity.  This
+    narrow guard applies only when the user explicitly says the goals are
+    independent *and* directs the runtime to continue after an unavailable or
+    partial goal.  That is an execution contract the model must not collapse
+    into one all-or-nothing specialist call.
+    """
+
+    matches = list(re.finditer(r"(?<!\w)\((\d+)\)\s+", raw_query))
+    if len(matches) < 2:
+        return ()
+
+    prefix = raw_query[: matches[0].start()]
+    if not re.search(r"\bindependent(?:ly)?\b", prefix, re.IGNORECASE):
+        return ()
+    if not re.search(r"\bcontinue\b", raw_query, re.IGNORECASE):
+        return ()
+    if not re.search(
+        r"\b(?:absent|blocked|fail(?:s|ed|ure)?|missing|partial|unavailable)\b",
+        raw_query,
+        re.IGNORECASE,
+    ):
+        return ()
+
+    clauses: list[str] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_query)
+        clause = raw_query[match.end() : end].strip()
+        if clause:
+            clauses.append(clause)
+    return tuple(clauses)
+
+
+def _preserve_explicit_independent_goals(
+    raw_query: str,
+    assessment: IntentComplexityAssessment,
+) -> IntentComplexityAssessment:
+    clauses = _explicit_independent_goal_clauses(raw_query)
+    if (
+        assessment.execution_class != "single_graph"
+        or assessment.side_effect_intent != "none"
+        or len(clauses) < 2
+    ):
+        return assessment
+
+    requires_external_state = bool(
+        set(assessment.requested_sources) & EXTERNAL_SOURCES
+    )
+    goals = tuple(
+        IntentGoal(
+            id=f"goal_{index}",
+            objective=clause,
+            work_domains=("independent_execution_unit",),
+            requires_external_state=requires_external_state,
+            requires_mutation=False,
+        )
+        for index, clause in enumerate(clauses, start=1)
+    )
+    return IntentComplexityAssessment(
+        execution_class="multi_graph",
+        goals=goals,
+        needs_planning=True,
+        missing_information=assessment.missing_information,
+        clarification_needed=False,
+        reasoning_summary=(
+            "The user explicitly required independent numbered goals to "
+            "continue when one goal is unavailable or partial."
+        ),
+        requested_sources=assessment.requested_sources,
+        excluded_sources=assessment.excluded_sources,
+        side_effect_intent="none",
+    )
+
+
 async def assess_intent_complexity(
     raw_query: str,
     *,
@@ -855,8 +947,9 @@ async def assess_intent_complexity(
             "Intent/complexity LLM response must be text"
         )
 
-    return parse_intent_complexity_response(
-        response
+    return _preserve_explicit_independent_goals(
+        raw_query,
+        parse_intent_complexity_response(response),
     )
 
 

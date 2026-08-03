@@ -10,6 +10,7 @@ const TASK_EVENT_TYPES = Object.freeze({
   PLAN_COMPLETED: 'task.plan.completed',
   PLAN_FAILED: 'task.plan.failed',
   PLAN_CANCELLED: 'task.plan.cancelled',
+  PLAN_STATUS: 'task.plan.status',
   STEP_STARTED: 'task.step.started',
   STEP_COMPLETED: 'task.step.completed',
   STEP_FAILED: 'task.step.failed',
@@ -18,7 +19,16 @@ const TASK_EVENT_TYPES = Object.freeze({
   RESET: 'task.reset',
 });
 
-const TERMINAL_PLAN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const TERMINAL_PLAN_STATUSES = new Set([
+  'completed',
+  'failed',
+  'partial',
+  'blocked',
+  'cancelled',
+  'interrupted',
+  'awaiting_clarification',
+]);
+const AUTO_HIDE_PLAN_STATUSES = new Set(['completed']);
 const TERMINAL_STEP_STATUSES = new Set([
   'completed',
   'failed',
@@ -187,6 +197,9 @@ function applyPlan(target, plan) {
   const previousStatuses = isSamePlan
     ? new Map(target.statuses)
     : new Map();
+  const sameRevision = (
+    isSamePlan && plan.revision === target.revision
+  );
 
   const previousCurrentStep = isSamePlan
     ? target.currentStepId
@@ -208,7 +221,7 @@ function applyPlan(target, plan) {
     const prior = previousStatuses.get(step.id);
     target.statuses.set(
       step.id,
-      TERMINAL_STEP_STATUSES.has(prior)
+      sameRevision && TERMINAL_STEP_STATUSES.has(prior)
         ? prior
         : normalizeStatus(step.status, prior || 'pending'),
     );
@@ -266,6 +279,20 @@ function reduceTaskEvent(source, event) {
   }
 
   if (!target.active) return target;
+
+  if (type === TASK_EVENT_TYPES.PLAN_STATUS) {
+    target.overallStatus = normalizeStatus(
+      event?.status || payload?.status,
+      target.overallStatus,
+    );
+    target.detail = String(
+      event?.detail || payload?.reason || target.detail || '',
+    );
+    if (TERMINAL_PLAN_STATUSES.has(target.overallStatus)) {
+      target.currentStepId = null;
+    }
+    return target;
+  }
 
   const stepId = String(
     event?.stepId ||
@@ -688,7 +715,12 @@ function statusLabel() {
 
   if (status === 'completed') return 'Complete';
   if (status === 'failed') return 'Failed';
+  if (status === 'partial') return 'Partial';
+  if (status === 'blocked') return 'Blocked';
   if (status === 'cancelled') return 'Cancelled';
+  if (status === 'interrupted') return 'Interrupted';
+  if (status === 'awaiting_clarification') return 'Needs clarification';
+  if (status === 'replanning') return 'Replanning';
   if (status === 'planned') return 'Planned';
 
   return 'Running';
@@ -699,7 +731,11 @@ function chipLabel() {
 
   if (status === 'completed') return 'Plan complete';
   if (status === 'failed') return 'Plan failed';
+  if (status === 'partial') return 'Plan partial';
+  if (status === 'blocked') return 'Plan blocked';
   if (status === 'cancelled') return 'Plan cancelled';
+  if (status === 'interrupted') return 'Plan interrupted';
+  if (status === 'awaiting_clarification') return 'Needs clarification';
 
   const index = activeStepIndex();
   const current = Math.min(
@@ -774,7 +810,7 @@ function render() {
         : '';
       const context = [
         step.worker_label,
-        status === 'completed'
+        TERMINAL_STEP_STATUSES.has(status)
           ? step.result_summary
           : step.progress,
       ].filter(Boolean).join(' · ');
@@ -827,7 +863,7 @@ function handleEvent(event) {
   render();
 
   if (
-    TERMINAL_PLAN_STATUSES.has(
+    AUTO_HIDE_PLAN_STATUSES.has(
       normalizeStatus(state.overallStatus),
     )
   ) {
@@ -898,24 +934,6 @@ function handleMetrics(metrics, options = {}) {
     return;
   }
 
-  const executionOrder = Array.isArray(
-    metrics.execution_order,
-  )
-    ? metrics.execution_order.map(String)
-    : [];
-
-  for (const stepId of executionOrder) {
-    if (
-      state.statuses.has(stepId) &&
-      statusFor(stepId) === 'pending'
-    ) {
-      handleEvent({
-        type: TASK_EVENT_TYPES.STEP_COMPLETED,
-        stepId,
-      });
-    }
-  }
-
   const planStatus = normalizeStatus(
     metrics.plan_status ||
     state.overallStatus,
@@ -959,6 +977,32 @@ function isEnabled() {
   return trackerEnabled;
 }
 
+function handleRuntimeStatus(payload) {
+  const data = payload?.data || payload || {};
+  const runtimeStatus = String(data.status || '').trim().toUpperCase();
+  const statusMap = {
+    AWAITING_CLARIFICATION: 'awaiting_clarification',
+    CANCELLED: 'cancelled',
+    FAILED: 'failed',
+    INTERRUPTED: 'interrupted',
+    SUSPENDED: 'blocked',
+  };
+  let status = statusMap[runtimeStatus] || '';
+  if (
+    runtimeStatus === 'COMPLETED' &&
+    !['partial', 'blocked'].includes(normalizeStatus(state.overallStatus))
+  ) {
+    status = 'completed';
+  }
+  if (!status || !state.active) return;
+  handleEvent({
+    type: TASK_EVENT_TYPES.PLAN_STATUS,
+    status,
+    detail: data.reason || '',
+    payload: data,
+  });
+}
+
 function reset() {
   clearHideTimer();
 
@@ -977,6 +1021,7 @@ export {
   TASK_EVENT_TYPES,
   createInitialState,
   getStateSnapshot,
+  handleRuntimeStatus,
   normalizePlanUpdate,
   reduceTaskEvent,
   reset,
@@ -990,6 +1035,7 @@ export default {
   handleToolStart,
   handleToolOutput,
   handleMetrics,
+  handleRuntimeStatus,
   reset,
   setEnabled,
   isEnabled,

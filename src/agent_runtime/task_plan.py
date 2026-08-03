@@ -4,6 +4,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from src.agent_runtime.intent_complexity import (
+    EXTERNAL_SOURCES,
+    REQUESTED_SOURCES,
+)
+
 
 _PLAN_KEYS = {
     "objective",
@@ -19,6 +24,9 @@ _STEP_KEYS = {
     "uses_dependency_state",
     "requires_external_state",
     "requires_mutation",
+    "requested_sources",
+    "excluded_sources",
+    "retrieval_concepts",
 }
 
 
@@ -39,6 +47,9 @@ class PlanStep:
     uses_dependency_state: bool = False
     requires_external_state: bool = False
     requires_mutation: bool = False
+    requested_sources: tuple[str, ...] = ()
+    excluded_sources: tuple[str, ...] = ()
+    retrieval_concepts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,6 +276,45 @@ def validate_task_plan_payload(
             field=f"TaskPlan step {index}",
         )
 
+        requested_sources = _clean_string_tuple(
+            raw_step.get("requested_sources", []),
+            field=f"TaskPlan step {index} requested_sources",
+        )
+        excluded_sources = _clean_string_tuple(
+            raw_step.get("excluded_sources", []),
+            field=f"TaskPlan step {index} excluded_sources",
+        )
+        unknown_sources = (
+            set(requested_sources) | set(excluded_sources)
+        ) - REQUESTED_SOURCES
+        if unknown_sources:
+            raise ValueError(
+                f"TaskPlan step {index} has unsupported sources: "
+                + ", ".join(sorted(unknown_sources))
+            )
+        if set(requested_sources) & set(excluded_sources):
+            raise ValueError(
+                f"TaskPlan step {index} requested_sources and "
+                "excluded_sources must not overlap"
+            )
+        requires_external_state = _clean_bool(
+            raw_step.get(
+                "requires_external_state",
+                False,
+            ),
+            field=(
+                f"TaskPlan step {index} requires_external_state"
+            ),
+        )
+        if (
+            not requires_external_state
+            and set(requested_sources) & EXTERNAL_SOURCES
+        ):
+            raise ValueError(
+                f"TaskPlan step {index} requests external sources while "
+                "requires_external_state=false"
+            )
+
         steps.append(
             PlanStep(
                 id=_clean_required_string(
@@ -298,16 +348,7 @@ def validate_task_plan_payload(
                         "uses_dependency_state"
                     ),
                 ),
-                requires_external_state=_clean_bool(
-                    raw_step.get(
-                        "requires_external_state",
-                        False,
-                    ),
-                    field=(
-                        f"TaskPlan step {index} "
-                        "requires_external_state"
-                    ),
-                ),
+                requires_external_state=requires_external_state,
                 requires_mutation=_clean_bool(
                     raw_step.get(
                         "requires_mutation",
@@ -316,6 +357,14 @@ def validate_task_plan_payload(
                     field=(
                         f"TaskPlan step {index} "
                         "requires_mutation"
+                    ),
+                ),
+                requested_sources=requested_sources,
+                excluded_sources=excluded_sources,
+                retrieval_concepts=_clean_string_tuple(
+                    raw_step.get("retrieval_concepts", []),
+                    field=(
+                        f"TaskPlan step {index} retrieval_concepts"
                     ),
                 ),
             )
@@ -343,8 +392,12 @@ def repair_unambiguous_task_plan_payload(
 
     The planner cannot consume dependency output when ``depends_on`` is empty.
     Clearing that contradictory flag preserves the step objective and does not
-    invent dependencies. Unknown IDs, cycles, duplicates, ordering, and all
-    semantic fields remain model-owned and are never guessed here.
+    invent dependencies. Likewise, strings outside the closed source enum can
+    never be source contracts. Removing them lets the downstream admission
+    binder restore an unambiguous single-source contract or reject an
+    ambiguous multi-source step; it never guesses a source. Unknown IDs,
+    cycles, duplicates, ordering, and all other semantic fields remain
+    model-owned and are never guessed here.
     """
 
     if not isinstance(payload, dict):
@@ -359,6 +412,39 @@ def repair_unambiguous_task_plan_payload(
     for index, raw_step in enumerate(raw_steps, start=1):
         if not isinstance(raw_step, dict):
             continue
+        step_id = str(raw_step.get("id") or index).strip()
+        for field in ("requested_sources", "excluded_sources"):
+            values = raw_step.get(field)
+            if not isinstance(values, (list, tuple)):
+                continue
+            supported = [
+                value
+                for value in values
+                if isinstance(value, str)
+                and value.strip() in REQUESTED_SOURCES
+            ]
+            if list(values) != supported:
+                raw_step[field] = supported
+                repairs.append(
+                    f"PlanStep {step_id} removed non-source values from "
+                    f"{field}"
+                )
+        requested_sources = raw_step.get("requested_sources")
+        if (
+            raw_step.get("requires_external_state") is False
+            and isinstance(requested_sources, (list, tuple))
+        ):
+            non_external = [
+                source
+                for source in requested_sources
+                if source not in EXTERNAL_SOURCES
+            ]
+            if list(requested_sources) != non_external:
+                raw_step["requested_sources"] = non_external
+                repairs.append(
+                    f"PlanStep {step_id} removed external sources because "
+                    "requires_external_state=false"
+                )
         depends_on = raw_step.get("depends_on", [])
         if (
             raw_step.get("uses_dependency_state") is True
@@ -366,7 +452,6 @@ def repair_unambiguous_task_plan_payload(
             and not depends_on
         ):
             raw_step["uses_dependency_state"] = False
-            step_id = str(raw_step.get("id") or index).strip()
             repairs.append(
                 f"PlanStep {step_id} uses_dependency_state=false "
                 "because depends_on is empty"

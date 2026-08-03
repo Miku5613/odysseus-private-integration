@@ -18,6 +18,9 @@ from src.agent_runtime.plan_execution import (
     step_execution,
     task_plan_fingerprint,
 )
+from src.agent_runtime.plan_source_contract import (
+    step_source_contract,
+)
 from src.agent_runtime.step_execution import (
     StepExecutionContext,
     StepExecutionUnavailable,
@@ -31,6 +34,7 @@ from src.agent_runtime.worker_dispatcher import WorkerRunner
 
 PlanRunStatus = Literal[
     "completed",
+    "partial",
     "failed",
     "needs_replan",
     "execution_unavailable",
@@ -165,6 +169,10 @@ def _context_for_plan_step(
     worker_context[
         "dependency_outputs"
     ] = dependency_outputs
+    worker_context["source_contract"] = step_source_contract(step)
+    worker_context["retrieval_concepts"] = list(
+        step.retrieval_concepts
+    )
     supervisor_state[
         "worker_context"
     ] = worker_context
@@ -205,6 +213,8 @@ def _attempt_input_refs(
         "session_id": (
             context.session_id if context is not None else None
         ),
+        "source_contract": step_source_contract(step),
+        "retrieval_concepts": list(step.retrieval_concepts),
     }
 
 
@@ -265,15 +275,6 @@ async def run_task_plan(
     worker_results: list[WorkerResult] = []
     execution_order: list[str] = []
     executions = 0
-    source_contract = dict(
-        (
-            context.supervisor_state.get("worker_context", {})
-            if context is not None
-            else {}
-        ).get("source_contract", {})
-        or {}
-    )
-
     while True:
         if _all_completed(current):
             return PlanOrchestrationResult(
@@ -290,6 +291,10 @@ async def run_task_plan(
         )
 
         if not ready_ids:
+            partial_ids = _status_ids(
+                current,
+                "partial",
+            )
             failed_ids = _status_ids(
                 current,
                 "failed",
@@ -303,7 +308,7 @@ async def run_task_plan(
                 "running",
             )
 
-            if failed_ids or blocked_ids:
+            if failed_ids:
                 return PlanOrchestrationResult(
                     state=current,
                     status="failed",
@@ -312,6 +317,32 @@ async def run_task_plan(
                     message=(
                         "Plan reached a terminal failure boundary. "
                         f"failed={list(failed_ids)}, "
+                        f"blocked={list(blocked_ids)}"
+                    ),
+                )
+
+            if partial_ids:
+                return PlanOrchestrationResult(
+                    state=current,
+                    status="partial",
+                    worker_results=tuple(worker_results),
+                    execution_order=tuple(execution_order),
+                    message=(
+                        "Plan reached a truthful partial boundary after all "
+                        "independent runnable steps finished. "
+                        f"partial={list(partial_ids)}, "
+                        f"blocked={list(blocked_ids)}"
+                    ),
+                )
+
+            if blocked_ids:
+                return PlanOrchestrationResult(
+                    state=current,
+                    status="failed",
+                    worker_results=tuple(worker_results),
+                    execution_order=tuple(execution_order),
+                    message=(
+                        "Plan reached a terminal blocked boundary. "
                         f"blocked={list(blocked_ids)}"
                     ),
                 )
@@ -353,7 +384,7 @@ async def run_task_plan(
                 step,
                 model=resolver_model,
                 surfaces=surfaces,
-                source_contract=source_contract,
+                source_contract=step_source_contract(step),
             )
 
             if resolution.status == "clarification":
@@ -515,7 +546,7 @@ async def run_task_plan(
                         "COMPLETED"
                         if result.status == "completed"
                         else (
-                            "RUNNING"
+                            "PARTIAL"
                             if result.status == "partial"
                             else "FAILED"
                         )

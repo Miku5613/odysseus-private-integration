@@ -28,6 +28,37 @@ def _source_intent(query: str | None) -> str:
     return "unknown"
 
 
+def _requires_execution_callsite(query: str | None) -> bool:
+    """Require invocation evidence only when the objective asks for it."""
+
+    q = _norm(query)
+    if any(
+        phrase in q
+        for phrase in [
+            "call site",
+            "callsite",
+            "execution flow",
+            "execution path",
+            "invocation site",
+            "where it is invoked",
+            "where this is invoked",
+            "where it is called",
+            "where this is called",
+        ]
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\bhow\b.{0,80}\b(?:execute|executes|run|runs)\b",
+            q,
+        )
+        or re.search(
+            r"\bwhere\b.{0,80}\b(?:execute|executes|executed|called|invoked)\b",
+            q,
+        )
+    )
+
+
 def _task_kind(query: str | None) -> str:
     q = _norm(query)
     exact_terms = extract_exact_terms(query)
@@ -47,7 +78,7 @@ def _task_kind(query: str | None) -> str:
     if any(x in q for x in ["data: [done]", "[done]"]):
         return "control_flow_marker_lookup"
 
-    if any(x in q for x in ["execute", "executes", "executing", "run", "runs", "running"]):
+    if _requires_execution_callsite(query):
         return "implementation_callsite_lookup"
 
     if any(x in q for x in ["handle", "handles", "handling", "handler"]):
@@ -90,7 +121,13 @@ def _split_obligations(query: str | None) -> list[dict[str, Any]]:
             }
         )
     else:
-        if "registered" in q or "route" in q or "/api/" in raw:
+        if (
+            "registered" in q
+            or "route registration" in q
+            or "api route" in q
+            or "endpoint route" in q
+            or "/api/" in raw
+        ):
             obligations.append(
                 {
                     "kind": "route_registration",
@@ -108,7 +145,7 @@ def _split_obligations(query: str | None) -> list[dict[str, Any]]:
                 }
             )
 
-        if any(x in q for x in ["execute", "executes", "executing", "run", "runs", "running"]):
+        if _requires_execution_callsite(query):
             obligations.append(
                 {
                     "kind": "concrete_callsite",
@@ -154,12 +191,40 @@ def _split_obligations(query: str | None) -> list[dict[str, Any]]:
 
     return out
 
-def build_task_contract(query: str | None) -> dict[str, Any]:
+def build_task_contract(
+    query: str | None,
+    *,
+    semantic_dimensions: tuple[str, ...] | list[str] = (),
+) -> dict[str, Any]:
+    dimensions = tuple(dict.fromkeys(
+        str(value).strip()
+        for value in semantic_dimensions
+        if str(value).strip()
+        and not re.fullmatch(
+            r"\.[a-z0-9]+(?:\s+files?)?",
+            str(value).strip(),
+            flags=re.IGNORECASE,
+        )
+    ))
+    obligations = _split_obligations(query)
+    obligations.extend(
+        {
+            "kind": "evidence_dimension",
+            "term": dimension,
+            "status": "unknown",
+        }
+        for dimension in dimensions
+    )
     return {
-        "task_kind": _task_kind(query),
+        "task_kind": (
+            "compound_code_location"
+            if len(dimensions) > 1
+            else _task_kind(query)
+        ),
         "source_intent": _source_intent(query),
         "exact_terms": extract_exact_terms(query),
-        "obligations": _split_obligations(query),
+        "semantic_dimensions": list(dimensions),
+        "obligations": obligations,
         "requires_terminal_finalizer": True,
         "allow_direct_end": False,
     }
@@ -172,6 +237,8 @@ def format_task_contract(contract: dict[str, Any] | None) -> str:
         f"- task_kind: {c.get('task_kind', 'unknown')}",
         f"- source_intent: {c.get('source_intent', 'unknown')}",
         f"- exact_terms: {', '.join(c.get('exact_terms') or []) or '(none)'}",
+        "- semantic_dimensions: "
+        + (", ".join(c.get("semantic_dimensions") or []) or "(none)"),
         f"- requires_terminal_finalizer: {c.get('requires_terminal_finalizer', True)}",
         f"- allow_direct_end: {c.get('allow_direct_end', False)}",
         "- obligations:",

@@ -4,13 +4,17 @@ import json
 
 import pytest
 
-from src.agent_runtime.code_worker import run_code_worker
+from src.agent_runtime.code_worker import (
+    _handoff_semantic_dimensions,
+    run_code_worker,
+)
 from src.agent_runtime.finalizer import (
     parse_grounded_worker_finalizer_response,
 )
 from src.agent_runtime.worker_dispatcher import builtin_worker_runners
 from src.agent_runtime.general_graph import run_code_inspection_recovery
 from src.agent_runtime.supervisor_contracts import WorkerHandoff
+from src.agent_runtime.task_contract import build_task_contract
 
 
 def test_code_worker_rejects_wrong_capability():
@@ -21,6 +25,24 @@ def test_code_worker_rejects_wrong_capability():
 
     with pytest.raises(ValueError, match="code_inspection"):
         run_code_worker(handoff, stream_factory=lambda *args, **kwargs: [])
+
+
+def test_runtime_words_do_not_invent_execution_callsite_obligation():
+    readonly = build_task_contract(
+        "Inspect the async runtime-routing implementation.",
+    )
+    callsite = build_task_contract(
+        "Show where this runtime function is invoked.",
+    )
+
+    assert not any(
+        item["kind"] == "concrete_callsite"
+        for item in readonly["obligations"]
+    )
+    assert any(
+        item["kind"] == "concrete_callsite"
+        for item in callsite["obligations"]
+    )
 
 
 def test_code_worker_requires_objective():
@@ -69,6 +91,62 @@ def test_code_worker_passes_workspace_and_session_to_existing_runtime():
         "session_id": "session-1",
     }
     assert result.status == "completed"
+
+
+def test_code_worker_passes_admitted_dimensions_to_specialist_runtime():
+    captured = {}
+
+    def fake_stream(
+        question,
+        workspace=None,
+        session_id=None,
+        semantic_dimensions=(),
+    ):
+        captured["semantic_dimensions"] = semantic_dimensions
+        yield {
+            "type": "finalizer_start",
+            "claim_support": "partial",
+            "strong_evidence": False,
+        }
+        yield {
+            "type": "stream_done",
+            "final_answer": "Coverage remains partial.",
+        }
+
+    result = run_code_worker(
+        WorkerHandoff(
+            capability="code_inspection",
+            objective="Inspect planning and coordination.",
+            context={
+                "retrieval_concepts": ["planning", "coordination"],
+            },
+        ),
+        stream_factory=fake_stream,
+    )
+
+    assert captured["semantic_dimensions"] == (
+        "planning",
+        "coordination",
+    )
+    assert result.status == "partial"
+
+
+def test_recovery_preserves_explicit_responsibility_dimensions():
+    handoff = WorkerHandoff(
+        capability="code_inspection",
+        objective=(
+            "Explain its planning, coordination, and replanning "
+            "responsibilities."
+        ),
+        context={"retrieval_concepts": ["multi_graph"]},
+    )
+
+    assert _handoff_semantic_dimensions(handoff) == (
+        "multi_graph",
+        "plan",
+        "coordinat",
+        "replan",
+    )
 
 
 def test_code_worker_collects_specialist_evidence():
@@ -546,6 +624,159 @@ def test_code_inspection_recovery_reads_explicit_workspace_file_directly(
     )
 
 
+def test_code_inspection_recovery_expands_named_source_file_semantically(
+    tmp_path,
+):
+    source = tmp_path / "large_runtime.py"
+    source.write_text(
+        "\n".join(
+            ["import os"]
+            + [f"VALUE_{index} = {index}" for index in range(1, 450)]
+            + [
+                "async def coordinate_replanning(plan):",
+                "    if plan:",
+                "        return await revise_plan(plan)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    state = run_code_inspection_recovery(
+        (
+            "Inspect large_runtime.py and explain coordination and "
+            "replanning responsibilities."
+        ),
+        str(tmp_path),
+        semantic_terms=("coordination", "replanning"),
+    )
+
+    assert state.metrics["direct_file_inspection"] is True
+    assert state.metrics["direct_file_context_windows"] >= 1
+    assert any(
+        observation.tool == "read_file_around"
+        and "coordinate_replanning" in observation.output
+        for observation in state.observations
+    )
+
+
+def test_code_worker_certifies_exact_direct_document_read():
+    def fake_stream(*args, **kwargs):
+        yield {
+            "type": "stream_done",
+            "final_answer": "Primary evidence is incomplete.",
+        }
+
+    def fake_recovery(*args, **kwargs):
+        return SimpleNamespace(
+            task=SimpleNamespace(should_fallback=False),
+            final_answer="Direct contents of requirements.txt.",
+            observations=[
+                SimpleNamespace(
+                    tool="read_file",
+                    args={"path": "requirements.txt", "offset": 0},
+                    output=(
+                        "requirements.txt:1: fastapi\n"
+                        "requirements.txt:2: uvicorn\n"
+                        "requirements.txt:3: pytest\n"
+                    ),
+                    success=True,
+                )
+            ],
+        )
+
+    response = json.dumps({
+        "answer": "The dependencies cover serving and testing.",
+        "fulfills_objective": True,
+        "missing_requirements": [],
+        "evidence_paths": ["requirements.txt"],
+    })
+    result = run_code_worker(
+        WorkerHandoff(
+            capability="code_inspection",
+            objective="Read requirements.txt and categorize its dependencies.",
+            context={
+                "workspace": "D:/AI/odysseus",
+                "retrieval_concepts": [".txt", "requirements.txt"],
+            },
+        ),
+        stream_factory=fake_stream,
+        recovery_factory=fake_recovery,
+        finalizer_candidates=[("http://local", "model", {})],
+        finalizer_caller=lambda *args, **kwargs: response,
+    )
+
+    assert result.status == "completed"
+    assert result.data["claim_support"] == "strong"
+    assert result.data["task_fulfillment_complete"] is True
+
+
+def test_code_worker_certifies_full_direct_backend_read_but_not_import_only():
+    objective = (
+        "Inspect routes/chat_routes.py and explain the async admission "
+        "implementation."
+    )
+
+    def fake_stream(*args, **kwargs):
+        yield {
+            "type": "stream_done",
+            "final_answer": "Primary evidence is incomplete.",
+        }
+
+    def recovery(output):
+        return lambda *args, **kwargs: SimpleNamespace(
+            task=SimpleNamespace(should_fallback=False),
+            final_answer="Direct backend source contents.",
+            observations=[
+                SimpleNamespace(
+                    tool="read_file",
+                    args={"path": "routes/chat_routes.py", "offset": 0},
+                    output=output,
+                    success=True,
+                )
+            ],
+        )
+
+    response = json.dumps({
+        "answer": "The async admission function selects the runtime path.",
+        "fulfills_objective": True,
+        "missing_requirements": [],
+        "evidence_paths": ["routes/chat_routes.py"],
+    })
+    handoff = WorkerHandoff(
+        capability="code_inspection",
+        objective=objective,
+        context={
+            "workspace": "D:/AI/odysseus",
+            "retrieval_concepts": [".py", "routes"],
+        },
+    )
+    complete = run_code_worker(
+        handoff,
+        stream_factory=fake_stream,
+        recovery_factory=recovery(
+            "routes/chat_routes.py:1: import asyncio\n"
+            "routes/chat_routes.py:126: async def assess_admission(query):\n"
+            "routes/chat_routes.py:127:     if query:\n"
+            "routes/chat_routes.py:128:         return await choose_runtime(query)\n"
+        ),
+        finalizer_candidates=[("http://local", "model", {})],
+        finalizer_caller=lambda *args, **kwargs: response,
+    )
+    import_only = run_code_worker(
+        handoff,
+        stream_factory=fake_stream,
+        recovery_factory=recovery(
+            "routes/chat_routes.py:1: import asyncio\n"
+            "routes/chat_routes.py:2: from src.runtime import choose_runtime\n"
+        ),
+        finalizer_candidates=[("http://local", "model", {})],
+        finalizer_caller=lambda *args, **kwargs: response,
+    )
+
+    assert complete.status == "completed"
+    assert import_only.status == "partial"
+
+
 def test_code_worker_recovery_receives_only_step_objective_and_workspace():
     captured = {}
 
@@ -759,6 +990,143 @@ def test_code_claim_support_does_not_infer_ui_from_acquire_substring():
             ),
         }
     )
+
+
+def test_read_only_async_backend_implementation_window_is_strong_evidence():
+    from src.agent_runtime.claim_support import evaluate_code_location_support
+    from src.agent_runtime.evidence_ledger import make_observation
+
+    query = (
+        "Inspect the backend implementation of async admission and workspace "
+        "routing."
+    )
+    observation = make_observation(
+        observation_id="backend-window",
+        kind="context_window",
+        source_path="src/agent_runtime/agent_admission.py",
+        line_start=20,
+        line_end=31,
+        content=(
+            "async def assess_admission_and_route_workspace(request):\n"
+            "    assessment = await assess_intent_complexity(request)\n"
+            "    return route_workspace_source(assessment)\n"
+        ),
+        source_tool="read_file_around",
+        query=query,
+    )
+
+    support = evaluate_code_location_support(
+        query=query,
+        observations=[observation],
+    )
+
+    assert support["support_level"] == "strong"
+    assert support["obligation_report"]["concrete_call_site_ok"] is True
+
+
+def test_function_that_runs_admission_does_not_imply_call_site_obligation():
+    from src.agent_runtime.claim_support import evaluate_code_location_support
+    from src.agent_runtime.evidence_ledger import make_observation
+
+    query = "Inspect the function that runs async admission routing."
+    observation = make_observation(
+        observation_id="admission-function",
+        kind="context_window",
+        source_path="src/agent_runtime/agent_admission.py",
+        line_start=70,
+        line_end=78,
+        content=(
+            "async def run_admission_routing(request):\n"
+            "    decision = await assess_admission(request)\n"
+            "    return route_admission(decision)\n"
+        ),
+        source_tool="read_file_around",
+        query=query,
+    )
+
+    support = evaluate_code_location_support(
+        query=query,
+        observations=[observation],
+    )
+
+    assert support["support_level"] == "strong"
+
+
+def test_explicit_execution_call_site_query_reports_missing_call_site():
+    from src.agent_runtime.claim_support import evaluate_code_location_support
+    from src.agent_runtime.evidence_ledger import make_observation
+
+    query = "Find the call site where admission routing is invoked."
+    observation = make_observation(
+        observation_id="definition-only",
+        kind="context_window",
+        source_path="src/agent_runtime/agent_admission.py",
+        line_start=70,
+        line_end=76,
+        content=(
+            "async def admission_routing(request):\n"
+            "    return build_admission_result(request)\n"
+        ),
+        source_tool="read_file_around",
+        query=query,
+    )
+
+    support = evaluate_code_location_support(
+        query=query,
+        observations=[observation],
+    )
+
+    assert support["support_level"] != "strong"
+    assert "missing execution call site" in support["reason"]
+
+
+def test_import_only_and_prompt_only_windows_are_not_implementation_evidence():
+    from src.agent_runtime.claim_support import evaluate_code_location_support
+    from src.agent_runtime.evidence_ledger import make_observation
+
+    query = "Inspect the admission routing implementation."
+    contents = (
+        "from src.agent_runtime.router import route_admission\n",
+        (
+            'ADMISSION_PROMPT = """Admission routing instructions: route '
+            'workspace requests to the admitted source."""\n'
+        ),
+    )
+
+    for index, content in enumerate(contents):
+        observation = make_observation(
+            observation_id=f"non-implementation-{index}",
+            kind="context_window",
+            source_path="src/agent_runtime/agent_admission.py",
+            line_start=100 + index * 20,
+            line_end=110 + index * 20,
+            content=content,
+            source_tool="read_file_around",
+            query=query,
+        )
+        support = evaluate_code_location_support(
+            query=query,
+            observations=[observation],
+        )
+
+        assert support["support_level"] != "strong"
+        assert "header/import/prompt-rules" in support["reason"]
+
+
+def test_evidence_ranking_uses_term_boundaries_for_acquire_and_runtime():
+    from src.agent_runtime.evidence_ledger import (
+        _call_site_score,
+        path_intent_score,
+    )
+
+    query = "Acquire details on runtime admission."
+    content = "async def assess_runtime():\n    return admission_result\n"
+
+    assert path_intent_score(
+        "src/agent_runtime/agent_admission.py",
+        query,
+    ) == 0
+    assert _call_site_score(content, query) == 0
 
 
 def test_code_worker_scopes_multi_goal_retrieval_concepts_to_step_objective(
@@ -1008,6 +1376,150 @@ def test_code_recovery_requires_semantic_step_fulfillment_after_strong_evidence(
     assert "Research something else" not in captured["prompt"]
     assert captured["candidates"][0][1] == "selected-model"
     assert captured["kwargs"]["prompt_type"] == "agent"
+
+
+def test_compound_recovery_stays_partial_when_dimensions_are_uncovered():
+    def fake_stream(*args, **kwargs):
+        yield {
+            "type": "stream_done",
+            "final_answer": "Evidence is incomplete.",
+        }
+
+    def fake_recovery(*args, **kwargs):
+        return SimpleNamespace(
+            task=SimpleNamespace(should_fallback=False),
+            final_answer="Planning evidence found.",
+            observations=[
+                SimpleNamespace(
+                    tool="read_file_around",
+                    args={"path": "src/agent_runtime/task_planner.py", "line": 80},
+                    output=(
+                        "80: async def build_planning_step(request):\n"
+                        "81:     # Planning responsibility for task steps.\n"
+                        "82:     return await create_plan(request)\n"
+                    ),
+                    success=True,
+                ),
+            ],
+        )
+
+    def forbidden_finalizer(*args, **kwargs):
+        raise AssertionError(
+            "The finalizer must not run before every evidence dimension is covered."
+        )
+
+    result = run_code_worker(
+        WorkerHandoff(
+            capability="code_inspection",
+            objective=(
+                "Explain planning, coordination, and replanning responsibilities."
+            ),
+            context={
+                "workspace": "D:/AI/odysseus",
+                "retrieval_concepts": [
+                    "planning",
+                    "coordination",
+                    "replanning",
+                ],
+            },
+        ),
+        stream_factory=fake_stream,
+        recovery_factory=fake_recovery,
+        finalizer_candidates=[("http://deterministic", "model", {})],
+        finalizer_caller=forbidden_finalizer,
+    )
+
+    assert result.status == "partial"
+    assert result.data["missing_evidence_dimensions"] == [
+        "coordination",
+        "replanning",
+    ]
+    assert result.missing_information == (
+        "Missing evidence dimension: coordination",
+        "Missing evidence dimension: replanning",
+    )
+
+
+def test_compound_recovery_requires_grounded_coverage_for_every_dimension():
+    def fake_stream(*args, **kwargs):
+        yield {
+            "type": "stream_done",
+            "final_answer": "Evidence is incomplete.",
+        }
+
+    paths_and_content = (
+        (
+            "src/agent_runtime/task_planner.py",
+            "80: async def build_planning_step(request):\n"
+            "81:     # Planning responsibility.\n"
+            "82:     return await create_plan(request)\n",
+        ),
+        (
+            "src/agent_runtime/multi_graph_coordinator.py",
+            "90: async def coordinate_steps(plan):\n"
+            "91:     # Coordination responsibility.\n"
+            "92:     return await dispatch_steps(plan)\n",
+        ),
+        (
+            "src/agent_runtime/replan_controller.py",
+            "100: async def rebuild_replanning_state(plan):\n"
+            "101:     # Replanning responsibility.\n"
+            "102:     return await revise_plan(plan)\n",
+        ),
+    )
+
+    def fake_recovery(*args, **kwargs):
+        return SimpleNamespace(
+            task=SimpleNamespace(should_fallback=False),
+            final_answer="All dimension evidence found.",
+            observations=[
+                SimpleNamespace(
+                    tool="read_file_around",
+                    args={"path": path, "line": 80 + index * 10},
+                    output=content,
+                    success=True,
+                )
+                for index, (path, content) in enumerate(paths_and_content)
+            ],
+        )
+
+    response = json.dumps({
+        "answer": "Planning, coordination, and replanning are each grounded.",
+        "fulfills_objective": True,
+        "missing_requirements": [],
+        "evidence_paths": [path for path, _ in paths_and_content],
+    })
+    result = run_code_worker(
+        WorkerHandoff(
+            capability="code_inspection",
+            objective=(
+                "Explain planning, coordination, and replanning responsibilities."
+            ),
+            context={
+                "workspace": "D:/AI/odysseus",
+                "retrieval_concepts": [
+                    "planning",
+                    "coordination",
+                    "replanning",
+                ],
+            },
+        ),
+        stream_factory=fake_stream,
+        recovery_factory=fake_recovery,
+        finalizer_candidates=[("http://deterministic", "model", {})],
+        finalizer_caller=lambda *args, **kwargs: response,
+    )
+
+    assert result.status == "completed"
+    assert result.data["missing_evidence_dimensions"] == []
+    assert {
+        item["term"]: item["status"]
+        for item in result.data["evidence_dimension_coverage"]
+    } == {
+        "planning": "satisfied",
+        "coordination": "satisfied",
+        "replanning": "satisfied",
+    }
 
 
 def test_code_recovery_completed_summary_is_grounded_step_answer_not_retrieval_debris():
