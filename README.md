@@ -1,4 +1,12 @@
 > This repository is a runtime-focused fork of [the original Odysseus project](https://github.com/pewdiepie-archdaemon/odysseus). Read the [upstream README](https://github.com/pewdiepie-archdaemon/odysseus/blob/main/README.md) for the base application's features, deployment choices, and project history. This document covers the runtime upgrades added by this fork.
+>
+> This repository is a personal modified distribution of Odysseus.
+
+Public access is provided for evaluation, personal use, and issue reporting.
+Pull requests are currently disabled. Development is maintained by the repository owner.
+
+This project contains and modifies software licensed under the GNU Affero
+General Public License v3.0. See LICENSE and the upstream attribution notices.
 
 # Odysseus Runtime Upgrade
 
