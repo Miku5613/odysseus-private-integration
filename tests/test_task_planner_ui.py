@@ -827,12 +827,148 @@ def test_final_completion_auto_hide_contract(
 
     source = _read(TRACKER)
 
-    assert (
-        "const TERMINAL_PLAN_STATUSES = "
-        "new Set(['completed', 'failed', 'cancelled']);"
-    ) in source
+    assert "const AUTO_HIDE_PLAN_STATUSES = new Set(['completed']);" in source
     assert "function scheduleHide(ms = 7000) {" in source
     assert "state.hideTimer = setTimeout(() => {" in source
     assert "scheduleHide();" in source
+
+def test_new_revision_trusts_authoritative_step_statuses(
+    tmp_path: Path,
+) -> None:
+    result = _run_node(
+        tmp_path,
+        """
+        import {
+          MULTI_GRAPH_RUNTIME,
+          TASK_EVENT_TYPES,
+          createInitialState,
+          normalizePlanUpdate,
+          reduceTaskEvent,
+        } from "./multiGraphTracker.mjs";
+
+        const update = (revision, steps) => normalizePlanUpdate({data: {
+          runtime: MULTI_GRAPH_RUNTIME,
+          plan_id: "stable-run-id",
+          revision,
+          status: "replanning",
+          objective: "Authoritative plan",
+          steps,
+        }});
+        let state = createInitialState();
+        state = reduceTaskEvent(state, {
+          type: TASK_EVENT_TYPES.PLAN_UPDATED,
+          plan: update(1, [
+            {id: "kept", objective: "Keep", status: "completed"},
+            {id: "changed", objective: "Old", status: "completed"},
+          ]),
+        });
+        state = reduceTaskEvent(state, {
+          type: TASK_EVENT_TYPES.PLAN_UPDATED,
+          plan: update(2, [
+            {id: "kept", objective: "Keep", status: "completed"},
+            {id: "changed", objective: "New meaning", status: "ready"},
+          ]),
+        });
+
+        if (state.statuses.get("kept") !== "completed") {
+          throw new Error("Completed history was not preserved by runtime state");
+        }
+        if (state.statuses.get("changed") !== "ready") {
+          throw new Error("Changed step was falsely retained as completed");
+        }
+        if (state.revision !== 2 || state.steps.length !== 2) {
+          throw new Error("New authoritative revision was not projected");
+        }
+        console.log("PASS");
+        """,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout.strip() == "PASS"
+
+
+def test_authoritative_rehydrate_is_idempotent_and_retains_compact_states(
+    tmp_path: Path,
+) -> None:
+    result = _run_node(
+        tmp_path,
+        """
+        import {
+          MULTI_GRAPH_RUNTIME,
+          TASK_EVENT_TYPES,
+          createInitialState,
+          normalizePlanUpdate,
+          reduceTaskEvent,
+        } from "./multiGraphTracker.mjs";
+
+        const plan = normalizePlanUpdate({data: {
+          runtime: MULTI_GRAPH_RUNTIME,
+          plan_id: "rehydrate-run",
+          revision: 3,
+          status: "partial",
+          objective: "Resume current plan",
+          detail: "One dependency remains blocked",
+          steps: [
+            {
+              id: "done",
+              objective: "Completed work",
+              status: "completed",
+              worker_label: "Code Worker",
+              result_summary: "Grounded result",
+            },
+            {
+              id: "partial",
+              objective: "Partial work",
+              status: "partial",
+              result_summary: "Useful partial evidence",
+            },
+            {
+              id: "blocked",
+              objective: "Dependent work",
+              depends_on: ["partial"],
+              status: "blocked",
+            },
+          ],
+        }});
+
+        const apply = (source) => reduceTaskEvent(source, {
+          type: TASK_EVENT_TYPES.PLAN_UPDATED,
+          plan,
+        });
+        let first = apply(createInitialState());
+        let second = apply(first);
+
+        if (second.overallStatus !== "partial") {
+          throw new Error("Partial terminal state was not retained");
+        }
+        if (second.statuses.get("blocked") !== "blocked") {
+          throw new Error("Blocked dependency state was not retained");
+        }
+        if (second.steps[0].worker_label !== "Code Worker") {
+          throw new Error("Worker label was lost during rehydrate");
+        }
+        if (second.steps[1].result_summary !== "Useful partial evidence") {
+          throw new Error("Partial result summary was lost during rehydrate");
+        }
+        if (second.steps.length !== first.steps.length || second.revision !== 3) {
+          throw new Error("Duplicate rehydrate was not idempotent");
+        }
+
+        second = reduceTaskEvent(second, {
+          type: TASK_EVENT_TYPES.PLAN_STATUS,
+          status: "interrupted",
+          detail: "Process restart required",
+        });
+        if (
+          second.overallStatus !== "interrupted" ||
+          second.detail !== "Process restart required"
+        ) {
+          throw new Error("Interrupted compact status was not retained");
+        }
+        console.log("PASS");
+        """,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout.strip() == "PASS"
+
 
 # TASK_PLANNER_UI_EXPLICIT_STREAMING_CONTRACTS_V2_END

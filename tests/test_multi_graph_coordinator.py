@@ -173,7 +173,20 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
         if frame.startswith("data: ")
         and frame != "data: [DONE]\n\n"
     ]
-    assert any(item.get("type") == "plan_update" for item in payloads)
+    plan_updates = [
+        item["data"]
+        for item in payloads
+        if item.get("type") == "plan_update"
+    ]
+    assert len(plan_updates) == 2
+    assert plan_updates[0]["plan_id"] == plan_updates[1]["plan_id"]
+    assert plan_updates[1]["status"] == "completed"
+    assert [step["status"] for step in plan_updates[1]["steps"]] == [
+        "completed",
+        "completed",
+    ]
+    assert plan_updates[1]["steps"][0]["worker_label"] == "gather_cap"
+    assert plan_updates[1]["steps"][0]["result_summary"] == "Evidence A"
     assert any(item.get("delta") == "Final answer" for item in payloads)
     runtime_run = next(
         item["data"]

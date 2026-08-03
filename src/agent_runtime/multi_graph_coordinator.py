@@ -264,6 +264,41 @@ def _execution_payload(
     }
 
 
+def _authoritative_plan_payload(
+    control: ReplanControlResult,
+    *,
+    plan_id: str,
+) -> dict[str, Any]:
+    plan = control.orchestration.state.plan
+    execution = _execution_payload(control)
+    steps = []
+    for item in execution["steps"]:
+        output = item.get("output")
+        worker_label = ""
+        result_summary = ""
+        if isinstance(output, dict):
+            worker_label = str(output.get("capability") or "")
+            result_summary = str(output.get("summary") or "")
+        steps.append({
+            **item,
+            "worker_label": worker_label,
+            "progress": (
+                result_summary if item.get("status") == "running" else ""
+            ),
+            "result_summary": result_summary,
+        })
+    return {
+        "runtime": RUNTIME_VERSION,
+        "plan_id": plan_id,
+        "revision": control.orchestration.state.revision,
+        "status": control.orchestration.status,
+        "objective": plan.objective,
+        "reasoning_summary": plan.reasoning_summary,
+        "detail": control.orchestration.message,
+        "steps": steps,
+    }
+
+
 def _fallback_final_text(
     query: str,
     control: ReplanControlResult,
@@ -861,6 +896,7 @@ async def stream_multi_graph_coordinator_sse(
         "type": "plan_update",
         "data": {
             "runtime": RUNTIME_VERSION,
+            "plan_id": lifecycle.identity.run_id,
             "revision": 1,
             "status": "planned",
             **_plan_payload(plan),
@@ -1101,6 +1137,13 @@ async def stream_multi_graph_coordinator_sse(
     ))
     for frame in frames:
         yield frame
+    yield _frame(lifecycle.event({
+        "type": "plan_update",
+        "data": _authoritative_plan_payload(
+            control,
+            plan_id=lifecycle.identity.run_id,
+        ),
+    }))
 
     question = _clarification_question(control)
     if question:

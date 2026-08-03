@@ -2711,6 +2711,7 @@ def setup_chat_routes(
                                     "ask_user",
                                     "plan_update",
                                     "runtime_run",
+                                    "runtime_state",
                                     "runtime_snapshot",
                                     "runtime_terminal",
                                 ):
