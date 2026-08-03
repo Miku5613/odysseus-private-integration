@@ -102,6 +102,7 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+/Quick Launch Odysseus.bat
 
 # Local context provider root mappings
 /config/local_roots.json

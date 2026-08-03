@@ -265,6 +265,7 @@ if AUTH_ENABLED:
         "/api/auth/status",
         "/api/auth/features",
         "/api/auth/settings",
+        "/api/runtime/availability",
         "/api/auth/integrations/presets",
         "/api/health",
         "/api/version",
@@ -877,6 +878,7 @@ app.include_router(setup_vault_routes())
 from routes.contacts.contacts_routes import setup_contacts_routes
 # OPENCODE_RUNTIME_ROUTE_V1_START
 from routes.opencode_runtime_routes import router as opencode_runtime_router
+from routes.runtime_availability_routes import router as runtime_availability_router
 # OPENCODE_RUNTIME_ROUTE_V1_END
 app.include_router(setup_contacts_routes())
 
@@ -884,6 +886,7 @@ from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
 # OPENCODE_RUNTIME_INCLUDE_V1_START
 app.include_router(opencode_runtime_router)
+app.include_router(runtime_availability_router)
 # OPENCODE_RUNTIME_INCLUDE_V1_END
 
 # ========= ROUTES (kept in app.py) =========

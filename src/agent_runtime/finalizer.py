@@ -3,7 +3,31 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+try:
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+    )
+except Exception:  # Optional LangGraph/LangChain runtime is not installed.
+    class _UnavailableRuntimeMessage:
+        def __init__(self, content: str = "", **kwargs: Any) -> None:
+            self.content = content
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class AIMessage(_UnavailableRuntimeMessage):
+        pass
+
+    class HumanMessage(_UnavailableRuntimeMessage):
+        pass
+
+    class SystemMessage(_UnavailableRuntimeMessage):
+        pass
+
+    class ToolMessage(_UnavailableRuntimeMessage):
+        pass
 
 
 FINALIZER_SYSTEM = SystemMessage(

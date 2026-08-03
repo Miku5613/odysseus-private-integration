@@ -10,9 +10,18 @@ import uuid
 from pathlib import Path
 from typing import Any, TypedDict
 
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, START, StateGraph
+try:
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import END, START, StateGraph
+    _LANGGRAPH_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # Optional runtime: Legacy must still import and start.
+    JsonPlusSerializer = None  # type: ignore[assignment,misc]
+    SqliteSaver = None  # type: ignore[assignment,misc]
+    StateGraph = None  # type: ignore[assignment,misc]
+    START = "__start__"  # type: ignore[assignment]
+    END = "__end__"  # type: ignore[assignment]
+    _LANGGRAPH_IMPORT_ERROR = exc
 from src.agent_runtime.runtime_budgets import (
     RuntimeArtifactStore,
     apply_checkpoint_budgets,
@@ -106,6 +115,13 @@ class DurableRunCheckpointStore:
     """SQLite-backed LangGraph graph containing authoritative run snapshots."""
 
     def __init__(self, path: str | Path) -> None:
+        if _LANGGRAPH_IMPORT_ERROR is not None:
+            raise CheckpointUnavailableError(
+                "LangGraph runtime dependencies are not installed. Run "
+                "Express Installation.bat and approve the optional LangGraph "
+                f"runtime. ({type(_LANGGRAPH_IMPORT_ERROR).__name__}: "
+                f"{_LANGGRAPH_IMPORT_ERROR})"
+            ) from _LANGGRAPH_IMPORT_ERROR
         self.path = Path(path).expanduser().resolve()
         artifact_root = os.getenv(
             "ODYSSEUS_LANGGRAPH_ARTIFACT_DIR",

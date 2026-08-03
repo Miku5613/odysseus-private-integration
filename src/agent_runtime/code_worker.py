@@ -23,7 +23,6 @@ from src.agent_runtime.finalizer import (
     parse_grounded_worker_finalizer_response,
 )
 from src.agent_runtime.general_graph import run_code_inspection_recovery
-from src.agent_runtime.streaming import run_stream
 from src.agent_runtime.supervisor_contracts import WorkerHandoff, WorkerResult
 from src.agent_runtime.task_contract import (
     build_task_contract,
@@ -552,13 +551,17 @@ def run_code_worker(
     handoff: WorkerHandoff,
     *,
     session_id: str | None = None,
-    stream_factory: Callable[..., Iterable[dict[str, Any]]] = run_stream,
+    stream_factory: Callable[..., Iterable[dict[str, Any]]] | None = None,
     recovery_factory: Callable[..., Any] = run_code_inspection_recovery,
     finalizer_candidates: Sequence[tuple] | None = None,
     finalizer_prompt_type: str | None = None,
     finalizer_caller: Callable[..., str] = llm_call_with_fallback,
 ) -> WorkerResult:
     "Execute Code Worker while preventing strong primary support from bypassing PlanStep fulfillment verification."
+
+    if stream_factory is None:
+        from src.agent_runtime.streaming import run_stream
+        stream_factory = run_stream
 
     if handoff.capability != CODE_WORKER_CAPABILITY:
         raise ValueError(

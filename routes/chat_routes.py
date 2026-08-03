@@ -131,11 +131,14 @@ def _agent_langgraph_architecture_enabled_for_request(chat_mode: str | None) -> 
     and runtime-router probes, then fall through to the legacy agent loop.
     """
     try:
+        from src.runtime_availability import runtime_is_available
+        if not runtime_is_available("langgraph"):
+            return False
         from src.settings import get_setting
         raw = get_setting("agent_langgraph_enabled", True)
         return str(raw).strip().lower() not in {"0", "false", "no", "off"}
     except Exception:
-        return True
+        return False
 
 
 def _langgraph_multi_graph_allowed_by_settings() -> bool:

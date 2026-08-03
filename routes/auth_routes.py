@@ -684,6 +684,13 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
         if "agent_langgraph_enabled" in body:
             current["agent_langgraph_enabled"] = _coerce_bool_setting(body.get("agent_langgraph_enabled"))
+            if current["agent_langgraph_enabled"]:
+                from src.runtime_availability import runtime_is_available
+                if not runtime_is_available("langgraph"):
+                    raise HTTPException(
+                        409,
+                        "LangGraph runtime dependencies are not installed.",
+                    )
 
         _save_settings(current)
         return current

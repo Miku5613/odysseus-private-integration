@@ -5,7 +5,6 @@ import time
 from typing import Any, AsyncGenerator, Optional, Set
 
 from src.agent_runtime.legacy_sse_adapter import to_legacy_sse_frame
-from src.agent_runtime.streaming import run_stream
 
 
 RUNTIME_VERSION = "v0.10.2"

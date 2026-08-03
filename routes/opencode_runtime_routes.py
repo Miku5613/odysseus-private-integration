@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import time
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -18,11 +18,21 @@ from src.opencode_runtime import OpenCodeRuntimeService
 from src.opencode_runtime.model_registry import (
     resolve_model_selection,
 )
+from src.runtime_availability import runtime_is_available
+
+
+def _require_opencode_installed() -> None:
+    if not runtime_is_available("opencode"):
+        raise HTTPException(
+            status_code=503,
+            detail="OpenCode runtime is not installed.",
+        )
 
 
 router = APIRouter(
     prefix="/api/opencode/runtime",
     tags=["opencode-runtime"],
+    dependencies=[Depends(_require_opencode_installed)],
 )
 def _session_manager():
     manager = get_session_manager_instance()

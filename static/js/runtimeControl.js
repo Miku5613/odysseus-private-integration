@@ -50,6 +50,12 @@ const LANGGRAPH_SETTINGS_DEFAULTS = {
 };
 
 const RUNTIMES = new Set(['legacy', 'langgraph', 'opencode']);
+let _runtimeAvailability = {
+  legacy: { available: true, label: 'Legacy' },
+  langgraph: { available: true, label: 'LangGraph' },
+  opencode: { available: true, label: 'OpenCode' },
+};
+let _runtimeAvailabilityLoaded = false;
 let _pendingRuntime = null;
 let _openCodeReadySessions = new Map();
 let _openCodeSessionManagerBusy = false;
@@ -75,7 +81,62 @@ function safeStorageSet(key, value) {
 
 function normalizeRuntime(value, fallback = 'legacy') {
   const runtime = String(value || '').trim().toLowerCase();
-  return RUNTIMES.has(runtime) ? runtime : fallback;
+  const candidate = RUNTIMES.has(runtime) ? runtime : fallback;
+  if (!_runtimeAvailabilityLoaded || runtimeAvailable(candidate)) {
+    return candidate;
+  }
+  return runtimeAvailable(fallback) ? fallback : 'legacy';
+}
+
+function runtimeAvailable(runtime) {
+  const value = _runtimeAvailability[String(runtime || '').toLowerCase()];
+  return !value || value.available !== false;
+}
+
+async function loadRuntimeAvailability() {
+  try {
+    const response = await fetch('/api/runtime/availability', {
+      credentials: 'same-origin',
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    _runtimeAvailability = {
+      ..._runtimeAvailability,
+      ...(payload.runtimes || {}),
+    };
+  } catch (error) {
+    console.warn('Optional runtime availability check failed:', error);
+    _runtimeAvailability = {
+      legacy: { available: true, label: 'Legacy' },
+      langgraph: { available: false, label: 'LangGraph' },
+      opencode: { available: false, label: 'OpenCode' },
+    };
+  } finally {
+    _runtimeAvailabilityLoaded = true;
+  }
+}
+
+function applyRuntimeAvailabilityToControls() {
+  const select = document.getElementById('set-runtime-default');
+  if (select) {
+    for (const option of select.options) {
+      const runtime = option.value;
+      const available = runtimeAvailable(runtime);
+      const label = runtimeLabel(runtime);
+      option.disabled = !available;
+      option.textContent = available ? label : `${label} — Not Installed`;
+    }
+  }
+
+  const summary = document.getElementById('runtime-availability-summary');
+  if (summary) {
+    const missing = ['langgraph', 'opencode']
+      .filter(runtime => !runtimeAvailable(runtime))
+      .map(runtimeLabel);
+    summary.textContent = missing.length
+      ? `${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} Not Installed. Legacy remains available.`
+      : 'Legacy, LangGraph, and OpenCode are installed and selectable.';
+  }
 }
 
 function loadSessionMap() {
@@ -250,7 +311,7 @@ export async function cycleCurrentRuntime() {
     ? sessionModule.getCurrentSessionId()
     : '';
   const current = getRuntimeForSession(id);
-  const order = ['legacy', 'langgraph', 'opencode'];
+  const order = ['legacy', 'langgraph', 'opencode'].filter(runtimeAvailable);
   const index = Math.max(0, order.indexOf(current));
   const next = order[(index + 1) % order.length];
   return setCurrentRuntime(next, id);
@@ -346,6 +407,8 @@ function createRuntimePanel() {
           <option value="langgraph">LangGraph</option>
           <option value="opencode">OpenCode</option>
         </select>
+        <small id="runtime-availability-summary"
+               class="settings-help-text" aria-live="polite"></small>
       </label>
 
       <label class="runtime-lifecycle-option runtime-global-planner-toggle">
@@ -704,6 +767,7 @@ function buildRuntimeSettings() {
 }
 
 function syncSettingsControls() {
+  applyRuntimeAvailabilityToControls();
   const runtime = getDefaultRuntime();
   const runtimeSelect = document.getElementById('set-runtime-default');
   if (runtimeSelect && document.activeElement !== runtimeSelect) {
@@ -2474,11 +2538,13 @@ export function refreshRuntimeIndicator() {
   const label = _indicator.querySelector('.runtime-indicator-label');
   if (label) label.textContent = runtimeLabel(runtime);
 
-  const next = runtime === 'legacy'
-    ? 'LangGraph'
-    : runtime === 'langgraph'
-      ? 'OpenCode'
-      : 'Legacy';
+  const availableOrder = ['legacy', 'langgraph', 'opencode']
+    .filter(runtimeAvailable);
+  const runtimeIndex = Math.max(0, availableOrder.indexOf(runtime));
+  const nextRuntime = availableOrder[
+    (runtimeIndex + 1) % availableOrder.length
+  ] || 'legacy';
+  const next = runtimeLabel(nextRuntime);
   _indicator.title =
     `${runtimeLabel(runtime)} active — click to switch to ${next}`;
 
@@ -3190,7 +3256,14 @@ export async function streamOpenCodeTurn({
 }
 
 async function hydrateDefaultRuntime() {
-  if (safeStorageGet(DEFAULT_RUNTIME_KEY)) return;
+  const stored = safeStorageGet(DEFAULT_RUNTIME_KEY);
+  if (stored) {
+    safeStorageSet(
+      DEFAULT_RUNTIME_KEY,
+      normalizeRuntime(stored, 'legacy')
+    );
+    return;
+  }
   try {
     const response = await fetch('/api/auth/settings', {
       credentials: 'same-origin',
@@ -3198,19 +3271,23 @@ async function hydrateDefaultRuntime() {
     const settings = await response.json();
     safeStorageSet(
       DEFAULT_RUNTIME_KEY,
-      settings.agent_langgraph_enabled === false ? 'legacy' : 'langgraph'
+      normalizeRuntime(
+        settings.agent_langgraph_enabled === false ? 'legacy' : 'langgraph'
+      )
     );
   } catch (_) {
-    safeStorageSet(DEFAULT_RUNTIME_KEY, 'langgraph');
+    safeStorageSet(DEFAULT_RUNTIME_KEY, normalizeRuntime('langgraph'));
   }
 }
 
 export async function initRuntimeControl() {
   if (_initialized) return;
   _initialized = true;
+  await loadRuntimeAvailability();
   await hydrateDefaultRuntime();
   hideLegacyLangGraphSetting();
   buildRuntimeSettings();
+  applyRuntimeAvailabilityToControls();
   simplifyOpenCodeSettings();
   createRuntimeIndicator();
   createRuntimeQuickReset();

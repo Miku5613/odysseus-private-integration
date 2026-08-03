@@ -47,10 +47,6 @@ qrcode[pil]
 croniter
 pytest
 pytest-asyncio
-# Restart-durable native LangGraph run/checkpoint state.
-langgraph==1.2.7
-langchain-core>=1.4.8,<2
-langgraph-checkpoint-sqlite==3.1.0
 # starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.

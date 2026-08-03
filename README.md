@@ -1,76 +1,257 @@
-<p align="center">
-  <img src="docs/odysseus-wordmark.png" alt="Odysseus" width="238">
-</p>
+> This repository is a runtime-focused fork of [the original Odysseus project](https://github.com/pewdiepie-archdaemon/odysseus). Read the [upstream README](https://github.com/pewdiepie-archdaemon/odysseus/blob/main/README.md) for the base application's features, deployment choices, and project history. This document covers the runtime upgrades added by this fork.
 
-<p align="center">
-  A self-hosted AI workspace for chat, agents, research, documents, email, notes, calendar, and local model workflows.
-</p>
+# Odysseus Runtime Upgrade
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="docs/setup.md">Setup Guide</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="ROADMAP.md">Roadmap</a>
-</p>
+This version preserves the upstream Odysseus workspace and adds two independent Agent runtime choices:
 
-<p align="center">
-  <a href="https://repology.org/project/odysseus-ai/versions"><img src="https://repology.org/badge/vertical-allrepos/odysseus-ai.svg" alt="Packaging status"></a>
-</p>
+- **LangGraph** — native, durable orchestration for planned work, specialist workers, recovery, and grounded final synthesis.
+- **OpenCode** — an adapter to the external OpenCode agent runtime, with one managed native conversation per Odysseus chat and an integrated Session Manager/TUI workflow.
 
-<p align="center">
-  <img src="docs/odysseus-browser.jpg" alt="Odysseus interface">
-</p>
+**Legacy** remains the built-in baseline. LangGraph and OpenCode are optional installations: if either is missing, Odysseus still starts, labels that runtime **Not Installed**, disables it in Runtime Settings, and excludes it from the chat quick toggle.
 
----
+<!-- Suggested image: Runtime Settings showing Legacy, LangGraph, and OpenCode availability. -->
 
-## Quick Start
+## Quick Startup Guide
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/odysseus-dev/odysseus/tree/main) if you want the more curated branch.
+### 1. Clone this fork
 
-```bash
-git clone https://github.com/odysseus-dev/odysseus.git
-cd odysseus
-cp .env.example .env
-docker compose up -d --build
+```powershell
+git clone https://github.com/Miku5613/odysseus-private-integration.git
+cd odysseus-private-integration
 ```
 
-Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
+### 2. Install Odysseus
 
-Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](docs/setup.md).
+On Windows, run:
 
-## Features
+```powershell
+& '.\Express Installation.bat'
+```
 
-- **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.
-- **Cookbook** — hardware-aware model recommendations, downloads, and serving.
-- **Deep Research** — multi-step web research with source reading and report generation.
-- **Compare** — blind side-by-side model testing and synthesis.
-- **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
-- **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
-- **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
-- **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
+The installer sets up the mandatory Python environment and checks what is already present before showing any prompt. Installed compatible components are skipped. A missing optional component gets an **install** prompt; a detected incompatible or outdated component gets a separate **update** prompt. It does **not** install or offer any model library.
 
-## Demo
+At the end, the installer can create `Quick Launch Odysseus.bat` from the tracked portable launcher template. If the launcher already exists and matches the template, it is skipped without asking; if its template changed, the installer asks whether to update it.
 
-A full hover-to-play tour lives on the landing page: [`docs/index.html`](docs/index.html).
+To inspect the machine without installing anything:
 
-## Contributing
+```powershell
+& '.\Verify Files Integrity.bat'
+```
 
-Help is welcome. The best entry points are fresh-install testing, provider setup bugs, mobile/editor polish, docs, and small focused refactors. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
+### 3. Configure a model provider
 
-## Security
+Odysseus does not bundle a model. For the quickest local start, this fork recommends [Ollama](https://ollama.com/) because it has a small setup surface. Install it manually on Windows:
 
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
+```powershell
+winget install --id Ollama.Ollama -e
+ollama pull qwen3:8b
+```
 
-## Star History
+Ollama is a recommendation, not an Odysseus dependency, and the express installer never installs it. LM Studio or any compatible local/remote provider can be configured instead.
 
-<a href="https://www.star-history.com/?repos=odysseus-dev%2Fodysseus&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=odysseus-dev/odysseus&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=odysseus-dev/odysseus&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=odysseus-dev/odysseus&type=date&legend=top-left" />
- </picture>
-</a>
+### 4. Start Odysseus
 
-## License
+```powershell
+powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1
+```
 
-AGPL-3.0-or-later -- see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
+Open `http://127.0.0.1:7000`, complete the first-admin setup if prompted, add the model endpoint in Settings, and choose a runtime under **Settings → Runtime**.
+
+For Docker, macOS, Linux, HTTPS, and the base application configuration, use the [upstream setup documentation](https://github.com/pewdiepie-archdaemon/odysseus/blob/main/docs/setup.md). Docker is deliberately not installed by the express installer: on Windows its WSL 2/kernel prerequisites can require elevation and a restart, so it is safer as a user-managed, resumable installation rather than a hidden one-shot step.
+
+## Runtime Availability
+
+| Runtime | Installation | What happens when absent |
+| --- | --- | --- |
+| Legacy | Built into Odysseus; mandatory baseline | Always available |
+| LangGraph | Optional Python runtime pack | Shown as **Not Installed** and disabled; Agent requests use Legacy |
+| OpenCode | Optional external CLI | Shown as **Not Installed** and disabled; no OpenCode process is started |
+
+Availability means the runtime itself is installed. Model endpoint reachability is checked later when a run is prepared; an installed runtime does not imply that a selected model provider is online.
+
+The backend also enforces these boundaries. A stale browser setting cannot force an unavailable LangGraph runtime, and direct OpenCode runtime requests return a controlled unavailable response when the CLI is missing.
+
+## How Runtime Selection Works
+
+Runtime selection applies to Agent mode. The default is set in **Settings → Runtime**, while each existing chat retains its assigned runtime. The small runtime control beside the composer cycles only through installed runtimes.
+
+```mermaid
+flowchart LR
+    A["Agent message"] --> B{"Selected runtime installed?"}
+    B -->|"No"| L["Legacy Agent runtime"]
+    B -->|"LangGraph"| G["Native LangGraph orchestration"]
+    B -->|"OpenCode"| O["OpenCode adapter and managed server"]
+    B -->|"Legacy"| L
+    G --> P["Persisted Odysseus answer"]
+    O --> P
+    L --> P
+```
+
+Runtime failures stay contained. An OpenCode failure does not silently widen into LangGraph or Legacy. LangGraph can use its configured Legacy fallback only for an eligible failed plan step; it does not restart the entire user query in Legacy.
+
+## LangGraph Runtime
+
+LangGraph is integrated as a native Odysseus orchestration layer rather than a separate UI or server. It uses the active Odysseus model registry, workspace boundary, tools, chat persistence, Server-Sent Events stream, and authentication context.
+
+### Workflow
+
+1. **Admission** decides whether the turn should be answered directly, handled by one specialist, or coordinated as multiple steps.
+2. **Planning** produces explicit `PlanStep` contracts, including required sources, dependencies, completion conditions, and intended worker capability.
+3. **Resolution** binds each step to an allowed execution surface without silently widening its source authority.
+4. **Workers** perform general reasoning, code inspection, knowledge retrieval, research, MCP-specialized work, or web search only when the plan authorizes it.
+5. **Verification and replanning** check evidence, semantic completion, dependency results, and retry/replan limits.
+6. **Final synthesis** uses the selected synthesis model to write a non-empty user-facing answer from verified worker results.
+7. **Checkpointing** stores run state, decisions, step attempts, events, and recovery data in SQLite so interrupted work can be inspected or resumed safely.
+
+<!-- Suggested image: Live Task Planner showing a multi-step LangGraph run. -->
+
+### LangGraph settings
+
+The Runtime Settings panel exposes the main product controls:
+
+| Setting group | Available controls |
+| --- | --- |
+| Execution | Automatic/direct/single-worker/multi-step planning, effort preset, parallel worker limit |
+| Permissions | Guided or active action level, per-step Legacy fallback policy, approval before long research |
+| Models | One compatible runtime model or role-specific models for planner, general, knowledge, code, research, and final synthesis |
+| Recovery | Interrupted-run behavior, completed-run retention, completed-research reuse |
+| Context | Conversation, workspace, indexed knowledge, completed research, and personal memory source policy |
+| Visibility | Show or hide the Live Task Planner while work is running |
+
+Important operating rules:
+
+- Tool and file authority remains scoped to the selected workspace and the plan contract.
+- Public web search is not automatically enabled to rescue a local-file or workspace task.
+- Structured admission, supervisor, and planner calls are isolated from user-facing synthesis behavior.
+- The final answer is persisted through the normal Odysseus conversation path; internal reasoning is never treated as the user answer.
+- Durable recovery uses `data/langgraph/checkpoints.sqlite3` by default and keeps large artifacts in the adjacent LangGraph artifact store.
+
+### Manual LangGraph installation
+
+If it was skipped during express installation:
+
+```powershell
+venv\Scripts\python.exe -m pip install -r requirements-langgraph.txt
+```
+
+Restart Odysseus, reopen Runtime Settings, and LangGraph becomes selectable.
+
+## OpenCode Runtime
+
+OpenCode is integrated as an external peer runtime. Odysseus manages a loopback `opencode serve` process, translates the active Odysseus endpoint/model into an isolated OpenCode configuration, normalizes OpenCode events into the Odysseus stream, and persists the resulting transcript in the active Odysseus chat.
+
+It does not import LangGraph and does not use LangGraph or Legacy as a hidden fallback.
+
+### Conversation workflow
+
+1. Select **OpenCode** for a new or existing Agent chat.
+2. Odysseus resolves the selected endpoint, model, and workspace.
+3. The adapter starts or reuses the managed loopback OpenCode server.
+4. The chat is bound to a native OpenCode session; reuse/reset behavior follows Runtime Settings.
+5. Permission requests, tool activity, todos, deltas, completion, cancellation, and errors are normalized into Odysseus events.
+6. The final non-empty answer and native session identifiers are persisted to the Odysseus transcript.
+
+<!-- Suggested image: OpenCode response stream and Session Manager launch control. -->
+
+### OpenCode settings and controls
+
+- **Reuse conversation per chat** keeps one native OpenCode session attached to each Odysseus conversation.
+- **Reset after switching runtime** starts fresh when a chat leaves OpenCode and later returns.
+- **Permission mode** can require approval or grant workspace-scoped operation, while Odysseus still applies its own ownership and workspace checks.
+- **Active model and workspace** are passed into the managed OpenCode configuration when the runtime is prepared.
+- **Start, stop, restart, health, logs, cancellation, and conversation reset** are exposed through the adapter rather than requiring a separately managed server terminal.
+
+### Session Manager and TUI
+
+The **Open Session Manager** action opens an authenticated native terminal view for the current Odysseus/OpenCode context. It supports:
+
+- inspecting and switching native sessions;
+- starting a new session or forgetting a chat binding;
+- viewing live status, transcript, todos, and server logs;
+- reviewing permission requests and recorded approvals;
+- working with OpenCode MCP entries, plugins, extensions, and commands;
+- applying lifecycle operations without exposing the managed server outside loopback.
+
+Session Manager control uses a short-lived scoped grant. The managed server defaults to `127.0.0.1:4096`; do not expose it directly to the network without OpenCode server authentication.
+
+### Manual OpenCode installation
+
+If it was skipped during express installation, install the official CLI package:
+
+```powershell
+npm install -g opencode-ai
+opencode --version
+```
+
+Then restart Odysseus. A standalone OpenCode binary may also be used by setting `ODYSSEUS_OPENCODE_EXECUTABLE` to its path. OpenCode itself still needs access to a model provider; the adapter does not install one.
+
+## Added Dependency Inventory
+
+This table intentionally lists only dependencies introduced for this fork’s runtime upgrades. It does not repeat FastAPI, ChromaDB, SearXNG, document tooling, or any other upstream Odysseus dependency.
+
+| Added dependency | Required for | Mandatory? | Installation |
+| --- | --- | --- | --- |
+| `langgraph==1.2.7` | Native graph execution and orchestration | Optional | `requirements-langgraph.txt` |
+| `langchain-core>=1.4.8,<2` | LangGraph message/core contracts | Optional | `requirements-langgraph.txt` |
+| `langgraph-checkpoint-sqlite==3.1.0` | Restart-durable SQLite checkpoints | Optional | `requirements-langgraph.txt` |
+| OpenCode CLI (`opencode-ai`) | OpenCode runtime, managed server, native sessions, and TUI | Optional | Express opt-in or `npm install -g opencode-ai` |
+| Node.js/npm | One supported Windows installation/upgrade path for the OpenCode CLI | Optional | Installed only after approving OpenCode; unnecessary when using a standalone binary |
+
+No model library is an added mandatory dependency. Ollama, LM Studio, OpenCode Zen, and other OpenAI-compatible/local providers are user choices and remain outside express installation.
+
+## Installation Utilities
+
+### `Verify Files Integrity.bat`
+
+Runs a lightweight, non-installing startup simulation. It reports each check as **Installed**, **Not Installed**, **Unreachable**, **Fallback**, or **Configuration**, and labels mandatory versus optional groups. It checks the Python runtime, core imports, required files, data/database readiness, optional LangGraph packages, the OpenCode executable, and supporting tools.
+
+### `Express Installation.bat`
+
+Creates `venv`, installs `requirements.txt`, and runs first-time setup. It then asks separately before installing:
+
+- the LangGraph runtime pack;
+- the OpenCode CLI (and Node.js only if that approved path requires it);
+- upstream optional document, speech, search, and PDF extras.
+
+It never offers or installs Ollama, LM Studio, another model library, Docker Desktop, WSL, GPU drivers, or vendor API credentials. Optional install questions appear only for missing components. Update questions use the explicit wording **“Do you want to update the current version of …?”** and appear only when the installed version does not satisfy the required version or OpenCode reports a newer registry version.
+
+### Portable quick launcher
+
+The express installer can create `Quick Launch Odysseus.bat` in the repository root from `scripts/portable-quick-launch-template.bat`. It is portable with the repository because every path is resolved relative to the batch file.
+
+Every launch performs a lightweight preflight:
+
+- required application files, Python 3.11+, `venv`, mandatory Python requirements, data-directory writeability, SQLite access, and port 7000;
+- optional LangGraph requirements, OpenCode CLI/version state, upstream optional extras, ChromaDB reachability, and local model-endpoint reachability;
+- immediate controlled exit naming the failed dependency when a mandatory check fails;
+- one confirmation before booting when optional components are absent, outdated, or unreachable;
+- direct startup with `venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 7000` after preflight passes.
+
+## Configuration Reference
+
+Most users should configure runtimes in the UI. These environment variables are useful for advanced OpenCode deployments:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `ODYSSEUS_OPENCODE_EXECUTABLE` | OpenCode executable name or absolute path | `opencode` |
+| `ODYSSEUS_OPENCODE_URL` | Managed/external OpenCode server URL | `http://127.0.0.1:4096` |
+| `ODYSSEUS_OPENCODE_MANAGE_SERVER` | Let Odysseus start and stop OpenCode | `true` |
+| `ODYSSEUS_OPENCODE_WORKSPACE` | Fallback workspace for OpenCode | unset |
+| `ODYSSEUS_OPENCODE_STARTUP_TIMEOUT` | Managed server startup timeout | `30` seconds |
+| `ODYSSEUS_OPENCODE_RUN_TIMEOUT` | Maximum OpenCode run duration | `900` seconds |
+| `ODYSSEUS_LANGGRAPH_CHECKPOINT_DB` | Override LangGraph checkpoint database | `data/langgraph/checkpoints.sqlite3` |
+| `ODYSSEUS_LANGGRAPH_ARTIFACT_DIR` | Override durable artifact directory | beside the checkpoint database |
+
+## Troubleshooting
+
+- **Only Legacy appears:** run `Verify Files Integrity.bat`. Optional runtimes are disabled until all components for that runtime are detected, then require an Odysseus restart.
+- **LangGraph is Not Installed:** install `requirements-langgraph.txt` into the same `venv` used by Odysseus.
+- **OpenCode is Not Installed:** confirm `opencode --version` works in a new terminal or set `ODYSSEUS_OPENCODE_EXECUTABLE` explicitly.
+- **Runtime installed but model unavailable:** verify the selected provider endpoint and model in Odysseus. Installation status does not probe or install a model server.
+- **Docker installation requests a restart:** finish the WSL 2/kernel or Docker Desktop setup, restart Windows, and rerun the Docker setup. The native Windows launcher does not require Docker.
+
+## Upstream, License, and Scope
+
+This fork builds on [Odysseus](https://github.com/pewdiepie-archdaemon/odysseus). Base-product questions and unchanged features should be read alongside the upstream documentation. Runtime-specific behavior described here belongs to this fork.
+
+AGPL-3.0-or-later — see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
