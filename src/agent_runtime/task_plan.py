@@ -4,6 +4,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from src.agent_runtime.intent_complexity import REQUESTED_SOURCES
+
 
 _PLAN_KEYS = {
     "objective",
@@ -19,6 +21,9 @@ _STEP_KEYS = {
     "uses_dependency_state",
     "requires_external_state",
     "requires_mutation",
+    "requested_sources",
+    "excluded_sources",
+    "retrieval_concepts",
 }
 
 
@@ -39,6 +44,9 @@ class PlanStep:
     uses_dependency_state: bool = False
     requires_external_state: bool = False
     requires_mutation: bool = False
+    requested_sources: tuple[str, ...] = ()
+    excluded_sources: tuple[str, ...] = ()
+    retrieval_concepts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,6 +273,28 @@ def validate_task_plan_payload(
             field=f"TaskPlan step {index}",
         )
 
+        requested_sources = _clean_string_tuple(
+            raw_step.get("requested_sources", []),
+            field=f"TaskPlan step {index} requested_sources",
+        )
+        excluded_sources = _clean_string_tuple(
+            raw_step.get("excluded_sources", []),
+            field=f"TaskPlan step {index} excluded_sources",
+        )
+        unknown_sources = (
+            set(requested_sources) | set(excluded_sources)
+        ) - REQUESTED_SOURCES
+        if unknown_sources:
+            raise ValueError(
+                f"TaskPlan step {index} has unsupported sources: "
+                + ", ".join(sorted(unknown_sources))
+            )
+        if set(requested_sources) & set(excluded_sources):
+            raise ValueError(
+                f"TaskPlan step {index} requested_sources and "
+                "excluded_sources must not overlap"
+            )
+
         steps.append(
             PlanStep(
                 id=_clean_required_string(
@@ -316,6 +346,14 @@ def validate_task_plan_payload(
                     field=(
                         f"TaskPlan step {index} "
                         "requires_mutation"
+                    ),
+                ),
+                requested_sources=requested_sources,
+                excluded_sources=excluded_sources,
+                retrieval_concepts=_clean_string_tuple(
+                    raw_step.get("retrieval_concepts", []),
+                    field=(
+                        f"TaskPlan step {index} retrieval_concepts"
                     ),
                 ),
             )

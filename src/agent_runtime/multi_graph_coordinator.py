@@ -175,6 +175,9 @@ def _plan_payload(plan: TaskPlan) -> dict[str, Any]:
                 "uses_dependency_state": step.uses_dependency_state,
                 "requires_external_state": step.requires_external_state,
                 "requires_mutation": step.requires_mutation,
+                "requested_sources": list(step.requested_sources),
+                "excluded_sources": list(step.excluded_sources),
+                "retrieval_concepts": list(step.retrieval_concepts),
             }
             for step in plan.steps
         ],
@@ -242,6 +245,8 @@ def _execution_payload(
                 "objective": step.objective,
                 "depends_on": list(step.depends_on),
                 "uses_dependency_state": step.uses_dependency_state,
+                "requested_sources": list(step.requested_sources),
+                "excluded_sources": list(step.excluded_sources),
                 "status": execution.status,
                 "output": output,
                 "artifact_refs": list(execution.artifact_refs),

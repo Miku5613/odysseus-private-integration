@@ -133,6 +133,12 @@ async def resume_interrupted_step(
             "dependency_outputs": dict(
                 inputs.get("dependency_outputs") or {}
             ),
+            "source_contract": dict(
+                inputs.get("source_contract") or {}
+            ),
+            "retrieval_concepts": list(
+                inputs.get("retrieval_concepts") or ()
+            ),
             "cancellation_scope": lifecycle.cancellation,
         }
     }

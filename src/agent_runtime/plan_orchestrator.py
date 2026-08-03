@@ -18,6 +18,9 @@ from src.agent_runtime.plan_execution import (
     step_execution,
     task_plan_fingerprint,
 )
+from src.agent_runtime.plan_source_contract import (
+    step_source_contract,
+)
 from src.agent_runtime.step_execution import (
     StepExecutionContext,
     StepExecutionUnavailable,
@@ -165,6 +168,10 @@ def _context_for_plan_step(
     worker_context[
         "dependency_outputs"
     ] = dependency_outputs
+    worker_context["source_contract"] = step_source_contract(step)
+    worker_context["retrieval_concepts"] = list(
+        step.retrieval_concepts
+    )
     supervisor_state[
         "worker_context"
     ] = worker_context
@@ -205,6 +212,8 @@ def _attempt_input_refs(
         "session_id": (
             context.session_id if context is not None else None
         ),
+        "source_contract": step_source_contract(step),
+        "retrieval_concepts": list(step.retrieval_concepts),
     }
 
 
@@ -265,15 +274,6 @@ async def run_task_plan(
     worker_results: list[WorkerResult] = []
     execution_order: list[str] = []
     executions = 0
-    source_contract = dict(
-        (
-            context.supervisor_state.get("worker_context", {})
-            if context is not None
-            else {}
-        ).get("source_contract", {})
-        or {}
-    )
-
     while True:
         if _all_completed(current):
             return PlanOrchestrationResult(
@@ -353,7 +353,7 @@ async def run_task_plan(
                 step,
                 model=resolver_model,
                 surfaces=surfaces,
-                source_contract=source_contract,
+                source_contract=step_source_contract(step),
             )
 
             if resolution.status == "clarification":

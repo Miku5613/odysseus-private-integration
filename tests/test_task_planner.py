@@ -30,6 +30,10 @@ def _multi_assessment():
                 ),
                 requires_external_state=True,
                 requires_mutation=False,
+                retrieval_concepts=(
+                    "project state",
+                    "current research",
+                ),
             ),
         ),
         needs_planning=True,
@@ -38,6 +42,11 @@ def _multi_assessment():
         reasoning_summary=(
             "Two independent acquisition surfaces feed one result."
         ),
+        requested_sources=(
+            "authorized_workspace_files",
+            "public_web",
+        ),
+        excluded_sources=(),
     )
 
 
@@ -65,6 +74,11 @@ def _valid_plan_payload():
                 "work_domains": ["user_project_state"],
                 "requires_external_state": True,
                 "requires_mutation": False,
+                "requested_sources": [
+                    "authorized_workspace_files"
+                ],
+                "excluded_sources": [],
+                "retrieval_concepts": ["project state"],
             },
             {
                 "id": "current_research",
@@ -73,6 +87,9 @@ def _valid_plan_payload():
                 "work_domains": ["current_public_research"],
                 "requires_external_state": True,
                 "requires_mutation": False,
+                "requested_sources": ["public_web"],
+                "excluded_sources": [],
+                "retrieval_concepts": ["current research"],
             },
             {
                 "id": "synthesize",
@@ -153,6 +170,10 @@ def test_parse_plain_json_response():
     )
     assert plan.steps[2].uses_dependency_state is True
     assert plan.steps[2].requires_external_state is False
+    assert plan.steps[0].requested_sources == (
+        "authorized_workspace_files",
+    )
+    assert plan.steps[1].requested_sources == ("public_web",)
 
 
 def test_parse_fenced_json_response():
@@ -245,6 +266,38 @@ def test_sync_planner_retries_once_with_precise_validation_feedback():
     assert plan.steps[-1].id == "synthesize"
     assert len(model.prompts) == 2
     assert "depends on unknown step missing" in model.prompts[1]
+
+
+def test_multi_source_admission_rejects_external_step_without_source_contract():
+    payload = _valid_plan_payload()
+    payload["steps"][0].pop("requested_sources")
+    model = _Model([payload, payload])
+
+    with pytest.raises(
+        ValueError,
+        match="requires an explicit requested source",
+    ):
+        plan_task_from_assessment(
+            "Compare my project with current options.",
+            _multi_assessment(),
+            model=model,
+        )
+
+
+def test_planner_cannot_invent_retrieval_concepts_outside_admission():
+    payload = _valid_plan_payload()
+    payload["steps"][0]["retrieval_concepts"] = ["unadmitted concept"]
+    model = _Model([payload, payload])
+
+    with pytest.raises(
+        ValueError,
+        match="retrieval concepts outside admission",
+    ):
+        plan_task_from_assessment(
+            "Compare my project with current options.",
+            _multi_assessment(),
+            model=model,
+        )
 
 
 def test_sync_planner_exhaustion_is_bounded():

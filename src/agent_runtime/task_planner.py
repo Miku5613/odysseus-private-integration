@@ -11,6 +11,9 @@ from src.agent_runtime.task_plan import (
     TaskPlan,
     validate_or_repair_task_plan_payload,
 )
+from src.agent_runtime.plan_source_contract import (
+    bind_admitted_plan_sources,
+)
 from src.agent_runtime.structured_llm import (
     build_structured_retry_prompt,
     invoke_structured_model_async,
@@ -43,6 +46,9 @@ def _assessment_payload(
                     goal.requires_external_state
                 ),
                 "requires_mutation": goal.requires_mutation,
+                "retrieval_concepts": list(
+                    goal.retrieval_concepts
+                ),
             }
             for goal in assessment.goals
         ],
@@ -54,6 +60,8 @@ def _assessment_payload(
             assessment.clarification_needed
         ),
         "reasoning_summary": assessment.reasoning_summary,
+        "requested_sources": list(assessment.requested_sources),
+        "excluded_sources": list(assessment.excluded_sources),
     }
 
 
@@ -94,6 +102,15 @@ def build_task_planner_prompt(
                 "uses_dependency_state": False,
                 "requires_external_state": False,
                 "requires_mutation": False,
+                "requested_sources": [
+                    "one admitted source required by this step"
+                ],
+                "excluded_sources": [
+                    "sources explicitly forbidden for this step"
+                ],
+                "retrieval_concepts": [
+                    "semantic evidence concept for this step"
+                ],
             }
         ],
         "reasoning_summary": (
@@ -145,7 +162,13 @@ def build_task_planner_prompt(
         "state. Planning never grants permission to perform that mutation.",
         "13. work_domains are semantic labels only. They are not capability or "
         "backend names.",
-        "14. Return only one JSON object matching the schema. Do not include "
+        "14. Every requires_external_state=true step MUST declare the exact "
+        "requested_sources it needs, chosen only from the validated admission "
+        "requested_sources. Preserve all admission excluded_sources on every "
+        "step. Do not silently substitute a different source.",
+        "15. retrieval_concepts must contain only concepts relevant to that "
+        "step objective, not the union of unrelated goals.",
+        "16. Return only one JSON object matching the schema. Do not include "
         "markdown fences or commentary.",
         "",
         "USER REQUEST:",
@@ -256,13 +279,17 @@ def parse_task_plan_response(response: Any) -> TaskPlan:
 
 def _validate_multi_graph_plan(
     plan: TaskPlan,
+    assessment: IntentComplexityAssessment,
 ) -> TaskPlan:
     if len(plan.steps) < 2:
         raise ValueError(
             "multi_graph TaskPlan must contain at least two "
             "semantic steps"
         )
-    return plan
+    return bind_admitted_plan_sources(
+        plan,
+        assessment,
+    )
 
 
 def plan_task_from_assessment(
@@ -296,7 +323,8 @@ def plan_task_from_assessment(
 
         try:
             return _validate_multi_graph_plan(
-                parse_task_plan_response(response)
+                parse_task_plan_response(response),
+                assessment,
             )
         except Exception as exc:
             if round_index >= 1:
@@ -325,7 +353,8 @@ async def plan_task_from_assessment_async(
         model,
         prompt,
         lambda response: _validate_multi_graph_plan(
-            parse_task_plan_response(response)
+            parse_task_plan_response(response),
+            assessment,
         ),
     )
 

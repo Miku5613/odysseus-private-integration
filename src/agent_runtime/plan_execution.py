@@ -117,6 +117,9 @@ def task_plan_fingerprint(plan: TaskPlan) -> str:
                     step.requires_external_state
                 ),
                 "requires_mutation": step.requires_mutation,
+                "requested_sources": list(step.requested_sources),
+                "excluded_sources": list(step.excluded_sources),
+                "retrieval_concepts": list(step.retrieval_concepts),
             }
             for step in plan.steps
         ],

@@ -58,6 +58,8 @@ def _assessment():
         missing_information=(),
         clarification_needed=False,
         reasoning_summary="Two dependent goals.",
+        requested_sources=("attached_document",),
+        excluded_sources=("public_web",),
     )
 
 
@@ -124,6 +126,7 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     captured = {}
 
     def gather(handoff, *, session_id=None):
+        captured["gather_context"] = dict(handoff.context)
         return WorkerResult(
             capability="gather_cap",
             status="completed",
@@ -189,7 +192,15 @@ def test_multi_graph_coordinator_executes_dependencies_and_emits_one_done():
     assert metrics["execution_order"] == ["gather", "combine"]
     assert metrics["multi_graph"] is True
     assert captured["dependency_outputs"]["gather"]["summary"] == "Evidence A"
-    assert captured["retrieval_concepts"] == [
+    assert captured["gather_context"]["source_contract"] == {
+        "requested_sources": ["attached_document"],
+        "excluded_sources": ["public_web"],
+        "retrieval_concepts": [
+            "runtime admission",
+            "workspace source",
+        ],
+    }
+    assert captured["gather_context"]["retrieval_concepts"] == [
         "runtime admission",
         "workspace source",
     ]
