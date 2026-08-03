@@ -154,12 +154,35 @@ def _split_obligations(query: str | None) -> list[dict[str, Any]]:
 
     return out
 
-def build_task_contract(query: str | None) -> dict[str, Any]:
+def build_task_contract(
+    query: str | None,
+    *,
+    semantic_dimensions: tuple[str, ...] | list[str] = (),
+) -> dict[str, Any]:
+    dimensions = tuple(dict.fromkeys(
+        str(value).strip()
+        for value in semantic_dimensions
+        if str(value).strip()
+    ))
+    obligations = _split_obligations(query)
+    obligations.extend(
+        {
+            "kind": "evidence_dimension",
+            "term": dimension,
+            "status": "unknown",
+        }
+        for dimension in dimensions
+    )
     return {
-        "task_kind": _task_kind(query),
+        "task_kind": (
+            "compound_code_location"
+            if len(dimensions) > 1
+            else _task_kind(query)
+        ),
         "source_intent": _source_intent(query),
         "exact_terms": extract_exact_terms(query),
-        "obligations": _split_obligations(query),
+        "semantic_dimensions": list(dimensions),
+        "obligations": obligations,
         "requires_terminal_finalizer": True,
         "allow_direct_end": False,
     }
@@ -172,6 +195,8 @@ def format_task_contract(contract: dict[str, Any] | None) -> str:
         f"- task_kind: {c.get('task_kind', 'unknown')}",
         f"- source_intent: {c.get('source_intent', 'unknown')}",
         f"- exact_terms: {', '.join(c.get('exact_terms') or []) or '(none)'}",
+        "- semantic_dimensions: "
+        + (", ".join(c.get("semantic_dimensions") or []) or "(none)"),
         f"- requires_terminal_finalizer: {c.get('requires_terminal_finalizer', True)}",
         f"- allow_direct_end: {c.get('allow_direct_end', False)}",
         "- obligations:",

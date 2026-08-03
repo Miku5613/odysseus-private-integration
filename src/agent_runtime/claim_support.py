@@ -198,6 +198,14 @@ def _is_probably_prompt_or_header(obs: dict[str, Any]) -> bool:
     return False
 
 
+def is_implementation_source_window(obs: dict[str, Any]) -> bool:
+    return bool(
+        obs.get("source_authority") == "source_code"
+        and obs.get("kind") == "context_window"
+        and not _is_probably_prompt_or_header(obs)
+    )
+
+
 
 def _context_has_concrete_call_site(obs: dict[str, Any], query: str | None) -> bool:
     text = str(obs.get("content") or "")

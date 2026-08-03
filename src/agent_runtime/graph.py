@@ -223,7 +223,10 @@ def build_graph(
     def task_contract_node(state: AgentState):
         events = list(state.get("events", []))
         query = _state_question(state)
-        contract = build_task_contract(query)
+        contract = dict(
+            state.get("task_contract")
+            or build_task_contract(query)
+        )
 
         event = make_event(
             "task_contract",
@@ -241,6 +244,34 @@ def build_graph(
             "events": events,
             "task_contract": contract,
         }
+
+    def _coverage_query(state: AgentState) -> str:
+        report = dict(
+            (state.get("claim_support") or {}).get("contract_report")
+            or {}
+        )
+        missing_dimensions = [
+            str(item.get("term") or "").strip()
+            for item in report.get("missing", ())
+            if item.get("kind") == "evidence_dimension"
+            and str(item.get("term") or "").strip()
+        ]
+        return " ".join(missing_dimensions) or _state_question(state)
+
+    def _completion_support_ready(
+        state: AgentState,
+        claim_support: dict,
+    ) -> bool:
+        if has_strong_claim_support(claim_support):
+            return True
+        is_compound = (
+            (state.get("task_contract") or {}).get("task_kind")
+            == "compound_code_location"
+        )
+        return bool(
+            not is_compound
+            and has_strong_evidence(state.get("evidence_hits", []))
+        )
 
 
     def call_model(state: AgentState):
@@ -545,9 +576,8 @@ def build_graph(
                 )
             )
 
-        claim_support = evaluate_code_location_support(
-            query=query,
-            observations=observations,
+        claim_support, _, observations = _evaluate_support_with_contract(
+            state | {"observations": observations}
         )
 
         return {
@@ -568,7 +598,7 @@ def build_graph(
         observations = list(state.get("observations", []))
         expanded_observations = list(state.get("expanded_observations", []))
         trace_spans = list(state.get("trace_spans", []))
-        query = _state_question(state)
+        query = _coverage_query(state)
 
         candidate = pick_context_candidate(
             observations,
@@ -594,9 +624,8 @@ def build_graph(
                 }
 
         if not candidate:
-            claim_support = evaluate_code_location_support(
-                query=query,
-                observations=observations,
+            claim_support, _, observations = _evaluate_support_with_contract(
+                state | {"observations": observations}
             )
             return {
                 "events": events,
@@ -718,9 +747,8 @@ def build_graph(
             evidence_hits.extend(new_hits)
             _emit_evidence_hits(events, new_hits)
 
-        claim_support = evaluate_code_location_support(
-            query=query,
-            observations=observations,
+        claim_support, _, observations = _evaluate_support_with_contract(
+            state | {"observations": observations}
         )
 
         return {
@@ -1126,7 +1154,7 @@ def build_graph(
 
         claim_support = state.get("claim_support") or _evaluate_support(state)
 
-        if has_strong_claim_support(claim_support) or has_strong_evidence(state.get("evidence_hits", [])):
+        if _completion_support_ready(state, claim_support):
             event = make_event(
                 "runtime_stop_condition",
                 runtime=RUNTIME_VERSION,
@@ -1141,7 +1169,7 @@ def build_graph(
         candidate = pick_context_candidate(
             state.get("observations", []),
             state.get("expanded_observations", []),
-            query=_state_question(state),
+            query=_coverage_query(state),
             min_confidence=18,
         )
         if candidate is not None:
@@ -1187,7 +1215,7 @@ def build_graph(
     def route_after_observation_expand(state: AgentState):
         claim_support = state.get("claim_support") or _evaluate_support(state)
 
-        if has_strong_claim_support(claim_support) or has_strong_evidence(state.get("evidence_hits", [])):
+        if _completion_support_ready(state, claim_support):
             event = make_event(
                 "runtime_stop_condition",
                 runtime=RUNTIME_VERSION,

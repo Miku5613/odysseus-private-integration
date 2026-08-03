@@ -218,7 +218,12 @@ def _finalize_recovered_step(
     produces the step answer and explicitly verifies semantic fulfillment.
     """
 
-    task_contract = build_task_contract(handoff.objective)
+    task_contract = build_task_contract(
+        handoff.objective,
+        semantic_dimensions=tuple(
+            handoff.context.get("retrieval_concepts", ()) or ()
+        ),
+    )
     contract_report = contract_support_report(
         contract=task_contract,
         observations=ledger_observations,
@@ -229,6 +234,17 @@ def _finalize_recovered_step(
         has_strong_claim_support(claim_support)
         and contract_ready
     )
+    dimension_statuses = [
+        item
+        for item in contract_report.get("obligations", ())
+        if item.get("kind") == "evidence_dimension"
+    ]
+    missing_dimensions = [
+        str(item.get("term") or "").strip()
+        for item in dimension_statuses
+        if item.get("status") != "satisfied"
+        and str(item.get("term") or "").strip()
+    ]
 
     base_data = {
         "objective": handoff.objective,
@@ -241,6 +257,8 @@ def _finalize_recovered_step(
         "claim_support_reason": claim_support.get("reason"),
         "contract_support": contract_report.get("support_level"),
         "contract_support_reason": contract_report.get("reason"),
+        "evidence_dimension_coverage": dimension_statuses,
+        "missing_evidence_dimensions": missing_dimensions,
         "grounded_finalizer_used": False,
         "task_fulfillment_complete": False,
     }
@@ -252,6 +270,10 @@ def _finalize_recovered_step(
             summary=fallback_summary,
             data=base_data,
             evidence=tuple(evidence),
+            missing_information=tuple(
+                f"Missing evidence dimension: {dimension}"
+                for dimension in missing_dimensions
+            ),
         )
 
     candidates = tuple(finalizer_candidates or ())
@@ -513,6 +535,9 @@ def run_code_worker(
         "workspace": workspace,
         "session_id": session_id,
         "owner": handoff.context.get("owner"),
+        "semantic_dimensions": tuple(
+            handoff.context.get("retrieval_concepts", ()) or ()
+        ),
     }
     try:
         signature = inspect.signature(stream_factory)
