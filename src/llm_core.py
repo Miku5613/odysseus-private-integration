@@ -1814,7 +1814,9 @@ def normalize_model_id(
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
+             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
+             structured_output: bool = False,
+             reasoning_effort: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
@@ -1845,6 +1847,14 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
 
     provider = _detect_provider(url)
     cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    if structured_output or reasoning_effort:
+        cache_key = hashlib.sha256(
+            (
+                cache_key
+                + f"|structured={structured_output}"
+                + f"|reasoning_effort={reasoning_effort or ''}"
+            ).encode()
+        ).hexdigest()
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1875,6 +1885,12 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        if structured_output:
+            payload["response_format"] = {"type": "json_object"}
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
+            payload["think"] = False
         _apply_local_generation_stability(payload, target_url, model)
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
@@ -1892,9 +1908,29 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         elif provider == "ollama":
             response = _parse_ollama_response(data)
         else:
-            msg = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            msg = choice["message"]
             content = msg.get("content")
-            if isinstance(content, list):
+            if structured_output:
+                finish_reason = str(choice.get("finish_reason") or "")
+                if finish_reason == "length":
+                    raise StructuredOutputIncomplete(
+                        "Structured provider response was truncated",
+                        finish_reason=finish_reason,
+                    )
+                response = content if isinstance(content, str) else ""
+                if not response.strip():
+                    reasoning_json = _complete_json_object_from_text(
+                        msg.get("reasoning_content")
+                        or msg.get("reasoning")
+                    )
+                    if not reasoning_json:
+                        raise StructuredOutputIncomplete(
+                            "Structured provider response had no complete JSON object",
+                            finish_reason=finish_reason,
+                        )
+                    response = reasoning_json
+            elif isinstance(content, list):
                 # Mistral structured content — extract thinking + text
                 text_part, thinking_part = _normalize_mistral_content(content)
                 if thinking_part:
@@ -1905,6 +1941,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
                 response = content or msg.get("reasoning_content") or ""
         _set_cached_response(cache_key, response)
         return response
+    except StructuredOutputIncomplete:
+        raise
     except Exception:
         raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
 

@@ -320,6 +320,43 @@ def _read_file_around_window_observation(
     )
 
 
+def _read_file_window_observation(
+    *,
+    args: dict[str, Any],
+    content: str,
+    span_id: str,
+    query: str | None,
+    observation_id: str,
+) -> dict[str, Any] | None:
+    """Preserve one exact direct file read as a verifier context window."""
+
+    path = normalize_path(str(args.get("path") or ""))
+    if not path or should_skip_source(path) or not str(content).strip():
+        return None
+
+    lines = extract_code_lines("read_file", args, content)
+    numbered = [
+        int(line["line"])
+        for line in lines
+        if line.get("line") is not None
+    ]
+    start = min(numbered) if numbered else int(args.get("offset") or 0) + 1
+    end = max(numbered) if numbered else start
+
+    return make_observation(
+        observation_id=observation_id,
+        kind="context_window",
+        source_path=path,
+        line_start=start,
+        line_end=end,
+        content=content,
+        source_tool="read_file",
+        derived_from_span=span_id,
+        query=query,
+        metadata={"direct_file_read": True},
+    )
+
+
 def observations_from_tool_result(
     *,
     tool_name: str,
@@ -366,6 +403,19 @@ def observations_from_tool_result(
             )
 
     elif tool_name in {"grep", "read_file"}:
+        if tool_name == "read_file":
+            window_obs = _read_file_window_observation(
+                args=args,
+                content=text,
+                span_id=span_id,
+                query=query,
+                observation_id=(
+                    f"obs_{start_index + len(observations) + 1}"
+                ),
+            )
+            if window_obs:
+                observations.append(window_obs)
+
         code_lines = extract_code_lines(tool_name, args, text)
 
         for line in code_lines:

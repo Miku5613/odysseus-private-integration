@@ -258,6 +258,9 @@ def test_prompt_owns_complexity_not_capability_selection():
     assert "Semantic topic count is not the same thing" in prompt
     assert "source-of-truth or execution surface" in prompt
     assert "Count acquisition boundaries, not topic labels" in prompt
+    assert "shared filesystem source or specialist capability" in prompt
+    assert "continue independent goals after one goal is" in prompt
+    assert "planner can isolate that failure" in prompt
     assert "persisted/private state are a distinct acquisition domain" in prompt
     assert "Possessive or deictic references to user-owned state" in prompt
     assert "Execution class is determined by prerequisite acquisition" in prompt
@@ -372,6 +375,58 @@ def test_model_output_token_bounds(
     )
 
     assert captured["kwargs"]["max_tokens"] == expected
+
+
+def test_explicit_independent_failure_isolation_cannot_collapse_to_single_graph(
+    monkeypatch,
+):
+    async def fake_fallback(*args, **kwargs):
+        return json.dumps(_single_payload())
+
+    monkeypatch.setattr(
+        intent_complexity,
+        "llm_call_async_with_fallback",
+        fake_fallback,
+    )
+
+    result = asyncio.run(
+        intent_complexity.assess_intent_complexity(
+            "Independently complete these tasks: (1) inspect missing.txt; it "
+            "may be absent, so continue. (2) read requirements.txt. (3) "
+            "inspect coordinator.py.",
+            llm_candidates=[("url", "model", {})],
+        )
+    )
+
+    assert result.execution_class == "multi_graph"
+    assert result.needs_planning is True
+    assert [goal.id for goal in result.goals] == [
+        "goal_1",
+        "goal_2",
+        "goal_3",
+    ]
+
+
+def test_numbered_single_workflow_is_not_promoted_without_failure_isolation(
+    monkeypatch,
+):
+    async def fake_fallback(*args, **kwargs):
+        return json.dumps(_single_payload())
+
+    monkeypatch.setattr(
+        intent_complexity,
+        "llm_call_async_with_fallback",
+        fake_fallback,
+    )
+
+    result = asyncio.run(
+        intent_complexity.assess_intent_complexity(
+            "Follow one workflow: (1) read requirements.txt, (2) summarize it.",
+            llm_candidates=[("url", "model", {})],
+        )
+    )
+
+    assert result.execution_class == "single_graph"
 
 
 def test_missing_information_is_deduplicated():

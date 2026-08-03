@@ -5,6 +5,7 @@ from src.agent_runtime.capability_registry import worker_capabilities
 from src.agent_runtime.evidence_ledger import (
     observations_from_tool_result,
     pick_context_candidate,
+    rank_observations,
 )
 
 import json
@@ -629,6 +630,9 @@ def _inspection_terms(query: str) -> list[str]:
         "responsibility",
         "responsibilities",
         "their",
+        "its",
+        "src",
+        "agent_runtime",
         "response",
         "responses",
         "handling",
@@ -1939,11 +1943,15 @@ def run_code_inspection_recovery(
     )
     if named_files:
         named_path = named_files[0].replace("\\", "/")
+        source_file = named_path.lower().endswith(
+            (".py", ".js", ".ts", ".tsx", ".jsx")
+        )
+        direct_limit = 120 if source_file else 400
         file_output = tools.read_file(
             state.workspace,
             named_path,
             offset=0,
-            limit=400,
+            limit=direct_limit,
         )
         found = bool(
             file_output.strip()
@@ -1955,14 +1963,105 @@ def run_code_inspection_recovery(
             {
                 "path": named_path,
                 "offset": 0,
-                "limit": 400,
+                "limit": direct_limit,
             },
             file_output,
             found,
         )
         if found:
+            expanded_outputs: list[str] = []
+            if source_file:
+                terms = list(dict.fromkeys([
+                    *_inspection_terms(query),
+                    *(
+                        str(term).strip().lower()
+                        for term in (semantic_terms or ())
+                        if str(term).strip()
+                    ),
+                ]))[:10]
+                if terms:
+                    grep_pattern = "|".join(
+                        re.escape(term)
+                        for term in terms
+                    )
+                    grep_output = tools.grep(
+                        state.workspace,
+                        grep_pattern,
+                        path=named_path,
+                        max_results=40,
+                        include_agent_runtime=True,
+                    )
+                    _record(
+                        state,
+                        "grep",
+                        {
+                            "pattern": grep_pattern,
+                            "path": named_path,
+                            "max_results": 40,
+                        },
+                        grep_output,
+                        bool(grep_output.strip()),
+                    )
+                    ledger = observations_from_tool_result(
+                        tool_name="grep",
+                        args={
+                            "pattern": grep_pattern,
+                            "path": named_path,
+                            "max_results": 40,
+                        },
+                        content=grep_output,
+                        span_id="direct_file_semantic_grep",
+                        query=query,
+                    )
+                    selected_lines: list[int] = []
+                    ranked_lines = [
+                        observation
+                        for observation in rank_observations(ledger)
+                        if observation.get("kind") == "code_line"
+                        and observation.get("line_start")
+                    ]
+                    preferred = [
+                        observation
+                        for observation in ranked_lines
+                        if not observation.get("weak_line")
+                    ] or ranked_lines
+                    for observation in preferred:
+                        line = int(observation.get("line_start") or 0)
+                        if line <= 0 or any(
+                            abs(line - previous) < 80
+                            for previous in selected_lines
+                        ):
+                            continue
+                        around = tools.read_file_around(
+                            state.workspace,
+                            named_path,
+                            line,
+                            radius=40,
+                        )
+                        _record(
+                            state,
+                            "read_file_around",
+                            {
+                                "path": named_path,
+                                "line": line,
+                                "radius": 40,
+                            },
+                            around,
+                            bool(around.strip()),
+                        )
+                        if around.strip():
+                            expanded_outputs.append(around)
+                            selected_lines.append(line)
+                        if len(selected_lines) >= 4:
+                            break
             state.final_answer = (
                 f"Direct contents of {named_path}:\n\n{file_output}"
+                + (
+                    "\n\nRelevant implementation windows:\n\n"
+                    + "\n\n---\n\n".join(expanded_outputs)
+                    if expanded_outputs
+                    else ""
+                )
             )
             state.metrics = {
                 "runtime": "code-inspection-recovery-v1",
@@ -1974,6 +2073,7 @@ def run_code_inspection_recovery(
                 "semantic_capability": "code_inspection",
                 "intent_reclassified": False,
                 "direct_file_inspection": True,
+                "direct_file_context_windows": len(expanded_outputs),
             }
             return state
 

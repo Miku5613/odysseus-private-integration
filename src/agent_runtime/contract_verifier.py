@@ -66,7 +66,16 @@ def _evidence_dimension_status(
     matched: set[str] = set()
     supported_by: list[str] = []
     for observation in observations:
-        if not is_implementation_source_window(observation):
+        direct_document_read = bool(
+            observation.get("kind") == "context_window"
+            and observation.get("source_tool") == "read_file"
+            and observation.get("source_authority") == "document"
+            and str(observation.get("content") or "").strip()
+        )
+        if not (
+            is_implementation_source_window(observation)
+            or direct_document_read
+        ):
             continue
         text = _norm(
             str(observation.get("source_path") or "")

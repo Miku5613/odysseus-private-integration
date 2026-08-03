@@ -103,10 +103,10 @@ def build_task_planner_prompt(
                 "requires_external_state": False,
                 "requires_mutation": False,
                 "requested_sources": [
-                    "one admitted source required by this step"
+                    "authorized_workspace_files"
                 ],
                 "excluded_sources": [
-                    "sources explicitly forbidden for this step"
+                    "public_web"
                 ],
                 "retrieval_concepts": [
                     "semantic evidence concept for this step"
@@ -165,7 +165,9 @@ def build_task_planner_prompt(
         "14. Every requires_external_state=true step MUST declare the exact "
         "requested_sources it needs, chosen only from the validated admission "
         "requested_sources. Preserve all admission excluded_sources on every "
-        "step. Do not silently substitute a different source.",
+        "step. Copy these exact enum values; do not put work_domains, file "
+        "types, paths, search terms, or retrieval_concepts in either source "
+        "field. Do not silently substitute a different source.",
         "15. retrieval_concepts must contain only concepts relevant to that "
         "step objective, not the union of unrelated goals.",
         "16. Return only one JSON object matching the schema. Do not include "

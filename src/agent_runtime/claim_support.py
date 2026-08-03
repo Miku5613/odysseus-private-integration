@@ -152,17 +152,22 @@ def _context_text(obs: dict[str, Any]) -> str:
 
 def _is_probably_prompt_or_header(obs: dict[str, Any]) -> bool:
     content = str(obs.get("content") or "")
-    text = _norm(content)
+    source_text = re.sub(
+        r"(?m)^[^\r\n]*?:\d+:\s?",
+        "",
+        content,
+    )
+    text = _norm(source_text)
     has_implementation = bool(
         re.search(
             r"\b(?:async\s+def|def|class)\s+[a-z_][a-z0-9_]*",
-            content,
+            source_text,
             flags=re.IGNORECASE,
         )
         and (
-            "await " in content
-            or re.search(r"\breturn\b", content)
-            or re.search(r"\b(?:if|for|while|try)\b", content)
+            "await " in source_text
+            or re.search(r"\breturn\b", source_text)
+            or re.search(r"\b(?:if|for|while|try)\b", source_text)
         )
     )
 
@@ -172,7 +177,7 @@ def _is_probably_prompt_or_header(obs: dict[str, Any]) -> bool:
         and (
             re.search(
                 r"(?m)^\s*(?:\d+:\s*)?(?:from\s+\S+\s+import|import\s+\S+)",
-                content,
+                source_text,
             )
             or "streamingresponse" in text
         )
@@ -188,7 +193,7 @@ def _is_probably_prompt_or_header(obs: dict[str, Any]) -> bool:
             or "you declare when the job is done" in text
             or "after a tool succeeds" in text
             or (
-                re.search(r'(?:"""|\'\'\')', content)
+                re.search(r'(?:"""|\'\'\')', source_text)
                 and re.search(r"\b(?:prompt|rules|instructions)\b", text)
             )
         )
@@ -319,6 +324,45 @@ def evaluate_code_location_support(
     observations: list[dict[str, Any]],
 ) -> dict[str, Any]:
     ranked = rank_observations(observations)
+
+    explicit_file_targets = {
+        value.lower().replace("/", "\\")
+        for value in re.findall(
+            r"[A-Za-z0-9_.\\/-]+\.(?:py|js|jsx|ts|tsx|css|html|json|"
+            r"md|txt|toml|yaml|yml)",
+            str(query or ""),
+            flags=re.IGNORECASE,
+        )
+    }
+    direct_document_reads = [
+        observation
+        for observation in ranked
+        if observation.get("kind") == "context_window"
+        and observation.get("source_tool") == "read_file"
+        and observation.get("source_authority") == "document"
+        and str(observation.get("content") or "").strip()
+        and any(
+            str(observation.get("source_path") or "").lower().endswith(
+                target
+            )
+            for target in explicit_file_targets
+        )
+    ]
+    if direct_document_reads:
+        best_document = direct_document_reads[0]
+        return {
+            "claim_type": "file_contents",
+            "support_level": "strong",
+            "supported_by": [best_document.get("observation_id")],
+            "reason": (
+                "An exact requested workspace document was read directly."
+            ),
+            "best_observation": best_document,
+            "obligation_report": {
+                "ok": True,
+                "reason": "exact requested file contents are available",
+            },
+        }
 
     source_contexts = [
         o for o in ranked

@@ -32,6 +32,33 @@ def _call(monkeypatch, payload, **kwargs):
     return result, client.request_json
 
 
+def _sync_call(monkeypatch, payload, **kwargs):
+    llm_core._response_cache.clear()
+    captured = {}
+
+    def fake_post(url, headers, *, json, timeout):
+        captured["json"] = json
+        request = httpx.Request(
+            "POST",
+            "http://local/v1/chat/completions",
+        )
+        return httpx.Response(200, request=request, json=payload)
+
+    monkeypatch.setattr(
+        llm_core,
+        "httpx_post_kimi_aware",
+        fake_post,
+    )
+    result = llm_core.llm_call(
+        "http://local/v1",
+        "qwen3.5:9b",
+        [{"role": "user", "content": "Return JSON."}],
+        structured_output=True,
+        **kwargs,
+    )
+    return result, captured["json"]
+
+
 def test_structured_request_uses_json_format_and_non_thinking_effort(monkeypatch):
     result, request_json = _call(
         monkeypatch,
@@ -64,6 +91,26 @@ def test_structured_response_extracts_only_complete_reasoning_json(monkeypatch):
     )
 
     assert result == '{"ok": true}'
+
+
+def test_sync_structured_request_uses_non_thinking_json_mode(monkeypatch):
+    result, request_json = _sync_call(
+        monkeypatch,
+        {
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning": 'analysis {"ok": true}',
+                },
+                "finish_reason": "stop",
+            }]
+        },
+        reasoning_effort="none",
+    )
+
+    assert result == '{"ok": true}'
+    assert request_json["response_format"] == {"type": "json_object"}
+    assert request_json["reasoning_effort"] == "none"
 
 
 def test_structured_response_rejects_truncated_reasoning(monkeypatch):

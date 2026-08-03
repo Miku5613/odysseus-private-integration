@@ -143,6 +143,8 @@ def test_prompt_is_backend_independent_and_dependency_aware():
     assert "dependency outputs" in prompt
     assert "requires_external_state=true means" in prompt
     assert "work_domains are semantic labels only" in prompt
+    assert "do not put work_domains, file types, paths" in prompt
+    assert '"authorized_workspace_files"' in prompt
 
 
 def test_prompt_rejects_non_multi_graph_assessment():
@@ -298,6 +300,79 @@ def test_planner_cannot_invent_retrieval_concepts_outside_admission():
             _multi_assessment(),
             model=model,
         )
+
+
+def test_single_source_admission_repairs_concepts_misplaced_as_sources():
+    assessment = IntentComplexityAssessment(
+        execution_class="multi_graph",
+        goals=(
+            IntentGoal(
+                id="goal_1",
+                objective="Inspect one workspace concern.",
+                work_domains=("code_inspection",),
+                requires_external_state=True,
+                requires_mutation=False,
+                retrieval_concepts=("routes",),
+            ),
+            IntentGoal(
+                id="goal_2",
+                objective="Inspect another workspace concern.",
+                work_domains=("code_inspection",),
+                requires_external_state=True,
+                requires_mutation=False,
+                retrieval_concepts=("coordinator",),
+            ),
+        ),
+        needs_planning=True,
+        missing_information=(),
+        clarification_needed=False,
+        reasoning_summary="Independent workspace goals.",
+        requested_sources=("authorized_workspace_files",),
+        excluded_sources=("public_web",),
+    )
+    payload = _valid_plan_payload()
+    payload["steps"][0]["requested_sources"] = ["routes"]
+    payload["steps"][0]["excluded_sources"] = [
+        "public_web",
+        ".txt files",
+    ]
+    payload["steps"][0]["retrieval_concepts"] = ["routes"]
+    payload["steps"][1]["requested_sources"] = ["coordinator"]
+    payload["steps"][1]["excluded_sources"] = ["public_web"]
+    payload["steps"][1]["retrieval_concepts"] = ["coordinator"]
+    payload["steps"][2]["requested_sources"] = []
+    payload["steps"][2]["excluded_sources"] = ["public_web"]
+
+    plan = plan_task_from_assessment(
+        "Inspect two independent workspace concerns.",
+        assessment,
+        model=_Model(payload),
+    )
+
+    assert plan.steps[0].requested_sources == (
+        "authorized_workspace_files",
+    )
+    assert plan.steps[1].requested_sources == (
+        "authorized_workspace_files",
+    )
+    assert plan.steps[0].excluded_sources == ("public_web",)
+
+
+def test_dependency_only_synthesis_drops_copied_external_source():
+    payload = _valid_plan_payload()
+    payload["steps"][2]["requested_sources"] = [
+        "authorized_workspace_files",
+    ]
+
+    plan = plan_task_from_assessment(
+        "Compare my project with current options.",
+        _multi_assessment(),
+        model=_Model(payload),
+    )
+
+    assert plan.steps[2].uses_dependency_state is True
+    assert plan.steps[2].requires_external_state is False
+    assert plan.steps[2].requested_sources == ()
 
 
 def test_sync_planner_exhaustion_is_bounded():

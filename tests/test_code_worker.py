@@ -4,13 +4,17 @@ import json
 
 import pytest
 
-from src.agent_runtime.code_worker import run_code_worker
+from src.agent_runtime.code_worker import (
+    _handoff_semantic_dimensions,
+    run_code_worker,
+)
 from src.agent_runtime.finalizer import (
     parse_grounded_worker_finalizer_response,
 )
 from src.agent_runtime.worker_dispatcher import builtin_worker_runners
 from src.agent_runtime.general_graph import run_code_inspection_recovery
 from src.agent_runtime.supervisor_contracts import WorkerHandoff
+from src.agent_runtime.task_contract import build_task_contract
 
 
 def test_code_worker_rejects_wrong_capability():
@@ -21,6 +25,24 @@ def test_code_worker_rejects_wrong_capability():
 
     with pytest.raises(ValueError, match="code_inspection"):
         run_code_worker(handoff, stream_factory=lambda *args, **kwargs: [])
+
+
+def test_runtime_words_do_not_invent_execution_callsite_obligation():
+    readonly = build_task_contract(
+        "Inspect the async runtime-routing implementation.",
+    )
+    callsite = build_task_contract(
+        "Show where this runtime function is invoked.",
+    )
+
+    assert not any(
+        item["kind"] == "concrete_callsite"
+        for item in readonly["obligations"]
+    )
+    assert any(
+        item["kind"] == "concrete_callsite"
+        for item in callsite["obligations"]
+    )
 
 
 def test_code_worker_requires_objective():
@@ -107,6 +129,24 @@ def test_code_worker_passes_admitted_dimensions_to_specialist_runtime():
         "coordination",
     )
     assert result.status == "partial"
+
+
+def test_recovery_preserves_explicit_responsibility_dimensions():
+    handoff = WorkerHandoff(
+        capability="code_inspection",
+        objective=(
+            "Explain its planning, coordination, and replanning "
+            "responsibilities."
+        ),
+        context={"retrieval_concepts": ["multi_graph"]},
+    )
+
+    assert _handoff_semantic_dimensions(handoff) == (
+        "multi_graph",
+        "plan",
+        "coordinat",
+        "replan",
+    )
 
 
 def test_code_worker_collects_specialist_evidence():
@@ -582,6 +622,159 @@ def test_code_inspection_recovery_reads_explicit_workspace_file_directly(
         observation.tool == "grep"
         for observation in state.observations
     )
+
+
+def test_code_inspection_recovery_expands_named_source_file_semantically(
+    tmp_path,
+):
+    source = tmp_path / "large_runtime.py"
+    source.write_text(
+        "\n".join(
+            ["import os"]
+            + [f"VALUE_{index} = {index}" for index in range(1, 450)]
+            + [
+                "async def coordinate_replanning(plan):",
+                "    if plan:",
+                "        return await revise_plan(plan)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    state = run_code_inspection_recovery(
+        (
+            "Inspect large_runtime.py and explain coordination and "
+            "replanning responsibilities."
+        ),
+        str(tmp_path),
+        semantic_terms=("coordination", "replanning"),
+    )
+
+    assert state.metrics["direct_file_inspection"] is True
+    assert state.metrics["direct_file_context_windows"] >= 1
+    assert any(
+        observation.tool == "read_file_around"
+        and "coordinate_replanning" in observation.output
+        for observation in state.observations
+    )
+
+
+def test_code_worker_certifies_exact_direct_document_read():
+    def fake_stream(*args, **kwargs):
+        yield {
+            "type": "stream_done",
+            "final_answer": "Primary evidence is incomplete.",
+        }
+
+    def fake_recovery(*args, **kwargs):
+        return SimpleNamespace(
+            task=SimpleNamespace(should_fallback=False),
+            final_answer="Direct contents of requirements.txt.",
+            observations=[
+                SimpleNamespace(
+                    tool="read_file",
+                    args={"path": "requirements.txt", "offset": 0},
+                    output=(
+                        "requirements.txt:1: fastapi\n"
+                        "requirements.txt:2: uvicorn\n"
+                        "requirements.txt:3: pytest\n"
+                    ),
+                    success=True,
+                )
+            ],
+        )
+
+    response = json.dumps({
+        "answer": "The dependencies cover serving and testing.",
+        "fulfills_objective": True,
+        "missing_requirements": [],
+        "evidence_paths": ["requirements.txt"],
+    })
+    result = run_code_worker(
+        WorkerHandoff(
+            capability="code_inspection",
+            objective="Read requirements.txt and categorize its dependencies.",
+            context={
+                "workspace": "D:/AI/odysseus",
+                "retrieval_concepts": [".txt", "requirements.txt"],
+            },
+        ),
+        stream_factory=fake_stream,
+        recovery_factory=fake_recovery,
+        finalizer_candidates=[("http://local", "model", {})],
+        finalizer_caller=lambda *args, **kwargs: response,
+    )
+
+    assert result.status == "completed"
+    assert result.data["claim_support"] == "strong"
+    assert result.data["task_fulfillment_complete"] is True
+
+
+def test_code_worker_certifies_full_direct_backend_read_but_not_import_only():
+    objective = (
+        "Inspect routes/chat_routes.py and explain the async admission "
+        "implementation."
+    )
+
+    def fake_stream(*args, **kwargs):
+        yield {
+            "type": "stream_done",
+            "final_answer": "Primary evidence is incomplete.",
+        }
+
+    def recovery(output):
+        return lambda *args, **kwargs: SimpleNamespace(
+            task=SimpleNamespace(should_fallback=False),
+            final_answer="Direct backend source contents.",
+            observations=[
+                SimpleNamespace(
+                    tool="read_file",
+                    args={"path": "routes/chat_routes.py", "offset": 0},
+                    output=output,
+                    success=True,
+                )
+            ],
+        )
+
+    response = json.dumps({
+        "answer": "The async admission function selects the runtime path.",
+        "fulfills_objective": True,
+        "missing_requirements": [],
+        "evidence_paths": ["routes/chat_routes.py"],
+    })
+    handoff = WorkerHandoff(
+        capability="code_inspection",
+        objective=objective,
+        context={
+            "workspace": "D:/AI/odysseus",
+            "retrieval_concepts": [".py", "routes"],
+        },
+    )
+    complete = run_code_worker(
+        handoff,
+        stream_factory=fake_stream,
+        recovery_factory=recovery(
+            "routes/chat_routes.py:1: import asyncio\n"
+            "routes/chat_routes.py:126: async def assess_admission(query):\n"
+            "routes/chat_routes.py:127:     if query:\n"
+            "routes/chat_routes.py:128:         return await choose_runtime(query)\n"
+        ),
+        finalizer_candidates=[("http://local", "model", {})],
+        finalizer_caller=lambda *args, **kwargs: response,
+    )
+    import_only = run_code_worker(
+        handoff,
+        stream_factory=fake_stream,
+        recovery_factory=recovery(
+            "routes/chat_routes.py:1: import asyncio\n"
+            "routes/chat_routes.py:2: from src.runtime import choose_runtime\n"
+        ),
+        finalizer_candidates=[("http://local", "model", {})],
+        finalizer_caller=lambda *args, **kwargs: response,
+    )
+
+    assert complete.status == "completed"
+    assert import_only.status == "partial"
 
 
 def test_code_worker_recovery_receives_only_step_objective_and_workspace():

@@ -13,6 +13,7 @@ from src.agent_runtime.intent_complexity import (
 )
 from src.agent_runtime.multi_graph_coordinator import (
     _RuntimeFallbackModel,
+    _without_redundant_response_steps,
     stream_multi_graph_coordinator_sse,
 )
 from src.agent_runtime.run_lifecycle import (
@@ -20,6 +21,28 @@ from src.agent_runtime.run_lifecycle import (
 )
 from src.agent_runtime.research_worker import run_research_worker
 from src.agent_runtime.supervisor_contracts import WorkerResult
+from src.agent_runtime.task_plan import PlanStep, TaskPlan
+
+
+def test_terminal_response_only_step_is_left_to_coordinator_synthesis():
+    plan = TaskPlan(
+        objective="Inspect two files and compare them.",
+        steps=(
+            PlanStep(id="a", objective="Inspect a.", requires_external_state=True),
+            PlanStep(id="b", objective="Inspect b.", requires_external_state=True),
+            PlanStep(
+                id="final",
+                objective="Produce one concise final comparison.",
+                depends_on=("a", "b"),
+                uses_dependency_state=True,
+                work_domains=("synthesis",),
+            ),
+        ),
+    )
+
+    normalized = _without_redundant_response_steps(plan)
+
+    assert [step.id for step in normalized.steps] == ["a", "b"]
 
 
 class Model:
