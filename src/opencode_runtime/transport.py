@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import threading
 from typing import Any, Iterator
 import urllib.error
@@ -189,11 +190,14 @@ class OpenCodeHttpTransport:
             },
             "parts": parts,
         }
-        if file_parts and self._uses_ollama_provider():
-            # OpenCode otherwise injects every core and MCP tool schema into
-            # the multimodal request. Ollama commonly runs local vision models
-            # with a 4K active context, which pushes the image itself out of
-            # context and triggers OpenCode's misleading media-size compaction.
+        if (
+            self._contains_current_image_part(file_parts)
+            and self._configured_context_is_below_4k(
+                str(model_id or self.config.model_id),
+            )
+        ):
+            # Suppress the tool catalogue only when this exact turn contains
+            # an image and the selected model is configured below 4096 tokens.
             payload["tools"] = {"*": False}
         status, _ = self.request_json(
             "POST",
@@ -204,6 +208,75 @@ class OpenCodeHttpTransport:
             raise OpenCodeTransportError(
                 f"OpenCode prompt admission returned HTTP {status}."
             )
+
+    @staticmethod
+    def _contains_current_image_part(
+        file_parts: tuple[dict[str, Any], ...],
+    ) -> bool:
+        """Return True only when this exact turn contains a usable image."""
+        for item in file_parts:
+            if not isinstance(item, dict):
+                continue
+            mime = str(item.get("mime") or "").strip().lower()
+            url = str(item.get("url") or "").strip()
+            if mime.startswith("image/") and url:
+                return True
+        return False
+
+    def _configured_context_is_below_4k(self, model_id: str) -> bool:
+        """Return True only when the selected model declares num_ctx < 4096."""
+        selected_model = str(model_id or "").strip()
+        base_url = str(self.config.provider_base_url or "").strip()
+        if not selected_model or not base_url:
+            return False
+
+        parsed = urllib.parse.urlparse(base_url)
+        if not parsed.scheme or not parsed.hostname:
+            return False
+
+        port = parsed.port
+        authority = parsed.hostname
+        if port is not None:
+            authority += f":{port}"
+        root_url = f"{parsed.scheme}://{authority}"
+
+        request = urllib.request.Request(
+            root_url + "/api/show",
+            data=json.dumps({"model": selected_model}).encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=min(5.0, self.config.request_timeout_seconds),
+            ) as response:
+                body = response.read().decode("utf-8", errors="replace")
+            value = json.loads(body)
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            json.JSONDecodeError,
+        ):
+            return False
+
+        parameters = str(
+            value.get("parameters") if isinstance(value, dict) else ""
+        )
+        match = re.search(
+            r"(?im)^\s*num_ctx\s+(\d+)\s*$",
+            parameters,
+        )
+        if not match:
+            return False
+
+        return int(match.group(1)) < 4096
 
     def _uses_ollama_provider(self) -> bool:
         value = str(self.config.provider_base_url or "").strip()
