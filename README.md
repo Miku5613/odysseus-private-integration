@@ -6,6 +6,9 @@
 > This project contains and modifies software licensed under the GNU Affero
 > General Public License v3.0. See LICENSE and the upstream attribution notices.
 
+See [NOTICE.md](NOTICE.md) for upstream attribution and information about this modified fork.
+
+
 # Odysseus Runtime Upgrade
 
 This version preserves the upstream Odysseus workspace and adds two independent Agent runtime choices:
