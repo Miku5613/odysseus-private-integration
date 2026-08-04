@@ -1,40 +1,160 @@
 # Security Policy
 
-Odysseus is a self-hosted AI workspace with privileged local capabilities. Please do not run it as a public, unauthenticated service.
+This repository is my personal/private version of Odysseus.
 
-## Supported Versions
+It contains custom local integrations, runtime changes, MCP connections, model-provider configuration, OpenCode support, and personal workflow features. These additions may grant models access to local tools, files, services, or private data.
 
-Security fixes are handled on the default branch until formal releases are cut.
+This repository should not be treated as a hardened public cloud service.
+
+## Original Project
+
+General security issues affecting the public Odysseus project should be reported to the original repository:
+
+https://github.com/pewdiepie-archdaemon/odysseus
+
+Use the upstream project's security policy and private reporting process for vulnerabilities that are not specific to this fork.
+
+Fork-specific vulnerabilities may be reported through this repository's private GitHub security reporting features when available.
+
+## Supported Version
+
+Security fixes for this fork are handled on the default branch:
+
+- **`Stable-Runtime`**
+
+No formal long-term support or release-version policy is currently provided.
 
 ## Deployment Guidance
 
+- Do not expose Odysseus directly to the public internet without authentication and network protection.
 - Keep `AUTH_ENABLED=true` for any network-accessible deployment.
 - Keep `LOCALHOST_BYPASS=false` outside local development.
-- Set `SECURE_COOKIES=true` when Odysseus is served through HTTPS by a trusted reverse proxy or private access gateway.
+- Set `SECURE_COOKIES=true` when using HTTPS through a trusted reverse proxy or private access gateway.
 - Use HTTPS when exposing the app beyond localhost.
-- Put the authenticated Odysseus web/API entrypoint behind a trusted reverse proxy or private access layer such as Cloudflare Access, Tailscale, or a VPN.
-- Keep ChromaDB, SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model/provider APIs internal-only.
-- Protect `.env`, `data/`, `logs/`, uploads, generated media, backups, auth/session files, database files, API keys, and model/provider tokens.
-- Disable open signup unless you intentionally want new accounts.
-- Keep demo/test users non-admin, and remove them entirely on serious deployments.
-- Give admin accounts strong passwords and enable 2FA where possible.
-- Leave high-risk agent tools restricted to admins: shell, Python, file read/write, email send/read, MCP, app API, task/skill/memory management, settings, tokens, and model serving.
-- Rotate API keys, webhook secrets, and Odysseus API tokens if they appear in logs, screenshots, demos, or shared chats.
-- Treat shell, model-serving, MCP, email, calendar, and vault features as privileged admin functionality.
-- Common internal-only ports are Odysseus `7000`, SearXNG `8080`, ntfy `8091`, ChromaDB `8100`, Ollama `11434`, and local model/provider APIs such as `8000-8020`.
+- Prefer a trusted reverse proxy, VPN, Tailscale, Cloudflare Access, or another private access layer.
+- Keep ChromaDB, SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model-provider APIs internal-only.
+- Disable open signup unless new accounts are intentionally allowed.
+- Use strong passwords for administrator accounts and enable multi-factor authentication where supported.
+- Remove test and demo users from serious deployments.
 
-## Publishing A Fork
+Common internal-only ports may include:
 
-Before pushing a public fork, run:
+- Odysseus: `7000`
+- SearXNG: `8080`
+- ntfy: `8091`
+- ChromaDB: `8100`
+- Ollama: `11434`
+- local model-provider APIs: commonly `8000-8020`
 
-```bash
+## Privileged Features
+
+Treat the following as privileged functionality:
+
+- shell execution;
+- Python execution;
+- file read and write tools;
+- MCP servers;
+- OpenCode runtime tools;
+- email and calendar access;
+- Obsidian or vault access;
+- application API tools;
+- task, skill, and memory management;
+- model-serving controls;
+- authentication and token management;
+- settings changes;
+- local database access.
+
+Do not assume a tool call is safe simply because the model is running locally.
+
+Review:
+
+- tool permissions;
+- MCP server configuration;
+- allowed workspace roots;
+- writable directories;
+- model-provider endpoints;
+- authentication settings;
+- exposed ports;
+- session and token storage.
+
+## Sensitive Files and Data
+
+Protect and never publish:
+
+- `.env`;
+- `data/`;
+- `logs/`;
+- uploads;
+- generated media;
+- backups;
+- authentication and session files;
+- local databases;
+- API keys;
+- webhook secrets;
+- model-provider tokens;
+- password hashes;
+- personal documents;
+- exported conversations;
+- private project files.
+
+Rotate any key, token, or secret that appears in logs, screenshots, demos, shared chats, or repository history.
+
+## Before Publishing This Fork
+
+Before pushing publicly, review the working tree and scan tracked files for common secrets.
+
+```powershell
 git status --short
-git check-ignore -v .env data/auth.json data/app.db logs/compound.log odysseus.db
-git grep -n -I -E "(sk-[A-Za-z0-9_-]{20,}|xox[baprs]-|AIza[0-9A-Za-z_-]{20,}|Bearer [A-Za-z0-9._~+/-]{20,})" -- . ':!static/lib/**' ':!package-lock.json'
+
+git check-ignore -v `
+    ".env" `
+    "data/auth.json" `
+    "data/app.db" `
+    "logs/compound.log" `
+    "odysseus.db"
+
+git grep -n -I -E `
+    "(sk-[A-Za-z0-9_-]{20,}|xox[baprs]-|AIza[0-9A-Za-z_-]{20,}|Bearer [A-Za-z0-9._~+/-]{20,})" `
+    -- . `
+    ":(exclude)static/lib/**" `
+    ":(exclude)package-lock.json"
 ```
 
-Only `.env.example`, docs, source, tests, and static assets should be committed. Never commit live `.env` values, `data/` contents, local databases, uploaded files, generated media, logs, backups, auth/session files, API keys, model/provider tokens, password hashes, or personal documents.
+These checks are useful but are not a complete secret audit.
 
-## Reporting
+Only commit files intentionally meant to be public, such as:
 
-Please report vulnerabilities privately via GitHub security advisories if available, or by opening a minimal issue that does not disclose exploit details.
+- `.env.example`;
+- documentation;
+- source code;
+- tests;
+- static assets;
+- public configuration examples.
+
+Do not commit live configuration, runtime data, local databases, generated content, logs, backups, authentication files, tokens, or personal documents.
+
+## Fork-Specific Scope
+
+This fork may differ significantly from upstream in areas involving:
+
+- OpenCode runtime behavior;
+- model-provider compatibility;
+- context handling;
+- tool calling;
+- MCP integrations;
+- Obsidian and local knowledge access;
+- Windows-native execution;
+- local automation;
+- personal data workflows.
+
+A vulnerability caused by one of these fork-specific changes should be reported here rather than upstream unless the same issue also affects the original project.
+
+## Reporting a Vulnerability
+
+For fork-specific issues:
+
+1. Use this repository's private GitHub vulnerability-reporting or Security Advisory feature when available.
+2. Do not publish exploit details, credentials, personal information, or working proof-of-concept attacks in a public issue.
+3. If private reporting is unavailable, open a minimal public issue requesting a private contact channel without disclosing sensitive details.
+
+For issues affecting the original public Odysseus project, report them through the upstream repository's security process.
