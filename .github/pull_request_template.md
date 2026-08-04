@@ -1,10 +1,12 @@
+> Pull requests to this repository are limited to invited collaborators. Public users should open an Issue for fork-specific reports. General-purpose contributions should be submitted to the original Odysseus repository.
+
 ## Summary
 
 <!-- One paragraph: what changed and why. "Fixed bug" and "Added feature" are not summaries. -->
 
 ## Target branch
 
-- [ ] This PR targets **`dev`**, not `main`. All PRs land in `dev`; `main` is curated by the maintainer at each release. If your PR is on `main` by accident, click "Edit" on this PR and change the base.
+- [ ] This PR targets **`Stable-Runtime`**, the default branch of this personal fork.
 
 ## Linked Issue
 
@@ -24,8 +26,8 @@ Fixes #
 
 ## Checklist
 
-- [ ] I searched [open issues](https://github.com/odysseus-dev/odysseus/issues) and [open PRs](https://github.com/odysseus-dev/odysseus/pulls) — this is not a duplicate.
-- [ ] This PR targets `dev`
+- [ ] I searched [open issues](https://github.com/Miku5613/odysseus-private-integration/issues) and [open PRs](https://github.com/Miku5613/odysseus-private-integration/pulls) — this is not a duplicate.
+- [ ] This PR targets `Stable-Runtime`
 - [ ] My changes are limited to the scope described above — no unrelated refactors or whitespace changes mixed in.
 - [ ] I actually ran the app (`docker compose up` or `uvicorn app:app`) and verified the change works end-to-end. Type-checks and unit tests are not enough.
 
