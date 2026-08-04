@@ -117,6 +117,7 @@ def test_transport_suppresses_tools_for_ollama_media_turns():
     transport.request_json = lambda method, path, payload=None, **_: (
         payloads.append(payload) or (204, None)
     )
+    transport._configured_context_is_below_4k = lambda model_id: True
 
     transport.submit_prompt(
         "ses_image",
