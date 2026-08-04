@@ -2,7 +2,7 @@
 >
 > This repository is a personal modified distribution of Odysseus.
 > Public access is provided for evaluation, personal use, and issue reporting.
-> Pull requests are currently disabled. Development is maintained by the repository owner.
+> Public pull requests are not accepted for this personal fork. Pull requests may be opened only by invited collaborators. Public Issues remain enabled for fork-specific bug reports, questions, and maintenance concerns. General-purpose contributions should be submitted to the original Odysseus repository. Development is maintained by the repository owner.
 > This project contains and modifies software licensed under the GNU Affero
 > General Public License v3.0. See LICENSE and the upstream attribution notices.
 

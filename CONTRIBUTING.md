@@ -12,7 +12,9 @@ https://github.com/pewdiepie-archdaemon/odysseus
 
 Please follow the contribution rules, branch model, issue process, and pull-request requirements defined by the upstream project.
 
-Changes submitted here should normally be limited to this fork's own integrations, private workflow, compatibility fixes, or maintenance needs.
+Public pull requests are not accepted in this repository. Pull requests are limited to invited collaborators. Public Issues remain open for fork-specific bug reports, questions, and maintenance concerns.
+
+Changes submitted by collaborators should normally be limited to this fork's own integrations, private workflow, compatibility fixes, or maintenance needs.
 
 ## Repository Purpose
 
@@ -42,6 +44,7 @@ Upstream changes are normally reviewed on a temporary integration branch before 
 
 Before proposing a change to this fork:
 
+- Public users should open Issues for fork-specific reports and questions; pull requests are reserved for invited collaborators.
 - Confirm that the change is specific to this repository.
 - For broadly useful public improvements, prefer contributing upstream.
 - Keep changes focused and easy to review.
@@ -96,6 +99,8 @@ docker compose logs --tail=120 odysseus
 Mention which checks were run. If a check could not be run, state that clearly.
 
 ## Pull Requests
+
+Pull requests to this repository are limited to invited collaborators. Public users should open an Issue for fork-specific bug reports, questions, or maintenance concerns. General-purpose code contributions should be submitted to the original Odysseus repository.
 
 A useful pull request should include:
 
