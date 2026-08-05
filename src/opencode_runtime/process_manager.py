@@ -16,7 +16,7 @@ import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
-from src.chat_helpers import is_vision_model
+from src.chat_helpers import model_supports_vision
 
 from .config import OpenCodeRuntimeConfig
 
@@ -265,6 +265,14 @@ class OpenCodeServerManager:
                 providers = {}
                 payload["provider"] = providers
 
+            vision_capability_by_model = {
+                candidate: model_supports_vision(
+                    candidate,
+                    str(self.config.provider_base_url or ""),
+                )
+                for candidate in model_ids
+            }
+
             options: dict[str, Any] = {
                 "baseURL": str(
                     self.config.provider_base_url
@@ -292,14 +300,14 @@ class OpenCodeServerManager:
                         "modalities": {
                             "input": (
                                 ["text", "image"]
-                                if is_vision_model(candidate)
+                                if vision_capability_by_model[candidate]
                                 else ["text"]
                             ),
                             "output": ["text"],
                         },
                         **(
                             {"attachment": True}
-                            if is_vision_model(candidate)
+                            if vision_capability_by_model[candidate]
                             else {}
                         ),
                         **(
@@ -310,7 +318,7 @@ class OpenCodeServerManager:
                             }
                             if (
                                 is_ollama_provider
-                                and is_vision_model(candidate)
+                                and vision_capability_by_model[candidate]
                             )
                             else {}
                         ),

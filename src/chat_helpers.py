@@ -83,6 +83,8 @@ def is_vision_model(model_name: str) -> bool:
 _PROVIDER_FINGERPRINT_TTL = 60.0
 # (host, port) -> (models_list | None, expiry); list = LM Studio, None = not LM Studio.
 _lmstudio_models_cache: dict = {}
+# (host, port, model) -> (vision | None, expiry)
+_ollama_vision_cache: dict = {}
 
 
 def _is_local_host(host: Optional[str]) -> bool:
@@ -156,17 +158,72 @@ def lmstudio_supports_vision(url: str, model: str) -> Optional[bool]:
     return None
 
 
+def ollama_supports_vision(url: str, model: str) -> Optional[bool]:
+    """Read `model`'s advertised capabilities from Ollama's native /api/show.
+
+    Returns True/False when the endpoint is Ollama and reports capabilities,
+    otherwise None so callers can fall back to name-based detection.
+    """
+    if not model:
+        return None
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if not _is_local_host(host):
+        return None
+
+    key = (host.lower(), parsed.port, model.strip().lower())
+    now = time.time()
+    cached = _ollama_vision_cache.get(key)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+
+    authority = host if parsed.port is None else f"{host}:{parsed.port}"
+    root_url = f"{parsed.scheme or 'http'}://{authority}"
+    try:
+        response = httpx.post(
+            root_url + "/api/show",
+            json={"model": model.strip()},
+            timeout=1.5,
+        )
+    except Exception:
+        return None
+
+    try:
+        payload = response.json() if response.is_success else {}
+    except Exception:
+        payload = {}
+
+    capabilities = payload.get("capabilities")
+    if not isinstance(capabilities, list):
+        # Do not cache transient/non-Ollama responses.
+        return None
+
+    advertised = any(
+        str(item or "").strip().lower() == "vision"
+        for item in capabilities
+    )
+    _ollama_vision_cache[key] = (
+        advertised,
+        now + _PROVIDER_FINGERPRINT_TTL,
+    )
+    return advertised
+
+
 def model_supports_vision(model_name: str, endpoint_url: str = "") -> bool:
-    """Whether a model accepts images, using the endpoint's reported
-    capability when available (LM Studio) and falling back to name-based
-    detection otherwise."""
+    """Whether a model accepts images.
+
+    Prefer provider-advertised capabilities for local endpoints (LM Studio and
+    Ollama), then fall back to the existing name-based detector.
+    """
     if endpoint_url:
-        try:
-            advertised = lmstudio_supports_vision(endpoint_url, model_name or "")
-        except Exception:
-            advertised = None
-        if advertised is not None:
-            return advertised
+        for detector in (lmstudio_supports_vision, ollama_supports_vision):
+            try:
+                advertised = detector(endpoint_url, model_name or "")
+            except Exception:
+                advertised = None
+            if advertised is not None:
+                return advertised
     return is_vision_model(model_name)
 
 

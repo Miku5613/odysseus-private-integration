@@ -5,7 +5,8 @@ names. If one isn't recognized as vision-capable, the image attachment is
 stripped from the request before it reaches the model, so it silently never
 sees the picture.
 """
-from src.chat_helpers import is_vision_model
+from src import chat_helpers
+from src.chat_helpers import is_vision_model, model_supports_vision
 
 
 def test_recognizes_local_and_hosted_vision_models():
@@ -46,3 +47,45 @@ def test_new_keywords_do_not_overmatch_text_models():
     # The added families must not flag their text-only siblings.
     for name in ["gemma2:9b", "gemma:7b", "llama3.3", "mistral-small", "phi-3-mini"]:
         assert not is_vision_model(name), f"{name!r} should not be flagged as vision"
+
+
+class _FakeResponse:
+    is_success = True
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_ollama_advertised_vision_capability_overrides_model_name(monkeypatch):
+    chat_helpers._ollama_vision_cache.clear()
+
+    def fake_post(url, *, json, timeout):
+        assert url == "http://localhost:11434/api/show"
+        assert json == {"model": "qwen3.5:9b"}
+        return _FakeResponse({
+            "capabilities": ["completion", "vision", "tools", "thinking"],
+        })
+
+    monkeypatch.setattr(chat_helpers.httpx, "post", fake_post)
+
+    assert model_supports_vision(
+        "qwen3.5:9b",
+        "http://localhost:11434/v1",
+    )
+
+
+def test_ollama_advertised_text_only_capability_overrides_name_hint(monkeypatch):
+    chat_helpers._ollama_vision_cache.clear()
+
+    def fake_post(url, *, json, timeout):
+        return _FakeResponse({"capabilities": ["completion"]})
+
+    monkeypatch.setattr(chat_helpers.httpx, "post", fake_post)
+
+    assert not model_supports_vision(
+        "custom-vision-name",
+        "http://localhost:11434/v1",
+    )
