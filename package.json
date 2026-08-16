@@ -4,6 +4,6 @@
     "url": "https://github.com/Miku5613/odysseus-private-integration.git"
   },
   "devDependencies": {
-    "@antithesishq/bombadil": "^0.6.1"
+    "@antithesishq/bombadil": "^0.7.0"
   }
 }
